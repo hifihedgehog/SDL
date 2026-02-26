@@ -30,6 +30,7 @@
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
+#include "SDL_hidapi_switch2_usb.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_SWITCH2
 
@@ -92,12 +93,7 @@ typedef struct
     SDL_HIDAPI_Device *device;
     SDL_Joystick *joystick;
 
-    SDL_LibUSBContext *libusb;
-    libusb_device_handle *device_handle;
-    bool interface_claimed;
-    Uint8 interface_number;
-    Uint8 out_endpoint;
-    Uint8 in_endpoint;
+    Switch2_BulkUSB bulk;
 
     Uint64 rumble_timestamp;
     Uint32 rumble_seq;
@@ -156,48 +152,12 @@ static void ParseStickCalibration(Switch2_StickCalibration *stick_data, const Ui
 
 static int SendBulkData(SDL_DriverSwitch2_Context *ctx, const Uint8 *data, unsigned size)
 {
-    int transferred;
-    int res = ctx->libusb->bulk_transfer(ctx->device_handle,
-                ctx->out_endpoint,
-                (Uint8 *)data,
-                size,
-                &transferred,
-                1000);
-    if (res < 0) {
-        return res;
-    }
-    return transferred;
+    return Switch2_BulkUSB_Write(&ctx->bulk, data, size, 1000);
 }
 
 static int RecvBulkData(SDL_DriverSwitch2_Context *ctx, Uint8 *data, unsigned size)
 {
-    int transferred;
-    int total_transferred = 0;
-    int res;
-
-    while (size > 0) {
-        unsigned current_read = size;
-        if (current_read > 64) {
-            current_read = 64;
-        }
-        res = ctx->libusb->bulk_transfer(ctx->device_handle,
-                    ctx->in_endpoint,
-                    data,
-                    current_read,
-                    &transferred,
-                    100);
-        if (res < 0) {
-            return res;
-        }
-        total_transferred += transferred;
-        size -= transferred;
-        data += current_read;
-        if ((unsigned) transferred < current_read) {
-            break;
-        }
-    }
-
-    return total_transferred;
+    return Switch2_BulkUSB_Read(&ctx->bulk, data, size);
 }
 
 static void MapJoystickAxis(Uint64 timestamp, SDL_Joystick *joystick, Uint8 axis, const Switch2_AxisCalibration *calib, float value, bool invert)
@@ -326,68 +286,14 @@ static bool HIDAPI_DriverSwitch2_InitBluetooth(SDL_HIDAPI_Device *device)
     return SDL_SetError("Nintendo Switch2 controllers not supported over Bluetooth");
 }
 
-static bool FindBulkEndpoints(SDL_LibUSBContext *libusb, libusb_device_handle *handle, Uint8 *bInterfaceNumber, Uint8 *out_endpoint, Uint8 *in_endpoint)
-{
-    struct libusb_config_descriptor *config;
-    int found = 0;
-
-    if (libusb->get_config_descriptor(libusb->get_device(handle), 0, &config) != 0) {
-         return false;
-    }
-
-    for (int i = 0; i < config->bNumInterfaces; i++) {
-        const struct libusb_interface *iface = &config->interface[i];
-        for (int j = 0; j < iface->num_altsetting; j++) {
-            const struct libusb_interface_descriptor *altsetting = &iface->altsetting[j];
-            if (altsetting->bInterfaceNumber == 1) {
-                for (int k = 0; k < altsetting->bNumEndpoints; k++) {
-                    const struct libusb_endpoint_descriptor *ep = &altsetting->endpoint[k];
-                    if ((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK) {
-                        *bInterfaceNumber = altsetting->bInterfaceNumber;
-                        if ((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT) {
-                            *out_endpoint = ep->bEndpointAddress;
-                            found |= 1;
-                        }
-                        if ((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN) {
-                            *in_endpoint = ep->bEndpointAddress;
-                            found |= 2;
-                        }
-                        if (found == 3) {
-                            libusb->free_config_descriptor(config);
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    libusb->free_config_descriptor(config);
-    return false;
-}
-
 static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
 {
     SDL_DriverSwitch2_Context *ctx = (SDL_DriverSwitch2_Context *)device->context;
+    int res;
 
-    if (!SDL_InitLibUSB(&ctx->libusb)) {
+    if (!Switch2_BulkUSB_Open(&ctx->bulk, device)) {
         return false;
     }
-
-    ctx->device_handle = (libusb_device_handle *)SDL_GetPointerProperty(SDL_hid_get_properties(device->dev), SDL_PROP_HIDAPI_LIBUSB_DEVICE_HANDLE_POINTER, NULL);
-    if (!ctx->device_handle) {
-        return SDL_SetError("Couldn't get libusb device handle");
-    }
-
-    if (!FindBulkEndpoints(ctx->libusb, ctx->device_handle, &ctx->interface_number, &ctx->out_endpoint, &ctx->in_endpoint)) {
-        return SDL_SetError("Couldn't find bulk endpoints");
-    }
-
-    ctx->libusb->set_auto_detach_kernel_driver(ctx->device_handle, true);
-    int res = ctx->libusb->claim_interface(ctx->device_handle, ctx->interface_number);
-    if (res < 0) {
-        return SDL_SetError("Couldn't claim interface %d: %d\n", ctx->interface_number, res);
-    }
-    ctx->interface_claimed = true;
 
     const Uint8 *init_sequence[] = {
         (Uint8[]) { // Unknown purpose
@@ -429,6 +335,16 @@ static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
     };
 
     unsigned char calibration_data[0x40] = {0};
+
+    // Send init sequence before calibration reads — the controller may not
+    // respond to flash reads until it has received these commands.
+    for (int i = 0; init_sequence[i]; i++) {
+        res = SendBulkData(ctx, init_sequence[i], init_sequence[i][5] + 8);
+        if (res < 0) {
+            return SDL_SetError("Couldn't send initialization data: %d\n", res);
+        }
+        RecvBulkData(ctx, calibration_data, 0x40);
+    }
 
     res = ReadFlashBlock(ctx, 0x13000, calibration_data);
     if (res < 0) {
@@ -493,14 +409,6 @@ static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
         SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't read user calibration data: %d", res);
     } else if (calibration_data[0] == 0xb2 && calibration_data[1] == 0xa1) {
         ParseStickCalibration(&ctx->right_stick, &calibration_data[2]);
-    }
-
-    for (int i = 0; init_sequence[i]; i++) {
-        res = SendBulkData(ctx, init_sequence[i], init_sequence[i][5] + 8);
-        if (res < 0) {
-            return SDL_SetError("Couldn't send initialization data: %d\n", res);
-        }
-        RecvBulkData(ctx, calibration_data, 0x40);
     }
 
     return true;
@@ -1297,14 +1205,7 @@ static void HIDAPI_DriverSwitch2_FreeDevice(SDL_HIDAPI_Device *device)
     SDL_DriverSwitch2_Context *ctx = (SDL_DriverSwitch2_Context *)device->context;
 
     if (ctx) {
-        if (ctx->interface_claimed) {
-            ctx->libusb->release_interface(ctx->device_handle, ctx->interface_number);
-            ctx->interface_claimed = false;
-        }
-        if (ctx->libusb) {
-            SDL_QuitLibUSB();
-            ctx->libusb = NULL;
-        }
+        Switch2_BulkUSB_Close(&ctx->bulk);
     }
 }
 

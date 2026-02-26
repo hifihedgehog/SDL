@@ -1064,10 +1064,28 @@ bool SDL_HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_id,
             vendor_id == USB_VENDOR_NINTENDO && product_id == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER) {
             return true;
         }
+#ifdef SDL_PLATFORM_WIN32
+        // On Windows, libusb can't access HID interfaces owned by the Windows
+        // HID driver.  Route composite devices (Switch 2) to the platform HID
+        // backend for input; their drivers open WinUSB separately for bulk I/O.
+        // The GameCube adapter is purely vendor-specific (no HID) so it stays.
+        if (RequiresLibUSB(vendor_id, product_id) &&
+            !(vendor_id == USB_VENDOR_NINTENDO && product_id == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER)) {
+            return true;
+        }
+#endif
     } else {
+#ifdef SDL_PLATFORM_WIN32
+        // On Windows, keep RequiresLibUSB devices in the platform backend —
+        // libusb can't claim HID interfaces from the Windows HID driver.
+        if (vendor_id == USB_VENDOR_NINTENDO && product_id == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER) {
+            return true;
+        }
+#else
         if (RequiresLibUSB(vendor_id, product_id)) {
             return true;
         }
+#endif
     }
 
     // See if there are any devices we should skip in enumeration
