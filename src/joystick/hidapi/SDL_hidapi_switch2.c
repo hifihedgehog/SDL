@@ -31,6 +31,18 @@
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
 
+#ifdef SDL_PLATFORM_WIN32
+#include <windows.h>
+#include <setupapi.h>
+#include <winusb.h>
+#include <initguid.h>
+// DeviceInterfaceGUID from the Switch 2's MS OS 2.0 descriptors (Interface 1)
+DEFINE_GUID(GUID_DEVINTERFACE_SWITCH2,
+    0x6F13725E, 0xEF0E, 0x4FD3, 0xAE, 0x5F, 0xB2, 0xDE, 0x98, 0x9E, 0xC8, 0x25);
+#pragma comment(lib, "winusb.lib")
+#pragma comment(lib, "setupapi.lib")
+#endif
+
 #ifdef SDL_JOYSTICK_HIDAPI_SWITCH2
 
 #define RUMBLE_INTERVAL 12
@@ -99,6 +111,15 @@ typedef struct
     Uint8 out_endpoint;
     Uint8 in_endpoint;
 
+#ifdef SDL_PLATFORM_WIN32
+    // WinUSB handle for bulk I/O on Interface 1 (vendor-specific)
+    HANDLE winusb_file_handle;
+    WINUSB_INTERFACE_HANDLE winusb_handle;
+    UCHAR winusb_out_pipe;
+    UCHAR winusb_in_pipe;
+    bool use_winusb;
+#endif
+
     Uint64 rumble_timestamp;
     Uint32 rumble_seq;
     Uint16 rumble_hi_amp;
@@ -156,6 +177,35 @@ static void ParseStickCalibration(Switch2_StickCalibration *stick_data, const Ui
 
 static int SendBulkData(SDL_DriverSwitch2_Context *ctx, const Uint8 *data, unsigned size)
 {
+#ifdef SDL_PLATFORM_WIN32
+    if (ctx->use_winusb) {
+        ULONG transferred = 0;
+        OVERLAPPED ov;
+        SDL_memset(&ov, 0, sizeof(ov));
+        ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!ov.hEvent) {
+            return -1;
+        }
+        if (!WinUsb_WritePipe(ctx->winusb_handle, ctx->winusb_out_pipe,
+                              (PUCHAR)data, size, &transferred, &ov)) {
+            if (GetLastError() == ERROR_IO_PENDING) {
+                if (WaitForSingleObject(ov.hEvent, 1000) == WAIT_OBJECT_0) {
+                    WinUsb_GetOverlappedResult(ctx->winusb_handle, &ov, &transferred, FALSE);
+                } else {
+                    WinUsb_AbortPipe(ctx->winusb_handle, ctx->winusb_out_pipe);
+                    WaitForSingleObject(ov.hEvent, 100);
+                    CloseHandle(ov.hEvent);
+                    return -7;
+                }
+            } else {
+                CloseHandle(ov.hEvent);
+                return -1;
+            }
+        }
+        CloseHandle(ov.hEvent);
+        return (int)transferred;
+    }
+#endif
     int transferred;
     int res = ctx->libusb->bulk_transfer(ctx->device_handle,
                 ctx->out_endpoint,
@@ -171,6 +221,48 @@ static int SendBulkData(SDL_DriverSwitch2_Context *ctx, const Uint8 *data, unsig
 
 static int RecvBulkData(SDL_DriverSwitch2_Context *ctx, Uint8 *data, unsigned size)
 {
+#ifdef SDL_PLATFORM_WIN32
+    if (ctx->use_winusb) {
+        ULONG total_transferred = 0;
+        while (size > 0) {
+            unsigned current_read = size;
+            if (current_read > 64) {
+                current_read = 64;
+            }
+            ULONG transferred = 0;
+            OVERLAPPED ov;
+            SDL_memset(&ov, 0, sizeof(ov));
+            ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+            if (!ov.hEvent) {
+                return -1;
+            }
+            if (!WinUsb_ReadPipe(ctx->winusb_handle, ctx->winusb_in_pipe,
+                                 data, current_read, &transferred, &ov)) {
+                if (GetLastError() == ERROR_IO_PENDING) {
+                    if (WaitForSingleObject(ov.hEvent, 100) == WAIT_OBJECT_0) {
+                        WinUsb_GetOverlappedResult(ctx->winusb_handle, &ov, &transferred, FALSE);
+                    } else {
+                        WinUsb_AbortPipe(ctx->winusb_handle, ctx->winusb_in_pipe);
+                        WaitForSingleObject(ov.hEvent, 100);
+                        CloseHandle(ov.hEvent);
+                        return -7;
+                    }
+                } else {
+                    CloseHandle(ov.hEvent);
+                    return -1;
+                }
+            }
+            CloseHandle(ov.hEvent);
+            total_transferred += transferred;
+            size -= transferred;
+            data += current_read;
+            if (transferred < current_read) {
+                break;
+            }
+        }
+        return (int)total_transferred;
+    }
+#endif
     int transferred;
     int total_transferred = 0;
     int res;
@@ -365,10 +457,112 @@ static bool FindBulkEndpoints(SDL_LibUSBContext *libusb, libusb_device_handle *h
     return false;
 }
 
+
+#ifdef SDL_PLATFORM_WIN32
+static bool HIDAPI_DriverSwitch2_InitWinUSB(SDL_DriverSwitch2_Context *ctx)
+{
+    HDEVINFO dev_info;
+    SP_DEVICE_INTERFACE_DATA iface_data;
+    SP_DEVICE_INTERFACE_DETAIL_DATA_W *detail = NULL;
+    DWORD required_size = 0;
+
+    dev_info = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_SWITCH2, NULL, NULL,
+                                     DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (dev_info == INVALID_HANDLE_VALUE) {
+        return SDL_SetError("Couldn't enumerate WinUSB devices");
+    }
+
+    iface_data.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+    if (!SetupDiEnumDeviceInterfaces(dev_info, NULL, &GUID_DEVINTERFACE_SWITCH2, 0, &iface_data)) {
+        SetupDiDestroyDeviceInfoList(dev_info);
+        return SDL_SetError("No WinUSB device interface found");
+    }
+
+    SetupDiGetDeviceInterfaceDetailW(dev_info, &iface_data, NULL, 0, &required_size, NULL);
+    detail = (SP_DEVICE_INTERFACE_DETAIL_DATA_W *)SDL_malloc(required_size);
+    if (!detail) {
+        SetupDiDestroyDeviceInfoList(dev_info);
+        return false;
+    }
+    detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+
+    if (!SetupDiGetDeviceInterfaceDetailW(dev_info, &iface_data, detail, required_size, NULL, NULL)) {
+        SDL_free(detail);
+        SetupDiDestroyDeviceInfoList(dev_info);
+        return SDL_SetError("Couldn't get WinUSB device path");
+    }
+
+    ctx->winusb_file_handle = CreateFileW(detail->DevicePath,
+                                           GENERIC_READ | GENERIC_WRITE,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                           NULL, OPEN_EXISTING,
+                                           FILE_FLAG_OVERLAPPED, NULL);
+    SDL_free(detail);
+    SetupDiDestroyDeviceInfoList(dev_info);
+
+    if (ctx->winusb_file_handle == INVALID_HANDLE_VALUE) {
+        return SDL_SetError("Couldn't open WinUSB device");
+    }
+
+    if (!WinUsb_Initialize(ctx->winusb_file_handle, &ctx->winusb_handle)) {
+        CloseHandle(ctx->winusb_file_handle);
+        ctx->winusb_file_handle = INVALID_HANDLE_VALUE;
+        return SDL_SetError("WinUsb_Initialize failed");
+    }
+
+    // Find bulk endpoints on Interface 1
+    USB_INTERFACE_DESCRIPTOR iface_desc;
+    if (!WinUsb_QueryInterfaceSettings(ctx->winusb_handle, 0, &iface_desc)) {
+        WinUsb_Free(ctx->winusb_handle);
+        CloseHandle(ctx->winusb_file_handle);
+        ctx->winusb_file_handle = INVALID_HANDLE_VALUE;
+        return SDL_SetError("Couldn't query WinUSB interface");
+    }
+
+    int found = 0;
+    for (UCHAR k = 0; k < iface_desc.bNumEndpoints; k++) {
+        WINUSB_PIPE_INFORMATION pipe_info;
+        if (WinUsb_QueryPipe(ctx->winusb_handle, 0, k, &pipe_info)) {
+            if (pipe_info.PipeType == UsbdPipeTypeBulk) {
+                if (pipe_info.PipeId & 0x80) {
+                    ctx->winusb_in_pipe = pipe_info.PipeId;
+                    found |= 2;
+                } else {
+                    ctx->winusb_out_pipe = pipe_info.PipeId;
+                    found |= 1;
+                }
+            }
+        }
+    }
+    if (found != 3) {
+        WinUsb_Free(ctx->winusb_handle);
+        CloseHandle(ctx->winusb_file_handle);
+        ctx->winusb_file_handle = INVALID_HANDLE_VALUE;
+        return SDL_SetError("Couldn't find bulk endpoints via WinUSB");
+    }
+
+    // Flush any stale data
+    WinUsb_FlushPipe(ctx->winusb_handle, ctx->winusb_in_pipe);
+    WinUsb_FlushPipe(ctx->winusb_handle, ctx->winusb_out_pipe);
+
+    ctx->use_winusb = true;
+    return true;
+}
+#endif
+
 static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
 {
     SDL_DriverSwitch2_Context *ctx = (SDL_DriverSwitch2_Context *)device->context;
+    int res;
 
+#ifdef SDL_PLATFORM_WIN32
+    // On Windows, the platform HID backend handles input on Interface 0.
+    // Use WinUSB directly for bulk I/O on Interface 1 (init + calibration).
+    // The controller's MS OS 2.0 descriptors bind WinUSB automatically.
+    if (!HIDAPI_DriverSwitch2_InitWinUSB(ctx)) {
+        return false;
+    }
+#else
     if (!SDL_InitLibUSB(&ctx->libusb)) {
         return false;
     }
@@ -383,11 +577,12 @@ static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
     }
 
     ctx->libusb->set_auto_detach_kernel_driver(ctx->device_handle, true);
-    int res = ctx->libusb->claim_interface(ctx->device_handle, ctx->interface_number);
+    res = ctx->libusb->claim_interface(ctx->device_handle, ctx->interface_number);
     if (res < 0) {
         return SDL_SetError("Couldn't claim interface %d: %d\n", ctx->interface_number, res);
     }
     ctx->interface_claimed = true;
+#endif
 
     const Uint8 *init_sequence[] = {
         (Uint8[]) { // Unknown purpose
@@ -1297,6 +1492,19 @@ static void HIDAPI_DriverSwitch2_FreeDevice(SDL_HIDAPI_Device *device)
     SDL_DriverSwitch2_Context *ctx = (SDL_DriverSwitch2_Context *)device->context;
 
     if (ctx) {
+#ifdef SDL_PLATFORM_WIN32
+        if (ctx->use_winusb) {
+            if (ctx->winusb_handle) {
+                WinUsb_Free(ctx->winusb_handle);
+                ctx->winusb_handle = NULL;
+            }
+            if (ctx->winusb_file_handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(ctx->winusb_file_handle);
+                ctx->winusb_file_handle = INVALID_HANDLE_VALUE;
+            }
+            ctx->use_winusb = false;
+        }
+#endif
         if (ctx->interface_claimed) {
             ctx->libusb->release_interface(ctx->device_handle, ctx->interface_number);
             ctx->interface_claimed = false;
