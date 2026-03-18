@@ -34,11 +34,11 @@
 
 #ifdef SDL_VIDEO_DRIVER_X11_XINPUT2
 static bool xinput2_initialized;
+static bool xinput2_grabbed_touch_raised;
+static int xinput2_active_touch_count;
 #if defined(SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_SCROLLINFO) || defined(SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_MULTITOUCH)
 static bool xinput2_scrolling_supported;
 static bool xinput2_multitouch_supported;
-static bool xinput2_grabbed_touch_raised;
-static int xinput2_active_touch_count;
 #endif
 #ifdef SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_GESTURE
 static bool xinput2_gesture_supported;
@@ -951,6 +951,7 @@ static bool HasDeviceID(Uint32 deviceID, const Uint32 *list, int count)
     return false;
 }
 
+#ifdef SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_MULTITOUCH
 static void AddDeviceID64(Uint64 deviceID, Uint64 **list, int *count)
 {
     int new_count = (*count + 1);
@@ -964,6 +965,7 @@ static void AddDeviceID64(Uint64 deviceID, Uint64 **list, int *count)
     *count = new_count;
     *list = new_list;
 }
+#endif
 
 static bool HasDeviceID64(Uint64 deviceID, const Uint64 *list, int count)
 {
