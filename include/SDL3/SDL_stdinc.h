@@ -4418,9 +4418,6 @@ extern SDL_DECLSPEC Sint32 SDLCALL SDL_rand_r(Uint64 *state, Sint32 n);
 /**
  * Generate a uniform pseudo-random floating point number less than 1.0
  *
- * If you want reproducible output, be sure to initialize with SDL_srand()
- * first.
- *
  * There are no guarantees as to the quality of the random sequence produced,
  * and this should not be used for security (cryptography, passwords) or where
  * money is on the line (loot-boxes, casinos). There are many random number
