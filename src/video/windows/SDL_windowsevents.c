@@ -901,6 +901,7 @@ static char *GetDeviceName(HANDLE hDevice, HDEVINFO devinfo, const char *instanc
 
     if (hid_loaded) {
         char devName[MAX_PATH + 1];
+        devName[0] = '\0';
         UINT cap = sizeof(devName) - 1;
         UINT len = GetRawInputDeviceInfoA(hDevice, RIDI_DEVICENAME, devName, &cap);
         if (len != (UINT)-1) {
