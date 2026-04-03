@@ -1445,10 +1445,10 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_GAMEINPUT "SDL_JOYSTICK_GAMEINPUT"
 
 /**
- * A variable controlling whether GameInput should be used for handling 
- * GIP devices that require raw report processing, but aren't supported 
- * by HIDRAW, such as Xbox One Guitars.
- * 
+ * A variable controlling whether GameInput should be used for handling GIP
+ * devices that require raw report processing, but aren't supported by HIDRAW,
+ * such as Xbox One Guitars.
+ *
  * Note that this is only supported with GameInput 3 or newer.
  *
  * The variable can be set to the following values:
