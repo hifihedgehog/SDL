@@ -215,6 +215,11 @@ static bool KMSDRM_DumpCursorToBO(SDL_VideoDisplay *display, SDL_Mouse *mouse, S
         KMSDRM_FBInfo *fb = KMSDRM_FBFromBO(video_device, dispdata->cursor_bo);
         KMSDRM_PlaneInfo info;
 
+        if (!fb) {
+            result = SDL_SetError("Failed to get cursor FB from BO");
+            goto cleanup;
+        }
+
         // Show the GBM BO buffer on the cursor plane.
         SDL_zero(info);
         info.plane = dispdata->cursor_plane;
