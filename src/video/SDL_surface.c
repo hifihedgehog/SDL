@@ -2326,7 +2326,7 @@ SDL_Surface *SDL_ConvertSurfaceRect(SDL_Surface *surface, const SDL_Rect *rect, 
         return NULL;
     }
 
-    return SDL_ConvertSurfaceRectAndColorspace(surface, NULL, format, NULL, SDL_GetDefaultColorspaceForFormat(format), surface->props);
+    return SDL_ConvertSurfaceRectAndColorspace(surface, rect, format, NULL, SDL_GetDefaultColorspaceForFormat(format), surface->props);
 }
 
 SDL_Surface *SDL_ConvertSurface(SDL_Surface *surface, SDL_PixelFormat format)
