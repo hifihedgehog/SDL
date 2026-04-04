@@ -5900,7 +5900,7 @@ bool SDL_ScreenKeyboardShown(SDL_Window *window)
 
 void SDL_SendScreenKeyboardShown(void)
 {
-    if (_this->screen_keyboard_shown) {
+    if (!_this || _this->screen_keyboard_shown) {
         return;
     }
 
@@ -5916,7 +5916,7 @@ void SDL_SendScreenKeyboardShown(void)
 
 void SDL_SendScreenKeyboardHidden(void)
 {
-    if (!_this->screen_keyboard_shown) {
+    if (!_this || !_this->screen_keyboard_shown) {
         return;
     }
 
