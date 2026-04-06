@@ -487,14 +487,31 @@ bool SDL_DBus_OpenURI(const char *uri, const char *window_id, const char *activa
         return false;
     }
 
-    // The OpenURI method can't open local 'file://' URIs, so OpenFile must be used instead.
     DBusMessageIter iterInit;
     DBusMessage *msg = NULL;
     int fd = -1;
     bool ret = false;
+    const bool has_file_scheme = SDL_strncasecmp(uri, "file:/", 6) == 0;
 
-    if (SDL_strncasecmp(uri, "file://", 7) == 0) {
-        fd = open(uri + 7, O_RDWR | O_CLOEXEC);
+    // The OpenURI method can't open 'file://' URIs or local paths, so OpenFile must be used instead.
+    if (has_file_scheme || !SDL_IsURI(uri)) {
+        char *decoded_path = NULL;
+
+        // Decode the path if it is a URI.
+        if (has_file_scheme) {
+            const size_t len = SDL_strlen(uri) + 1;
+            decoded_path = SDL_malloc(len);
+            if (!decoded_path) {
+                goto done;
+            }
+            if (SDL_URIToLocal(uri, decoded_path) < 0) {
+                SDL_free(decoded_path);
+                goto done;
+            }
+            uri = decoded_path;
+        }
+        fd = open(uri, O_RDWR | O_CLOEXEC);
+        SDL_free(decoded_path);
         if (fd >= 0) {
             msg = dbus.message_new_method_call(bus_name, path, interface, "OpenFile");
         }
@@ -548,7 +565,9 @@ bool SDL_DBus_OpenURI(const char *uri, const char *window_id, const char *activa
     }
 
 done:
-    dbus.message_unref(msg);
+    if (msg) {
+        dbus.message_unref(msg);
+    }
 
     // The file descriptor is duplicated by D-Bus, so it can be closed on this end.
     if (fd >= 0) {
