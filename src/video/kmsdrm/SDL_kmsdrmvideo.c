@@ -1708,7 +1708,9 @@ static void KMSDRM_DestroySurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     /***************************/
 
     if (windata->bo) {
-        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+        if (windata->bo != windata->next_bo) {
+            KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+        }
         windata->bo = NULL;
     }
 
