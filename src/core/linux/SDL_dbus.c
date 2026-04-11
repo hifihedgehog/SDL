@@ -20,10 +20,11 @@
 */
 
 #include "SDL_internal.h"
-#include "SDL_dbus.h"
+
 #include "../../SDL_list.h"
 #include "../../SDL_menu.h"
 #include "../../stdlib/SDL_vacopy.h"
+#include "SDL_dbus.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -53,6 +54,7 @@ static SDL_DBusContext dbus;
 
 #define DBUS_MENU_INTERFACE   "com.canonical.dbusmenu"
 #define DBUS_MENU_OBJECT_PATH "/Menu"
+
 #define SDL_DBUS_UPDATE_MENU_FLAG_DO_NOT_REPLACE (1 << 0)
 static const char *menu_introspect = "<?xml version=\"1.0\"?><node name=\"/\"><interface name=\"com.canonical.dbusmenu\"><property name=\"Version\" type=\"u\" access=\"read\"></property><property name=\"TextDirection\" type=\"s\" access=\"read\"></property><property name=\"Status\" type=\"s\" access=\"read\"></property><property name=\"IconThemePath\" type=\"as\" access=\"read\"></property><method name=\"GetLayout\"><arg type=\"i\" name=\"parentId\" direction=\"in\"></arg><arg type=\"i\" name=\"recursionDepth\" direction=\"in\"></arg><arg type=\"as\" name=\"propertyNames\" direction=\"in\"></arg><arg type=\"u\" name=\"revision\" direction=\"out\"></arg><arg type=\"(ia{sv}av)\" name=\"layout\" direction=\"out\"></arg></method><method name=\"GetGroupProperties\"><arg type=\"ai\" name=\"ids\" direction=\"in\"></arg><arg type=\"as\" name=\"propertyNames\" direction=\"in\"></arg><arg type=\"a(ia{sv})\" name=\"properties\" direction=\"out\"></arg></method><method name=\"GetProperty\"><arg type=\"i\" name=\"id\" direction=\"in\"></arg><arg type=\"s\" name=\"name\" direction=\"in\"></arg><arg type=\"v\" name=\"value\" direction=\"out\"></arg></method><method name=\"Event\"><arg type=\"i\" name=\"id\" direction=\"in\"></arg><arg type=\"s\" name=\"eventId\" direction=\"in\"></arg><arg type=\"v\" name=\"data\" direction=\"in\"></arg><arg type=\"u\" name=\"timestamp\" direction=\"in\"></arg></method><method name=\"EventGroup\"><arg type=\"a(isvu)\" name=\"events\" direction=\"in\"></arg><arg type=\"ai\" name=\"idErrors\" direction=\"out\"></arg></method><method name=\"AboutToShow\"><arg type=\"i\" name=\"id\" direction=\"in\"></arg><arg type=\"b\" name=\"needUpdate\" direction=\"out\"></arg></method><method name=\"AboutToShowGroup\"><arg type=\"ai\" name=\"ids\" direction=\"in\"></arg><arg type=\"ai\" name=\"updatesNeeded\" direction=\"out\"></arg><arg type=\"ai\" name=\"idErrors\" direction=\"out\"></arg></method><signal name=\"ItemsPropertiesUpdated\"><arg type=\"a(ia{sv})\" name=\"updatedProps\" direction=\"out\"/><arg type=\"a(ias)\" name=\"removedProps\" direction=\"out\"/></signal><signal name=\"LayoutUpdated\"><arg type=\"u\" name=\"revision\" direction=\"out\"></arg><arg type=\"i\" name=\"parent\" direction=\"out\"></arg></signal><signal name=\"ItemActivationRequested\"><arg type=\"i\" name=\"id\" direction=\"out\"></arg><arg type=\"u\" name=\"timestamp\" direction=\"out\"></arg></signal></interface></node>";
 
@@ -60,8 +62,7 @@ SDL_ELF_NOTE_DLOPEN(
     "core-libdbus",
     "Support for D-Bus IPC",
     SDL_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED,
-    SDL_DRIVER_DBUS_DYNAMIC
-)
+    SDL_DRIVER_DBUS_DYNAMIC)
 
 static bool LoadDBUSSyms(void)
 {
@@ -1320,11 +1321,11 @@ static DBusHandlerResult MenuHandleEvent(SDL_DBusContext *ctx, SDL_ListNode *men
     ctx->connection_send(conn, reply, NULL);
     ctx->message_unref(reply);
 
-    if (item) {        
+    if (item) {
         if (item->type == SDL_MENU_ITEM_TYPE_CHECKBOX) {
-			item->flags ^= SDL_MENU_ITEM_FLAGS_CHECKED; 
-			SDL_DBus_UpdateMenu(ctx, conn, menu, NULL, NULL, NULL, SDL_DBUS_UPDATE_MENU_FLAG_DO_NOT_REPLACE);
-		}
+            item->flags ^= SDL_MENU_ITEM_FLAGS_CHECKED;
+            SDL_DBus_UpdateMenu(ctx, conn, menu, NULL, NULL, NULL, SDL_DBUS_UPDATE_MENU_FLAG_DO_NOT_REPLACE);
+        }
 
         if (item->cb) {
             item->cb(item, item->cb_data);
@@ -1364,10 +1365,10 @@ static DBusHandlerResult MenuHandleEventGroup(SDL_DBusContext *ctx, SDL_ListNode
 
                         if (item) {
                             if (item->type == SDL_MENU_ITEM_TYPE_CHECKBOX) {
-                                item->flags ^= SDL_MENU_ITEM_FLAGS_CHECKED; 
+                                item->flags ^= SDL_MENU_ITEM_FLAGS_CHECKED;
                                 SDL_DBus_UpdateMenu(ctx, conn, menu, NULL, NULL, NULL, SDL_DBUS_UPDATE_MENU_FLAG_DO_NOT_REPLACE);
                             }
-                            
+
                             if (item->cb) {
                                 item->cb(item, item->cb_data);
                             }
@@ -1484,7 +1485,8 @@ static DBusHandlerResult MenuHandleGetProperty(SDL_DBusContext *ctx, SDL_ListNod
 
 static DBusHandlerResult MenuHandleGetGroupProperties(SDL_DBusContext *ctx, SDL_ListNode *menu, DBusConnection *conn, DBusMessage *msg)
 {
-    #define FILTER_PROPS_SZ 32
+#define FILTER_PROPS_SZ 32
+
     DBusMessage *reply;
     DBusMessageIter args, array_iter, prop_iter;
     DBusMessageIter iter, reply_array_iter;
@@ -1701,7 +1703,7 @@ static DBusHandlerResult MenuMessageHandler(DBusConnection *conn, DBusMessage *m
     if (!menu->entry) {
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
-    
+
     item = (SDL_DBusMenuItem *)menu->entry;
     ctx = item->dbus;
 
@@ -1771,19 +1773,19 @@ static DBusHandlerResult MenuMessageHandler(DBusConnection *conn, DBusMessage *m
                 ctx->message_iter_close_container(&iter, &variant_iter);
             } else if (!SDL_strcmp(property_name, "Status")) {
                 str_val = "normal";
-                
+
                 ctx->message_iter_open_container(&iter, DBUS_TYPE_VARIANT, "s", &variant_iter);
                 ctx->message_iter_append_basic(&variant_iter, DBUS_TYPE_STRING, &str_val);
                 ctx->message_iter_close_container(&iter, &variant_iter);
             } else if (!SDL_strcmp(property_name, "TextDirection")) {
                 str_val = "ltr";
-                
+
                 ctx->message_iter_open_container(&iter, DBUS_TYPE_VARIANT, "s", &variant_iter);
                 ctx->message_iter_append_basic(&variant_iter, DBUS_TYPE_STRING, &str_val);
                 ctx->message_iter_close_container(&iter, &variant_iter);
             } else if (!SDL_strcmp(property_name, "IconThemePath")) {
                 DBusMessageIter array_iter;
-                
+
                 ctx->message_iter_open_container(&iter, DBUS_TYPE_VARIANT, "as", &variant_iter);
                 ctx->message_iter_open_container(&variant_iter, DBUS_TYPE_ARRAY, "s", &array_iter);
                 ctx->message_iter_close_container(&variant_iter, &array_iter);
@@ -1905,14 +1907,14 @@ void SDL_DBus_UpdateMenu(SDL_DBusContext *ctx, DBusConnection *conn, SDL_ListNod
     DBusMessage *signal;
     dbus_uint32_t revision;
     dbus_int32_t next_id;
-		
+
     if (!ctx) {
         return;
     }
-    
+
     if (!menu) {
-		goto REPLACE_MENU;
-	}
+        goto REPLACE_MENU;
+    }
 
     next_id = MenuGetMaxItemId(menu) + 1;
     MenuAssignItemIds(menu, &next_id);
@@ -1926,66 +1928,66 @@ void SDL_DBus_UpdateMenu(SDL_DBusContext *ctx, DBusConnection *conn, SDL_ListNod
         item->dbus = ctx;
         revision = item->revision;
     }
-    
+
     if (flags & SDL_DBUS_UPDATE_MENU_FLAG_DO_NOT_REPLACE) {
-		goto SEND_SIGNAL;
-	}
-	
+        goto SEND_SIGNAL;
+    }
+
 REPLACE_MENU:
     if (path) {
         void *udata;
 
         ctx->connection_get_object_path_data(conn, path, &udata);
-   		
+
         if (udata != menu) {
             DBusObjectPathVTable vtable;
 
-		    vtable.message_function = MenuMessageHandler;
-		    vtable.unregister_function = NULL;
-		    ctx->connection_unregister_object_path(conn, path);
-		    ctx->connection_try_register_object_path(conn, path, &vtable, menu, NULL);
-		    ctx->connection_flush(conn);
+            vtable.message_function = MenuMessageHandler;
+            vtable.unregister_function = NULL;
+            ctx->connection_unregister_object_path(conn, path);
+            ctx->connection_try_register_object_path(conn, path, &vtable, menu, NULL);
+            ctx->connection_flush(conn);
 
-		    if (cb) {
-		    	cb(menu, NULL, cbdata);
-		    }
-	    }
-	} else {
-	    DBusObjectPathVTable vtable;
-	    SDL_DBusMenuItem *item;
+            if (cb) {
+                cb(menu, NULL, cbdata);
+            }
+        }
+    } else {
+        DBusObjectPathVTable vtable;
+        SDL_DBusMenuItem *item;
 
-		if (!menu) {
-	        goto SEND_SIGNAL;
-	    }
-	    
-	    next_id = MenuGetMaxItemId(menu) + 1;
-	    MenuAssignItemIds(menu, &next_id);
-	    revision = 0;
-	    if (menu->entry) {
-	        item = menu->entry;
-	        item->dbus = ctx;
-	        item->revision++;
-	        revision = item->revision;
-	    }
-	    	    
-	    vtable.message_function = MenuMessageHandler;
-	    vtable.unregister_function = NULL;
-	    ctx->connection_try_register_object_path(conn, DBUS_MENU_OBJECT_PATH, &vtable, menu, NULL);
-	    ctx->connection_flush(conn);
+        if (!menu) {
+            goto SEND_SIGNAL;
+        }
+
+        next_id = MenuGetMaxItemId(menu) + 1;
+        MenuAssignItemIds(menu, &next_id);
+        revision = 0;
+        if (menu->entry) {
+            item = menu->entry;
+            item->dbus = ctx;
+            item->revision++;
+            revision = item->revision;
+        }
+
+        vtable.message_function = MenuMessageHandler;
+        vtable.unregister_function = NULL;
+        ctx->connection_try_register_object_path(conn, DBUS_MENU_OBJECT_PATH, &vtable, menu, NULL);
+        ctx->connection_flush(conn);
 
         if (cb) {
-	        cb(menu, DBUS_MENU_OBJECT_PATH, cbdata);
-	    }
-	    ctx->connection_flush(conn);
-	}
-	
+            cb(menu, DBUS_MENU_OBJECT_PATH, cbdata);
+        }
+        ctx->connection_flush(conn);
+    }
+
 SEND_SIGNAL:
     if (path) {
-	    signal = ctx->message_new_signal(path, DBUS_MENU_INTERFACE, "LayoutUpdated");
-	} else {
-	    signal = ctx->message_new_signal(DBUS_MENU_OBJECT_PATH, DBUS_MENU_INTERFACE, "LayoutUpdated");	
-	}
-	
+        signal = ctx->message_new_signal(path, DBUS_MENU_INTERFACE, "LayoutUpdated");
+    } else {
+        signal = ctx->message_new_signal(DBUS_MENU_OBJECT_PATH, DBUS_MENU_INTERFACE, "LayoutUpdated");
+    }
+
     if (signal) {
         dbus_int32_t parent;
 
@@ -1993,7 +1995,7 @@ SEND_SIGNAL:
         ctx->message_append_args(signal, DBUS_TYPE_UINT32, &revision, DBUS_TYPE_INT32, &parent, DBUS_TYPE_INVALID);
         ctx->connection_send(conn, signal, NULL);
         ctx->message_unref(signal);
-	    ctx->connection_flush(conn);
+        ctx->connection_flush(conn);
     }
 }
 
@@ -2019,11 +2021,10 @@ void SDL_DBus_TransferMenuItemProperties(SDL_MenuItem *src, SDL_MenuItem *dst)
     dst_dbus->cbdata = src_dbus->cbdata;
 }
 
-void SDL_DBus_RetractMenu(SDL_DBusContext *ctx, DBusConnection *conn, const char **path) 
+void SDL_DBus_RetractMenu(SDL_DBusContext *ctx, DBusConnection *conn, const char **path)
 {
     ctx->connection_unregister_object_path(conn, *path);
     *path = NULL;
 }
 
-#endif
-
+#endif // SDL_USE_LIBDBUS
