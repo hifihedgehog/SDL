@@ -59,12 +59,12 @@ void SDL_UpdateTrays(void)
 SDL_Tray *SDL_CreateTrayWithProperties(SDL_PropertiesID props)
 {
     SDL_Tray *tray;
-    
+
     if (!SDL_IsMainThread()) {
         SDL_SetError("This function should be called on the main thread");
         return NULL;
     }
-    
+
     if (!driver) {
 #ifdef SDL_USE_LIBDBUS
         driver = SDL_Tray_CreateDBusDriver();
@@ -110,8 +110,7 @@ SDL_Tray *SDL_CreateTray(SDL_Surface *icon, const char *tooltip)
 
 void SDL_SetTrayIcon(SDL_Tray *tray, SDL_Surface *icon)
 {
-    CHECK_PARAM(!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY))
-    {
+    CHECK_PARAM (!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY)) {
         SDL_InvalidParamError("tray");
         return;
     }
@@ -121,8 +120,7 @@ void SDL_SetTrayIcon(SDL_Tray *tray, SDL_Surface *icon)
 
 void SDL_SetTrayTooltip(SDL_Tray *tray, const char *tooltip)
 {
-    CHECK_PARAM(!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY))
-    {
+    CHECK_PARAM (!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY)) {
         SDL_InvalidParamError("tray");
         return;
     }
@@ -132,8 +130,7 @@ void SDL_SetTrayTooltip(SDL_Tray *tray, const char *tooltip)
 
 SDL_TrayMenu *SDL_CreateTrayMenu(SDL_Tray *tray)
 {
-    CHECK_PARAM(!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY))
-    {
+    CHECK_PARAM (!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY)) {
         SDL_InvalidParamError("tray");
         return NULL;
     }
@@ -143,8 +140,7 @@ SDL_TrayMenu *SDL_CreateTrayMenu(SDL_Tray *tray)
 
 SDL_TrayMenu *SDL_GetTrayMenu(SDL_Tray *tray)
 {
-    CHECK_PARAM(!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY))
-    {
+    CHECK_PARAM (!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY)) {
         SDL_InvalidParamError("tray");
         return NULL;
     }
@@ -154,8 +150,7 @@ SDL_TrayMenu *SDL_GetTrayMenu(SDL_Tray *tray)
 
 SDL_TrayMenu *SDL_CreateTraySubmenu(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return NULL;
     }
@@ -165,8 +160,7 @@ SDL_TrayMenu *SDL_CreateTraySubmenu(SDL_TrayEntry *entry)
 
 SDL_TrayMenu *SDL_GetTraySubmenu(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return NULL;
     }
@@ -176,14 +170,12 @@ SDL_TrayMenu *SDL_GetTraySubmenu(SDL_TrayEntry *entry)
 
 const SDL_TrayEntry **SDL_GetTrayEntries(SDL_TrayMenu *menu, int *count)
 {
-    CHECK_PARAM(!menu)
-    {
+    CHECK_PARAM (!menu) {
         SDL_InvalidParamError("menu");
         return NULL;
     }
 
-    CHECK_PARAM(!count)
-    {
+    CHECK_PARAM (!count) {
         SDL_InvalidParamError("count");
         return NULL;
     }
@@ -193,8 +185,7 @@ const SDL_TrayEntry **SDL_GetTrayEntries(SDL_TrayMenu *menu, int *count)
 
 void SDL_RemoveTrayEntry(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return;
     }
@@ -204,8 +195,7 @@ void SDL_RemoveTrayEntry(SDL_TrayEntry *entry)
 
 SDL_TrayEntry *SDL_InsertTrayEntryAt(SDL_TrayMenu *menu, int pos, const char *label, SDL_TrayEntryFlags flags)
 {
-    CHECK_PARAM(!menu)
-    {
+    CHECK_PARAM (!menu) {
         SDL_InvalidParamError("menu");
         return NULL;
     }
@@ -215,8 +205,7 @@ SDL_TrayEntry *SDL_InsertTrayEntryAt(SDL_TrayMenu *menu, int pos, const char *la
 
 void SDL_SetTrayEntryLabel(SDL_TrayEntry *entry, const char *label)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return;
     }
@@ -226,8 +215,7 @@ void SDL_SetTrayEntryLabel(SDL_TrayEntry *entry, const char *label)
 
 const char *SDL_GetTrayEntryLabel(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return NULL;
     }
@@ -237,8 +225,7 @@ const char *SDL_GetTrayEntryLabel(SDL_TrayEntry *entry)
 
 void SDL_SetTrayEntryChecked(SDL_TrayEntry *entry, bool checked)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return;
     }
@@ -248,8 +235,7 @@ void SDL_SetTrayEntryChecked(SDL_TrayEntry *entry, bool checked)
 
 bool SDL_GetTrayEntryChecked(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return NULL;
     }
@@ -259,8 +245,7 @@ bool SDL_GetTrayEntryChecked(SDL_TrayEntry *entry)
 
 void SDL_SetTrayEntryEnabled(SDL_TrayEntry *entry, bool enabled)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return;
     }
@@ -270,8 +255,7 @@ void SDL_SetTrayEntryEnabled(SDL_TrayEntry *entry, bool enabled)
 
 bool SDL_GetTrayEntryEnabled(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return NULL;
     }
@@ -281,14 +265,12 @@ bool SDL_GetTrayEntryEnabled(SDL_TrayEntry *entry)
 
 void SDL_SetTrayEntryCallback(SDL_TrayEntry *entry, SDL_TrayCallback callback, void *userdata)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return;
     }
 
-    CHECK_PARAM(!callback)
-    {
+    CHECK_PARAM (!callback) {
         SDL_InvalidParamError("callback");
         return;
     }
@@ -298,8 +280,7 @@ void SDL_SetTrayEntryCallback(SDL_TrayEntry *entry, SDL_TrayCallback callback, v
 
 void SDL_ClickTrayEntry(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return;
     }
@@ -309,8 +290,7 @@ void SDL_ClickTrayEntry(SDL_TrayEntry *entry)
 
 SDL_TrayMenu *SDL_GetTrayEntryParent(SDL_TrayEntry *entry)
 {
-    CHECK_PARAM(!entry)
-    {
+    CHECK_PARAM (!entry) {
         SDL_InvalidParamError("entry");
         return NULL;
     }
@@ -320,8 +300,7 @@ SDL_TrayMenu *SDL_GetTrayEntryParent(SDL_TrayEntry *entry)
 
 SDL_TrayEntry *SDL_GetTrayMenuParentEntry(SDL_TrayMenu *menu)
 {
-    CHECK_PARAM(!menu)
-    {
+    CHECK_PARAM (!menu) {
         SDL_InvalidParamError("menu");
         return NULL;
     }
@@ -331,8 +310,7 @@ SDL_TrayEntry *SDL_GetTrayMenuParentEntry(SDL_TrayMenu *menu)
 
 SDL_Tray *SDL_GetTrayMenuParentTray(SDL_TrayMenu *menu)
 {
-    CHECK_PARAM(!menu)
-    {
+    CHECK_PARAM (!menu) {
         SDL_InvalidParamError("menu");
         return NULL;
     }

@@ -22,6 +22,7 @@
 /* Special thanks to the kind Hayden Gray (thag_iceman/A1029384756) from the SDL community for his help! */
 
 #include "SDL_internal.h"
+
 #include "../../core/linux/SDL_dbus.h"
 
 #ifdef SDL_USE_LIBDBUS
@@ -33,15 +34,11 @@
 
 typedef struct SDL_TrayDriverDBus
 {
-    SDL_TrayDriver _parent;
-
     SDL_DBusContext *dbus;
 } SDL_TrayDriverDBus;
 
 typedef struct SDL_TrayDBus
 {
-    SDL_Tray _parent;
-
     DBusConnection *connection;
     char *service_name;
 
@@ -58,8 +55,6 @@ typedef struct SDL_TrayDBus
 
 typedef struct SDL_TrayMenuDBus
 {
-    SDL_TrayMenu _parent;
-
     SDL_ListNode *menu;
     const char *menu_path;
 
@@ -68,8 +63,6 @@ typedef struct SDL_TrayMenuDBus
 
 typedef struct SDL_TrayEntryDBus
 {
-    SDL_TrayEntry _parent;
-
     SDL_MenuItem *item;
     SDL_TrayMenuDBus *sub_menu;
 } SDL_TrayEntryDBus;
@@ -387,18 +380,18 @@ static DBusHandlerResult TrayMessageHandler(DBusConnection *connection, DBusMess
         driver->dbus->message_unref(reply);
         return DBUS_HANDLER_RESULT_HANDLED;
     } else if (driver->dbus->message_is_method_call(msg, SNI_INTERFACE, "Scroll")) {
-		DBusError err;
-		char *orientation;
-		Sint32 delta;
-		
-		driver->dbus->error_init(&err);
+        DBusError err;
+        char *orientation;
+        Sint32 delta;
+
+        driver->dbus->error_init(&err);
         driver->dbus->message_get_args(msg, &err, DBUS_TYPE_INT32, &delta, DBUS_TYPE_STRING, &orientation, DBUS_TYPE_INVALID);
         if (!driver->dbus->error_is_set(&err)) {
-			/* Scroll callback support will come later :) */
+            /* Scroll callback support will come later :) */
         } else {
             driver->dbus->error_free(&err);
-		}
-        
+        }
+
         reply = driver->dbus->message_new_method_return(msg);
         driver->dbus->connection_send(tray_dbus->connection, reply, NULL);
         driver->dbus->message_unref(reply);
@@ -450,7 +443,7 @@ SDL_Tray *CreateTray(SDL_TrayDriver *driver, SDL_PropertiesID props)
     }
     tray_dbus->surface = SDL_ConvertSurface(icon, SDL_PIXELFORMAT_ARGB32);
     tray_dbus->block = false;
-    
+
     /* Connect */
     dbus_driver = (SDL_TrayDriverDBus *)driver;
     dbus_driver->dbus->error_init(&err);
@@ -529,7 +522,7 @@ void DestroyMenu(SDL_TrayMenu *menu)
     if (!menu) {
         return;
     }
-    
+
     menu_dbus = (SDL_TrayMenuDBus *)menu;
 
     if (menu_dbus->menu) {
@@ -601,7 +594,7 @@ void UpdateTray(SDL_Tray *tray)
     if (!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY)) {
         return;
     }
-    
+
     if (tray_dbus->block) {
         return;
     }
@@ -609,11 +602,11 @@ void UpdateTray(SDL_Tray *tray)
     driver->dbus->connection_read_write(tray_dbus->connection, 0);
     while (driver->dbus->connection_dispatch(tray_dbus->connection) == DBUS_DISPATCH_DATA_REMAINS) {
         if (!SDL_ObjectValid(tray, SDL_OBJECT_TYPE_TRAY)) {
-           break;
+            break;
         }
-    
+
         if (tray_dbus->block) {
-           break;
+            break;
         }
 
         SDL_DelayNS(SDL_US_TO_NS(10));
@@ -727,7 +720,8 @@ bool TrayRightClickHandler(SDL_ListNode *menu, void *udata)
     return tray_dbus->r_cb(tray_dbus->udata, (SDL_Tray *)tray_dbus);
 }
 
-void TraySendNewMenu(SDL_Tray *tray, const char *new_path) {
+void TraySendNewMenu(SDL_Tray *tray, const char *new_path)
+{
     SDL_TrayDriverDBus *driver;
     SDL_TrayDBus *tray_dbus;
     SDL_TrayMenuDBus *menu_dbus;
@@ -750,10 +744,10 @@ void TraySendNewMenu(SDL_Tray *tray, const char *new_path) {
         iface = SNI_INTERFACE;
         prop = "Menu";
         if (new_path) {
-			path = menu_dbus->menu_path = new_path;
-		} else {
-			path = menu_dbus->menu_path;
-		}
+            path = menu_dbus->menu_path = new_path;
+        } else {
+            path = menu_dbus->menu_path;
+        }
         bool_val = TRUE;
         driver->dbus->message_iter_init_append(signal, &iter);
         driver->dbus->message_iter_append_basic(&iter, DBUS_TYPE_STRING, &iface);
@@ -777,21 +771,21 @@ void TraySendNewMenu(SDL_Tray *tray, const char *new_path) {
         driver->dbus->connection_send(tray_dbus->connection, signal, NULL);
         driver->dbus->connection_flush(tray_dbus->connection);
         driver->dbus->message_unref(signal);
-     }
+    }
 
-     signal = driver->dbus->message_new_signal(SNI_OBJECT_PATH, SNI_INTERFACE, "NewMenu");
-     if (signal) {
+    signal = driver->dbus->message_new_signal(SNI_OBJECT_PATH, SNI_INTERFACE, "NewMenu");
+    if (signal) {
         driver->dbus->connection_send(tray_dbus->connection, signal, NULL);
         driver->dbus->connection_flush(tray_dbus->connection);
         driver->dbus->message_unref(signal);
-     }
-    
+    }
+
     driver->dbus->connection_flush(tray_dbus->connection);
 }
 
-
-void TrayNewMenuOnMenuUpdateCallback(SDL_ListNode *menu, const char *path, void *cbdata) {
-	TraySendNewMenu((SDL_Tray *)cbdata, path);
+void TrayNewMenuOnMenuUpdateCallback(SDL_ListNode *menu, const char *path, void *cbdata)
+{
+    TraySendNewMenu((SDL_Tray *)cbdata, path);
 }
 
 SDL_TrayEntry *InsertTrayEntryAt(SDL_TrayMenu *menu, int pos, const char *label, SDL_TrayEntryFlags flags)
@@ -861,7 +855,7 @@ SDL_TrayEntry *InsertTrayEntryAt(SDL_TrayMenu *menu, int pos, const char *label,
         menu_dbus->menu_path = SDL_DBus_ExportMenu(driver->dbus, tray_dbus->connection, menu_dbus->menu);
 
         if (menu_dbus->menu_path) {
-			TraySendNewMenu(tray, NULL);
+            TraySendNewMenu(tray, NULL);
         }
     }
 
@@ -918,7 +912,7 @@ void RemoveTrayEntry(SDL_TrayEntry *entry)
     SDL_TrayDBus *tray_dbus;
     SDL_TrayMenuDBus *main_menu_dbus;
     const char *old_path;
-    
+
     tray = entry->parent->parent_tray;
     tray_dbus = (SDL_TrayDBus *)tray;
     driver = (SDL_TrayDriverDBus *)tray->driver;
@@ -928,20 +922,20 @@ void RemoveTrayEntry(SDL_TrayEntry *entry)
 
     tray_dbus->block = true;
     if (menu_dbus->menu->entry == entry_dbus->item && menu_dbus->menu->next) {
-		SDL_DBus_TransferMenuItemProperties(entry_dbus->item, (SDL_MenuItem *)menu_dbus->menu->next->entry);
-	}	
-	
+        SDL_DBus_TransferMenuItemProperties(entry_dbus->item, (SDL_MenuItem *)menu_dbus->menu->next->entry);
+    }
+
     old_path = NULL;
     if (!main_menu_dbus->menu->next) {
-		old_path = main_menu_dbus->menu_path;
-	}
-    
+        old_path = main_menu_dbus->menu_path;
+    }
+
     driver->dbus->connection_flush(tray_dbus->connection);
     DestroyMenu((SDL_TrayMenu *)entry_dbus->sub_menu);
     SDL_ListRemove(&menu_dbus->menu, entry_dbus->item);
     SDL_free(entry_dbus->item);
     SDL_free(entry);
-	
+
     if (old_path) {
         SDL_DBus_RetractMenu(driver->dbus, tray_dbus->connection, &main_menu_dbus->menu_path);
     }
@@ -965,7 +959,7 @@ void SetTrayEntryCallback(SDL_TrayEntry *entry, SDL_TrayCallback callback, void 
     SDL_TrayDriverDBus *driver;
     SDL_TrayDBus *tray_dbus;
     SDL_TrayMenuDBus *main_menu_dbus;
-	
+
     tray = entry->parent->parent_tray;
     tray_dbus = (SDL_TrayDBus *)tray;
     driver = (SDL_TrayDriverDBus *)tray->driver;
@@ -1066,18 +1060,18 @@ void ClickTrayEntry(SDL_TrayEntry *entry)
 
     dbus_entry = (SDL_TrayEntryDBus *)entry;
     if (dbus_entry->item->type == SDL_MENU_ITEM_TYPE_CHECKBOX) {
-		SDL_Tray *tray;
-		SDL_TrayDriverDBus *driver;
-		SDL_TrayDBus *tray_dbus;
-		SDL_TrayMenuDBus *main_menu_dbus;
+        SDL_Tray *tray;
+        SDL_TrayDriverDBus *driver;
+        SDL_TrayDBus *tray_dbus;
+        SDL_TrayMenuDBus *main_menu_dbus;
 
-		tray = entry->parent->parent_tray;
-		tray_dbus = (SDL_TrayDBus *)tray;
-		driver = (SDL_TrayDriverDBus *)tray->driver;
-		main_menu_dbus = (SDL_TrayMenuDBus *)tray->menu;
+        tray = entry->parent->parent_tray;
+        tray_dbus = (SDL_TrayDBus *)tray;
+        driver = (SDL_TrayDriverDBus *)tray->driver;
+        main_menu_dbus = (SDL_TrayMenuDBus *)tray->menu;
 
-		dbus_entry->item->flags ^= SDL_MENU_ITEM_FLAGS_CHECKED; 
-		SDL_DBus_UpdateMenu(driver->dbus, tray_dbus->connection, main_menu_dbus->menu, main_menu_dbus->menu_path, TrayNewMenuOnMenuUpdateCallback, tray, SDL_DBUS_UPDATE_MENU_FLAGS_NONE);
+        dbus_entry->item->flags ^= SDL_MENU_ITEM_FLAGS_CHECKED;
+        SDL_DBus_UpdateMenu(driver->dbus, tray_dbus->connection, main_menu_dbus->menu, main_menu_dbus->menu_path, TrayNewMenuOnMenuUpdateCallback, tray, SDL_DBUS_UPDATE_MENU_FLAGS_NONE);
     }
     entry_cb = dbus_entry->item->udata2;
     entry_cb(dbus_entry->item->cb_data, dbus_entry->item->udata);
@@ -1174,4 +1168,4 @@ SDL_TrayDriver *SDL_Tray_CreateDBusDriver(void)
     return driver;
 }
 
-#endif
+#endif // SDL_USE_LIBDBUS
