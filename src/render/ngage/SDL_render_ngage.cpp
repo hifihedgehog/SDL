@@ -160,7 +160,7 @@ CRenderer *CRenderer::NewL()
     return self;
 }
 
-CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0) {}
+CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0) {}
 
 CRenderer::~CRenderer()
 {
@@ -173,6 +173,12 @@ CRenderer::~CRenderer()
     iWorkBuffer1 = 0;
     iWorkBuffer2 = 0;
     iWorkBufferSize = 0;
+
+    // Free temp render bitmap.
+    delete iTempRenderBitmap;
+    iTempRenderBitmap = 0;
+    iTempRenderBitmapWidth = 0;
+    iTempRenderBitmapHeight = 0;
 }
 
 void CRenderer::ConstructL()
@@ -321,6 +327,40 @@ bool CRenderer::EnsureWorkBufferCapacity(TInt aRequiredSize)
     return true;
 }
 
+bool CRenderer::EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight)
+{
+    if (iTempRenderBitmap && 
+        iTempRenderBitmapWidth >= aWidth && 
+        iTempRenderBitmapHeight >= aHeight) {
+        return true;
+    }
+
+    // Delete old bitmap.
+    delete iTempRenderBitmap;
+    iTempRenderBitmap = 0;
+
+    // Create new bitmap.
+    iTempRenderBitmap = new CFbsBitmap();
+    if (!iTempRenderBitmap) {
+        iTempRenderBitmapWidth = 0;
+        iTempRenderBitmapHeight = 0;
+        return false;
+    }
+
+    TInt error = iTempRenderBitmap->Create(TSize(aWidth, aHeight), EColor4K);
+    if (error != KErrNone) {
+        delete iTempRenderBitmap;
+        iTempRenderBitmap = 0;
+        iTempRenderBitmapWidth = 0;
+        iTempRenderBitmapHeight = 0;
+        return false;
+    }
+
+    iTempRenderBitmapWidth = aWidth;
+    iTempRenderBitmapHeight = aHeight;
+    return true;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -421,14 +461,18 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
         useBuffer1 = !useBuffer1;
     }
 
-    // Render directly from work buffer without copying back to bitmap.
-    // Note: We need a temporary bitmap for rendering the transformed data.
-    // For now, copy to original bitmap (this could be further optimized with a render target).
-    Mem::Copy(phdata->cachedDataAddress, source, pitch * h);
+    // Use temp bitmap to avoid destroying source texture.
+    if (!EnsureTempBitmapCapacity(w, h)) {
+        return false;
+    }
 
+    // Copy transformed data to temp bitmap.
+    Mem::Copy(iTempRenderBitmap->DataAddress(), source, pitch * h);
+
+    // Render from temp bitmap, preserving original texture.
     TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
     TPoint aDest(dstrect->x, dstrect->y);
-    iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+    iRenderer->Gc()->BitBlt(aDest, iTempRenderBitmap, aSource);
 
     return true;
 }
@@ -500,14 +544,18 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
         useBuffer1 = !useBuffer1;
     }
 
-    // Render directly from work buffer without copying back to bitmap.
-    // Note: We need a temporary bitmap for rendering the transformed data.
-    // For now, copy to original bitmap (this could be further optimized with a render target).
-    Mem::Copy(phdata->cachedDataAddress, source, pitch * h);
+    // Use temp bitmap to avoid destroying source texture.
+    if (!EnsureTempBitmapCapacity(w, h)) {
+        return false;
+    }
 
+    // Copy transformed data to temp bitmap.
+    Mem::Copy(iTempRenderBitmap->DataAddress(), source, pitch * h);
+
+    // Render from temp bitmap, preserving original texture.
     TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
     TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
-    iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+    iRenderer->Gc()->BitBlt(aDest, iTempRenderBitmap, aSource);
 
     return true;
 }

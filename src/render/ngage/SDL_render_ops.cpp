@@ -87,26 +87,42 @@ void ApplyRotation(void *dest, void *source, int pitch, int width, int height, T
         FixSinCos(angle, sin_angle, cos_angle);
     }
 
+    // Pre-calculate pitch in pixels to avoid repeated division.
+    const TInt pitchPixels = pitch >> 1;
+
+    // Incremental DDA: Calculate per-pixel increments.
+    // As we move right (x+1), the rotated position changes by (cos, -sin).
+    TFixed dx_cos = cos_angle;
+    TFixed dx_sin = -sin_angle;
+
     for (int y = 0; y < height; ++y) {
+        // Calculate destination row offset once per row.
+        TInt dstRowOffset = y * pitchPixels;
+
+        // Calculate starting position for this row.
+        TFixed translated_y = Int2Fix(y) - center_y;
+        TFixed row_start_x = FixMul(translated_y, sin_angle) + center_x;
+        TFixed row_start_y = FixMul(translated_y, cos_angle) + center_y;
+
+        // For first pixel in row, account for x=0 translation.
+        TFixed src_x = row_start_x - FixMul(center_x, cos_angle);
+        TFixed src_y = row_start_y + FixMul(center_x, sin_angle);
+
         for (int x = 0; x < width; ++x) {
-            // Translate point to origin.
-            TFixed translated_x = Int2Fix(x) - center_x;
-            TFixed translated_y = Int2Fix(y) - center_y;
-
-            // Rotate point (clockwise).
-            TFixed rotated_x = FixMul(translated_x, cos_angle) + FixMul(translated_y, sin_angle);
-            TFixed rotated_y = FixMul(translated_y, cos_angle) - FixMul(translated_x, sin_angle);
-
-            // Translate point back.
-            int final_x = Fix2Int(rotated_x + center_x);
-            int final_y = Fix2Int(rotated_y + center_y);
+            // Convert to integer coordinates.
+            int final_x = Fix2Int(src_x);
+            int final_y = Fix2Int(src_y);
 
             // Check bounds.
             if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height) {
-                dst_pixels[y * pitch / 2 + x] = src_pixels[final_y * pitch / 2 + final_x];
+                dst_pixels[dstRowOffset + x] = src_pixels[final_y * pitchPixels + final_x];
             } else {
-                dst_pixels[y * pitch / 2 + x] = 0;
+                dst_pixels[dstRowOffset + x] = 0;
             }
+
+            // Incremental step: move to next pixel (just additions, no multiplications!).
+            src_x += dx_cos;
+            src_y += dx_sin;
         }
     }
 }

@@ -92,8 +92,14 @@ class CRenderer : public MDirectScreenAccess
     void *iWorkBuffer2;
     TInt iWorkBufferSize;
 
-    // Helper method to ensure work buffers have sufficient capacity.
+    // Temporary render bitmap to avoid destroying source textures.
+    CFbsBitmap *iTempRenderBitmap;
+    TInt iTempRenderBitmapWidth;
+    TInt iTempRenderBitmapHeight;
+
+    // Helper methods.
     bool EnsureWorkBufferCapacity(TInt aRequiredSize);
+    bool EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight);
 };
 
 #endif // ngage_video_render_ngage_c_hpp
