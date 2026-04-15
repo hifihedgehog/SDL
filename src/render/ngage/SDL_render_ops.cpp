@@ -30,52 +30,58 @@ void ApplyColorMod(void *dest, void *source, int pitch, int width, int height, S
 
     // Pre-calculate pitch in pixels to avoid repeated division.
     const TInt pitchPixels = pitch >> 1;
-    const int totalPixels = width * height;
+
+    // Pre-calculate LUT offsets to reduce addressing calculations.
+    const TUint8 *lut_r = colorLUT;
+    const TUint8 *lut_g = colorLUT + 256;
+    const TUint8 *lut_b = colorLUT + 512;
 
     // Process 4 pixels at a time (loop unrolling).
-    int pixelIndex = 0;
     for (int y = 0; y < height; ++y) {
-        TInt rowOffset = y * pitchPixels;
+        const TInt rowOffset = y * pitchPixels;
         int x = 0;
 
-        // Unrolled loop: process 4 pixels at once.
+        // Unrolled loop: process 4 pixels at once with optimized bit manipulation.
         for (; x < width - 3; x += 4) {
-            // Pixel 0
+            // Load 4 pixels at once.
             TUint16 p0 = src_pixels[rowOffset + x];
-            TUint8 r0 = colorLUT[(p0 & 0xF800) >> 8];
-            TUint8 g0 = colorLUT[256 + ((p0 & 0x07E0) >> 3)];
-            TUint8 b0 = colorLUT[512 + ((p0 & 0x001F) << 3)];
-            dst_pixels[rowOffset + x] = (r0 << 8) | (g0 << 3) | (b0 >> 3);
+            TUint16 p1 = src_pixels[rowOffset + x + 1];
+            TUint16 p2 = src_pixels[rowOffset + x + 2];
+            TUint16 p3 = src_pixels[rowOffset + x + 3];
+
+            // Pixel 0: Extract and modulate RGB4444 components.
+            // RGB4444 format: RRRR GGGG BBBB xxxx
+            TUint8 r0 = lut_r[(p0 >> 8) & 0xF0];  // Extract R (bits 12-15), shift to byte position
+            TUint8 g0 = lut_g[(p0 >> 3) & 0xF8];  // Extract G (bits 6-9), scale to 8-bit
+            TUint8 b0 = lut_b[(p0 << 3) & 0xF8];  // Extract B (bits 0-3), scale to 8-bit
+            dst_pixels[rowOffset + x] = ((r0 & 0xF0) << 8) | ((g0 & 0xF0) << 3) | ((b0 & 0xF0) >> 1);
 
             // Pixel 1
-            TUint16 p1 = src_pixels[rowOffset + x + 1];
-            TUint8 r1 = colorLUT[(p1 & 0xF800) >> 8];
-            TUint8 g1 = colorLUT[256 + ((p1 & 0x07E0) >> 3)];
-            TUint8 b1 = colorLUT[512 + ((p1 & 0x001F) << 3)];
-            dst_pixels[rowOffset + x + 1] = (r1 << 8) | (g1 << 3) | (b1 >> 3);
+            TUint8 r1 = lut_r[(p1 >> 8) & 0xF0];
+            TUint8 g1 = lut_g[(p1 >> 3) & 0xF8];
+            TUint8 b1 = lut_b[(p1 << 3) & 0xF8];
+            dst_pixels[rowOffset + x + 1] = ((r1 & 0xF0) << 8) | ((g1 & 0xF0) << 3) | ((b1 & 0xF0) >> 1);
 
             // Pixel 2
-            TUint16 p2 = src_pixels[rowOffset + x + 2];
-            TUint8 r2 = colorLUT[(p2 & 0xF800) >> 8];
-            TUint8 g2 = colorLUT[256 + ((p2 & 0x07E0) >> 3)];
-            TUint8 b2 = colorLUT[512 + ((p2 & 0x001F) << 3)];
-            dst_pixels[rowOffset + x + 2] = (r2 << 8) | (g2 << 3) | (b2 >> 3);
+            TUint8 r2 = lut_r[(p2 >> 8) & 0xF0];
+            TUint8 g2 = lut_g[(p2 >> 3) & 0xF8];
+            TUint8 b2 = lut_b[(p2 << 3) & 0xF8];
+            dst_pixels[rowOffset + x + 2] = ((r2 & 0xF0) << 8) | ((g2 & 0xF0) << 3) | ((b2 & 0xF0) >> 1);
 
             // Pixel 3
-            TUint16 p3 = src_pixels[rowOffset + x + 3];
-            TUint8 r3 = colorLUT[(p3 & 0xF800) >> 8];
-            TUint8 g3 = colorLUT[256 + ((p3 & 0x07E0) >> 3)];
-            TUint8 b3 = colorLUT[512 + ((p3 & 0x001F) << 3)];
-            dst_pixels[rowOffset + x + 3] = (r3 << 8) | (g3 << 3) | (b3 >> 3);
+            TUint8 r3 = lut_r[(p3 >> 8) & 0xF0];
+            TUint8 g3 = lut_g[(p3 >> 3) & 0xF8];
+            TUint8 b3 = lut_b[(p3 << 3) & 0xF8];
+            dst_pixels[rowOffset + x + 3] = ((r3 & 0xF0) << 8) | ((g3 & 0xF0) << 3) | ((b3 & 0xF0) >> 1);
         }
 
         // Handle remaining pixels.
         for (; x < width; ++x) {
             TUint16 pixel = src_pixels[rowOffset + x];
-            TUint8 r = colorLUT[(pixel & 0xF800) >> 8];
-            TUint8 g = colorLUT[256 + ((pixel & 0x07E0) >> 3)];
-            TUint8 b = colorLUT[512 + ((pixel & 0x001F) << 3)];
-            dst_pixels[rowOffset + x] = (r << 8) | (g << 3) | (b >> 3);
+            TUint8 r = lut_r[(pixel >> 8) & 0xF0];
+            TUint8 g = lut_g[(pixel >> 3) & 0xF8];
+            TUint8 b = lut_b[(pixel << 3) & 0xF8];
+            dst_pixels[rowOffset + x] = ((r & 0xF0) << 8) | ((g & 0xF0) << 3) | ((b & 0xF0) >> 1);
         }
     }
 }
@@ -92,32 +98,38 @@ void ApplyFlip(void *dest, void *source, int pitch, int width, int height, SDL_F
     const bool flipHorizontal = (flip & SDL_FLIP_HORIZONTAL) != 0;
     const bool flipVertical = (flip & SDL_FLIP_VERTICAL) != 0;
 
+    // Pre-calculate width/height bounds for horizontal/vertical flipping.
+    const int width_m1 = width - 1;
+    const int height_m1 = height - 1;
+
     for (int y = 0; y < height; ++y) {
         // Calculate destination row offset once per row.
-        TInt dstRowOffset = y * pitchPixels;
+        const TInt dstRowOffset = y * pitchPixels;
 
         // Calculate source Y coordinate once per row.
-        int src_y = flipVertical ? (height - 1 - y) : y;
-        TInt srcRowOffset = src_y * pitchPixels;
+        const int src_y = flipVertical ? (height_m1 - y) : y;
+        const TInt srcRowOffset = src_y * pitchPixels;
 
         int x = 0;
 
         // Unrolled loop: process 4 pixels at once.
         for (; x < width - 3; x += 4) {
-            int src_x0 = flipHorizontal ? (width - 1 - x) : x;
-            int src_x1 = flipHorizontal ? (width - 2 - x) : (x + 1);
-            int src_x2 = flipHorizontal ? (width - 3 - x) : (x + 2);
-            int src_x3 = flipHorizontal ? (width - 4 - x) : (x + 3);
-
-            dst_pixels[dstRowOffset + x] = src_pixels[srcRowOffset + src_x0];
-            dst_pixels[dstRowOffset + x + 1] = src_pixels[srcRowOffset + src_x1];
-            dst_pixels[dstRowOffset + x + 2] = src_pixels[srcRowOffset + src_x2];
-            dst_pixels[dstRowOffset + x + 3] = src_pixels[srcRowOffset + src_x3];
+            if (flipHorizontal) {
+                dst_pixels[dstRowOffset + x] = src_pixels[srcRowOffset + (width_m1 - x)];
+                dst_pixels[dstRowOffset + x + 1] = src_pixels[srcRowOffset + (width_m1 - x - 1)];
+                dst_pixels[dstRowOffset + x + 2] = src_pixels[srcRowOffset + (width_m1 - x - 2)];
+                dst_pixels[dstRowOffset + x + 3] = src_pixels[srcRowOffset + (width_m1 - x - 3)];
+            } else {
+                dst_pixels[dstRowOffset + x] = src_pixels[srcRowOffset + x];
+                dst_pixels[dstRowOffset + x + 1] = src_pixels[srcRowOffset + x + 1];
+                dst_pixels[dstRowOffset + x + 2] = src_pixels[srcRowOffset + x + 2];
+                dst_pixels[dstRowOffset + x + 3] = src_pixels[srcRowOffset + x + 3];
+            }
         }
 
         // Handle remaining pixels.
         for (; x < width; ++x) {
-            int src_x = flipHorizontal ? (width - 1 - x) : x;
+            const int src_x = flipHorizontal ? (width_m1 - x) : x;
             dst_pixels[dstRowOffset + x] = src_pixels[srcRowOffset + src_x];
         }
     }
@@ -140,23 +152,65 @@ void ApplyRotation(void *dest, void *source, int pitch, int width, int height, T
 
     // Incremental DDA: Calculate per-pixel increments.
     // As we move right (x+1), the rotated position changes by (cos, -sin).
-    TFixed dx_cos = cos_angle;
-    TFixed dx_sin = -sin_angle;
+    const TFixed dx_cos = cos_angle;
+    const TFixed dx_sin = -sin_angle;
 
     for (int y = 0; y < height; ++y) {
         // Calculate destination row offset once per row.
-        TInt dstRowOffset = y * pitchPixels;
+        const TInt dstRowOffset = y * pitchPixels;
 
         // Calculate starting position for this row.
-        TFixed translated_y = Int2Fix(y) - center_y;
-        TFixed row_start_x = FixMul(translated_y, sin_angle) + center_x;
-        TFixed row_start_y = FixMul(translated_y, cos_angle) + center_y;
+        // For y, rotation transforms: x' = x*cos - y*sin, y' = x*sin + y*cos
+        // At x=0: x' = -y*sin, y' = y*cos (relative to center)
+        const TFixed translated_y = Int2Fix(y) - center_y;
+        const TFixed row_start_x = center_x - FixMul(translated_y, sin_angle);
+        const TFixed row_start_y = center_y + FixMul(translated_y, cos_angle);
 
-        // For first pixel in row, account for x=0 translation.
-        TFixed src_x = row_start_x - FixMul(center_x, cos_angle);
-        TFixed src_y = row_start_y + FixMul(center_x, sin_angle);
+        // Start at x=0 position.
+        TFixed src_x = row_start_x;
+        TFixed src_y = row_start_y;
 
-        for (int x = 0; x < width; ++x) {
+        int x = 0;
+
+        // Unrolled loop: process 4 pixels at once.
+        for (; x < width - 3; x += 4) {
+            // Pixel 0
+            int final_x0 = Fix2Int(src_x);
+            int final_y0 = Fix2Int(src_y);
+            src_x += dx_cos;
+            src_y += dx_sin;
+
+            // Pixel 1
+            int final_x1 = Fix2Int(src_x);
+            int final_y1 = Fix2Int(src_y);
+            src_x += dx_cos;
+            src_y += dx_sin;
+
+            // Pixel 2
+            int final_x2 = Fix2Int(src_x);
+            int final_y2 = Fix2Int(src_y);
+            src_x += dx_cos;
+            src_y += dx_sin;
+
+            // Pixel 3
+            int final_x3 = Fix2Int(src_x);
+            int final_y3 = Fix2Int(src_y);
+            src_x += dx_cos;
+            src_y += dx_sin;
+
+            // Write all 4 pixels with bounds checking.
+            dst_pixels[dstRowOffset + x] = (final_x0 >= 0 && final_x0 < width && final_y0 >= 0 && final_y0 < height) ?
+                src_pixels[final_y0 * pitchPixels + final_x0] : 0;
+            dst_pixels[dstRowOffset + x + 1] = (final_x1 >= 0 && final_x1 < width && final_y1 >= 0 && final_y1 < height) ?
+                src_pixels[final_y1 * pitchPixels + final_x1] : 0;
+            dst_pixels[dstRowOffset + x + 2] = (final_x2 >= 0 && final_x2 < width && final_y2 >= 0 && final_y2 < height) ?
+                src_pixels[final_y2 * pitchPixels + final_x2] : 0;
+            dst_pixels[dstRowOffset + x + 3] = (final_x3 >= 0 && final_x3 < width && final_y3 >= 0 && final_y3 < height) ?
+                src_pixels[final_y3 * pitchPixels + final_x3] : 0;
+        }
+
+        // Handle remaining pixels.
+        for (; x < width; ++x) {
             // Convert to integer coordinates.
             int final_x = Fix2Int(src_x);
             int final_y = Fix2Int(src_y);
@@ -183,44 +237,47 @@ void ApplyScale(void *dest, void *source, int pitch, int width, int height, TFix
     // Pre-calculate pitch in pixels to avoid repeated division.
     const TInt pitchPixels = pitch >> 1;
 
+    // Pre-calculate inverse scale factors to use FixMul instead of FixDiv.
+    // This is MUCH faster on N-Gage hardware (no division per pixel!).
+    TFixed inv_scale_x = FixDiv(Int2Fix(1), scale_x);
+    TFixed inv_scale_y = FixDiv(Int2Fix(1), scale_y);
+
+    // Pre-calculate center offset to reduce operations per pixel.
+    TFixed center_x_fixed = center_x;
+    TFixed center_y_fixed = center_y;
+
     for (int y = 0; y < height; ++y) {
         // Calculate destination row offset once per row.
         TInt dstRowOffset = y * pitchPixels;
 
-        // Pre-calculate translated_y for the entire row.
-        TFixed translated_y = Int2Fix(y) - center_y;
-        TFixed scaled_y = FixDiv(translated_y, scale_y);
-        int final_y = Fix2Int(scaled_y + center_y);
+        // Use inverse scale factor (multiply instead of divide).
+        TFixed translated_y = Int2Fix(y) - center_y_fixed;
+        TFixed scaled_y = FixMul(translated_y, inv_scale_y);
+        int final_y = Fix2Int(scaled_y + center_y_fixed);
 
         // Check if this row is within bounds.
         bool rowInBounds = (final_y >= 0 && final_y < height);
         TInt srcRowOffset = final_y * pitchPixels;
 
+        // Incremental DDA for X: pre-calculate starting position and increment.
+        TFixed src_x_start = FixMul(-center_x_fixed, inv_scale_x) + center_x_fixed;
+        TFixed src_x = src_x_start;
+
         int x = 0;
 
         // Unrolled loop: process 4 pixels at once.
         for (; x < width - 3; x += 4) {
-            // Pixel 0
-            TFixed translated_x0 = Int2Fix(x) - center_x;
-            TFixed scaled_x0 = FixDiv(translated_x0, scale_x);
-            int final_x0 = Fix2Int(scaled_x0 + center_x);
+            // Process 4 pixels using incremental approach.
+            int final_x0 = Fix2Int(src_x);
+            src_x += inv_scale_x;
+            int final_x1 = Fix2Int(src_x);
+            src_x += inv_scale_x;
+            int final_x2 = Fix2Int(src_x);
+            src_x += inv_scale_x;
+            int final_x3 = Fix2Int(src_x);
+            src_x += inv_scale_x;
 
-            // Pixel 1
-            TFixed translated_x1 = Int2Fix(x + 1) - center_x;
-            TFixed scaled_x1 = FixDiv(translated_x1, scale_x);
-            int final_x1 = Fix2Int(scaled_x1 + center_x);
-
-            // Pixel 2
-            TFixed translated_x2 = Int2Fix(x + 2) - center_x;
-            TFixed scaled_x2 = FixDiv(translated_x2, scale_x);
-            int final_x2 = Fix2Int(scaled_x2 + center_x);
-
-            // Pixel 3
-            TFixed translated_x3 = Int2Fix(x + 3) - center_x;
-            TFixed scaled_x3 = FixDiv(translated_x3, scale_x);
-            int final_x3 = Fix2Int(scaled_x3 + center_x);
-
-            // Write all 4 pixels
+            // Write all 4 pixels with bounds checking.
             dst_pixels[dstRowOffset + x] = (rowInBounds && final_x0 >= 0 && final_x0 < width) ?
                 src_pixels[srcRowOffset + final_x0] : 0;
             dst_pixels[dstRowOffset + x + 1] = (rowInBounds && final_x1 >= 0 && final_x1 < width) ?
@@ -233,9 +290,8 @@ void ApplyScale(void *dest, void *source, int pitch, int width, int height, TFix
 
         // Handle remaining pixels.
         for (; x < width; ++x) {
-            TFixed translated_x = Int2Fix(x) - center_x;
-            TFixed scaled_x = FixDiv(translated_x, scale_x);
-            int final_x = Fix2Int(scaled_x + center_x);
+            int final_x = Fix2Int(src_x);
+            src_x += inv_scale_x;
 
             if (rowInBounds && final_x >= 0 && final_x < width) {
                 dst_pixels[dstRowOffset + x] = src_pixels[srcRowOffset + final_x];

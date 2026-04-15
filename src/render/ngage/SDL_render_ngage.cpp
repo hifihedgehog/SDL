@@ -505,19 +505,25 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
 
     SDL_FColor *c = &texture->color;
 
-    // Get render scale.
+    // Fast path 1: No transformations needed; direct BitBlt.
+    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
+        // Get render scale.
+        float sx;
+        float sy;
+        SDL_GetRenderScale(renderer, &sx, &sy);
+
+        if (sx == 1.f && sy == 1.f) {
+            TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
+            TPoint aDest(dstrect->x, dstrect->y);
+            iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+            return true;
+        }
+    }
+
+    // Get render scale (moved here to avoid redundant call in fast path).
     float sx;
     float sy;
     SDL_GetRenderScale(renderer, &sx, &sy);
-
-    // Fast path: No transformations needed; direct BitBlt.
-    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f &&
-        sx == 1.f && sy == 1.f) {
-        TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
-        TPoint aDest(dstrect->x, dstrect->y);
-        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
-        return true;
-    }
 
     // Slow path: Transformations needed.
     int w = phdata->cachedWidth;
@@ -591,16 +597,18 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
 
     SDL_FColor *c = &texture->color;
 
-    // Check for cardinal rotation cache opportunity (0°, 90°, 180°, 270°).
-    TInt angleIndex = -1;
-    TFixed angle = copydata->angle;
+    // Pre-calculate common checks.
+    const bool isIdentityScale = (copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1));
+    const bool isNoRotation = (copydata->angle == 0);
+    const bool isNoFlip = (!copydata->flip);
+    const bool isNoColorMod = (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f);
 
-    if (!copydata->flip && 
-        copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1) &&
-        c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
+    // Fast path 1: Check for cardinal rotation cache opportunity (0°, 90°, 180°, 270°).
+    if (isNoFlip && isIdentityScale && isNoColorMod && !isNoRotation) {
+        TInt angleIndex = -1;
+        TFixed angle = copydata->angle;
 
         // Convert angle to degrees and check if it's a cardinal angle.
-        // Angle is in fixed-point radians: 0, π/2, π, 3π/2
         TFixed zero = 0;
         TFixed pi_2 = Real2Fix(M_PI / 2.0);
         TFixed pi = Real2Fix(M_PI);
@@ -624,11 +632,8 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
         }
     }
 
-    // Fast path: No transformations needed; direct BitBlt.
-    if (!copydata->flip &&
-        copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1) &&
-        copydata->angle == 0 &&
-        c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
+    // Fast path 2: No transformations needed; direct BitBlt.
+    if (isNoFlip && isIdentityScale && isNoRotation && isNoColorMod) {
         TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
         TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
         iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
@@ -661,7 +666,7 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
         useBuffer1 = !useBuffer1;
     }
 
-    if (copydata->scale_x != Int2Fix(1) || copydata->scale_y != Int2Fix(1)) {
+    if (!isIdentityScale) {
         dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyScale(dest, source, pitch, w, h, copydata->center.x, copydata->center.y, copydata->scale_x, copydata->scale_y);
         source = dest;
@@ -675,7 +680,7 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
         useBuffer1 = !useBuffer1;
     }
 
-    if (c->a != 1.f || c->r != 1.f || c->g != 1.f || c->b != 1.f) {
+    if (!isNoColorMod) {
         TFixed rf = Real2Fix(c->r);
         TFixed gf = Real2Fix(c->g);
         TFixed bf = Real2Fix(c->b);
@@ -771,13 +776,23 @@ void CRenderer::DrawLines(NGAGE_Vertex *aVerts, const TInt aCount)
 void CRenderer::DrawPoints(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
+        // Batch points by color to minimize SetPenColor calls.
+        TUint32 currentColor = 0xFFFFFFFF;  // Invalid initial color
+        bool colorSet = false;
+
         for (TInt i = 0; i < aCount; i++, aVerts++) {
             TUint32 aColor = (((TUint8)aVerts->color.a << 24) |
                               ((TUint8)aVerts->color.b << 16) |
                               ((TUint8)aVerts->color.g << 8) |
                               (TUint8)aVerts->color.r);
 
-            iRenderer->Gc()->SetPenColor(aColor);
+            // Only set pen color when it changes.
+            if (!colorSet || aColor != currentColor) {
+                iRenderer->Gc()->SetPenColor(aColor);
+                currentColor = aColor;
+                colorSet = true;
+            }
+
             iRenderer->Gc()->Plot(TPoint(aVerts->x, aVerts->y));
         }
     }
@@ -786,20 +801,29 @@ void CRenderer::DrawPoints(NGAGE_Vertex *aVerts, const TInt aCount)
 void CRenderer::FillRects(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
-        for (TInt i = 0; i < aCount; i++, aVerts++) {
+        // Batch rectangles by color to minimize SetPenColor/SetBrushColor calls.
+        TUint32 currentColor = 0xFFFFFFFF;  // Invalid initial color
+        bool colorSet = false;
+
+        // Process rectangles (each rect uses 2 vertices: position and size).
+        for (TInt i = 0; i < aCount; i += 2) {
             TPoint pos(aVerts[i].x, aVerts[i].y);
-            TSize size(
-                aVerts[i + 1].x,
-                aVerts[i + 1].y);
+            TSize size(aVerts[i + 1].x, aVerts[i + 1].y);
             TRect rect(pos, size);
 
-            TUint32 aColor = (((TUint8)aVerts->color.a << 24) |
-                              ((TUint8)aVerts->color.b << 16) |
-                              ((TUint8)aVerts->color.g << 8) |
-                              (TUint8)aVerts->color.r);
+            TUint32 aColor = (((TUint8)aVerts[i].color.a << 24) |
+                              ((TUint8)aVerts[i].color.b << 16) |
+                              ((TUint8)aVerts[i].color.g << 8) |
+                              (TUint8)aVerts[i].color.r);
 
-            iRenderer->Gc()->SetPenColor(aColor);
-            iRenderer->Gc()->SetBrushColor(aColor);
+            // Only set colors when they change.
+            if (!colorSet || aColor != currentColor) {
+                iRenderer->Gc()->SetPenColor(aColor);
+                iRenderer->Gc()->SetBrushColor(aColor);
+                currentColor = aColor;
+                colorSet = true;
+            }
+
             iRenderer->Gc()->DrawRect(rect);
         }
     }
@@ -816,38 +840,36 @@ void CRenderer::Flip()
         return;
     }
 
-    iRenderer->Gc()->UseFont(iFont);
-
     if (iShowFPS && iRenderer->Gc()) {
         UpdateFPS();
+
+        iRenderer->Gc()->UseFont(iFont);
 
         TBuf<64> info;
 
         iRenderer->Gc()->SetPenStyle(CGraphicsContext::ESolidPen);
-        iRenderer->Gc()->SetBrushStyle(CGraphicsContext::ENullBrush);
-        iRenderer->Gc()->SetPenColor(KRgbCyan);
-
-        TRect aTextRect(TPoint(3, 203 - iFont->HeightInPixels()), TSize(45, iFont->HeightInPixels() + 2));
         iRenderer->Gc()->SetBrushStyle(CGraphicsContext::ESolidBrush);
         iRenderer->Gc()->SetBrushColor(KRgbBlack);
+        iRenderer->Gc()->SetPenColor(KRgbCyan);
+
+        // Draw FPS background and text.
+        TRect aTextRect(TPoint(3, 203 - iFont->HeightInPixels()), TSize(45, iFont->HeightInPixels() + 2));
         iRenderer->Gc()->DrawRect(aTextRect);
 
-        // Draw messages.
         info.Format(_L("FPS: %d"), iFPS);
         iRenderer->Gc()->DrawText(info, TPoint(5, 203));
-    } else {
-        // This is a workaround that helps regulating the FPS.
-        iRenderer->Gc()->DrawText(_L(""), TPoint(0, 0));
+
+        iRenderer->Gc()->DiscardFont();
     }
-    iRenderer->Gc()->DiscardFont();
+
     iRenderer->Flip(iDirectScreen);
 
-    // Keep the backlight on.
+    // Keep the backlight on when screen saver is suspended.
     if (iSuspendScreenSaver) {
         User::ResetInactivityTime();
     }
-    // Suspend the current thread for a short while.
-    // Give some time to other threads and active objects.
+
+    // Yield to other threads and active objects briefly.
     User::After(0);
 }
 
