@@ -72,6 +72,39 @@ void NGAGE_DestroyTextureData(NGAGE_TextureData *data)
     }
 }
 
+void *NGAGE_GetBitmapDataAddress(NGAGE_TextureData *data)
+{
+    if (data && data->bitmap) {
+        return data->bitmap->DataAddress();
+    }
+    return NULL;
+}
+
+int NGAGE_GetBitmapPitch(NGAGE_TextureData *data)
+{
+    if (data && data->bitmap) {
+        TSize size = data->bitmap->SizeInPixels();
+        return data->bitmap->ScanLineLength(size.iWidth, data->bitmap->DisplayMode());
+    }
+    return 0;
+}
+
+int NGAGE_GetBitmapWidth(NGAGE_TextureData *data)
+{
+    if (data && data->bitmap) {
+        return data->bitmap->SizeInPixels().iWidth;
+    }
+    return 0;
+}
+
+int NGAGE_GetBitmapHeight(NGAGE_TextureData *data)
+{
+    if (data && data->bitmap) {
+        return data->bitmap->SizeInPixels().iHeight;
+    }
+    return 0;
+}
+
 void NGAGE_DrawLines(NGAGE_Vertex *verts, const int count)
 {
     gRenderer->DrawLines(verts, count);
@@ -127,12 +160,19 @@ CRenderer *CRenderer::NewL()
     return self;
 }
 
-CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0) {}
+CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0) {}
 
 CRenderer::~CRenderer()
 {
     delete iRenderer;
     iRenderer = 0;
+
+    // Free work buffers.
+    SDL_free(iWorkBuffer1);
+    SDL_free(iWorkBuffer2);
+    iWorkBuffer1 = 0;
+    iWorkBuffer2 = 0;
+    iWorkBufferSize = 0;
 }
 
 void CRenderer::ConstructL()
@@ -251,6 +291,36 @@ void CRenderer::Clear(TUint32 iColor)
     }
 }
 
+bool CRenderer::EnsureWorkBufferCapacity(TInt aRequiredSize)
+{
+    if (aRequiredSize <= iWorkBufferSize) {
+        return true;
+    }
+
+    // Free old buffers.
+    SDL_free(iWorkBuffer1);
+    SDL_free(iWorkBuffer2);
+
+    // Allocate new buffers.
+    iWorkBuffer1 = SDL_calloc(1, aRequiredSize);
+    if (!iWorkBuffer1) {
+        iWorkBuffer2 = 0;
+        iWorkBufferSize = 0;
+        return false;
+    }
+
+    iWorkBuffer2 = SDL_calloc(1, aRequiredSize);
+    if (!iWorkBuffer2) {
+        SDL_free(iWorkBuffer1);
+        iWorkBuffer1 = 0;
+        iWorkBufferSize = 0;
+        return false;
+    }
+
+    iWorkBufferSize = aRequiredSize;
+    return true;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -293,42 +363,51 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
     }
 
     NGAGE_TextureData *phdata = (NGAGE_TextureData *)texture->internal;
-    if (!phdata) {
+    if (!phdata || !phdata->bitmap) {
         return false;
     }
 
     SDL_FColor *c = &texture->color;
-    int w = phdata->surface->w;
-    int h = phdata->surface->h;
-    int pitch = phdata->surface->pitch;
-    void *source = phdata->surface->pixels;
+
+    // Get render scale.
+    float sx;
+    float sy;
+    SDL_GetRenderScale(renderer, &sx, &sy);
+
+    // Fast path: No transformations needed; direct BitBlt.
+    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f &&
+        sx == 1.f && sy == 1.f) {
+        TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
+        TPoint aDest(dstrect->x, dstrect->y);
+        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+        return true;
+    }
+
+    // Slow path: Transformations needed.
+    int w = phdata->cachedWidth;
+    int h = phdata->cachedHeight;
+    int pitch = phdata->cachedPitch;
+    void *source = phdata->cachedDataAddress;
     void *dest;
 
     if (!source) {
         return false;
     }
 
-    void *pixel_buffer_a = SDL_calloc(1, pitch * h);
-    if (!pixel_buffer_a) {
+    // Ensure work buffers have sufficient capacity.
+    TInt bufferSize = pitch * h;
+    if (!EnsureWorkBufferCapacity(bufferSize)) {
         return false;
     }
-    dest = pixel_buffer_a;
 
-    void *pixel_buffer_b = SDL_calloc(1, pitch * h);
-    if (!pixel_buffer_b) {
-        SDL_free(pixel_buffer_a);
-        return false;
-    }
+    dest = iWorkBuffer1;
+    bool useBuffer1 = true;
 
     if (c->a != 1.f || c->r != 1.f || c->g != 1.f || c->b != 1.f) {
         ApplyColorMod(dest, source, pitch, w, h, texture->color);
-
         source = dest;
+        useBuffer1 = !useBuffer1;
     }
-
-    float sx;
-    float sy;
-    SDL_GetRenderScale(renderer, &sx, &sy);
 
     if (sx != 1.f || sy != 1.f) {
         TFixed scale_x = Real2Fix(sx);
@@ -336,22 +415,20 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
         TFixed center_x = Int2Fix(w / 2);
         TFixed center_y = Int2Fix(h / 2);
 
-        dest == pixel_buffer_a ? dest = pixel_buffer_b : dest = pixel_buffer_a;
-
+        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyScale(dest, source, pitch, w, h, center_x, center_y, scale_x, scale_y);
-
         source = dest;
+        useBuffer1 = !useBuffer1;
     }
 
-    Mem::Copy(phdata->bitmap->DataAddress(), source, pitch * h);
-    SDL_free(pixel_buffer_a);
-    SDL_free(pixel_buffer_b);
+    // Render directly from work buffer without copying back to bitmap.
+    // Note: We need a temporary bitmap for rendering the transformed data.
+    // For now, copy to original bitmap (this could be further optimized with a render target).
+    Mem::Copy(phdata->cachedDataAddress, source, pitch * h);
 
-    if (phdata->bitmap) {
-        TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
-        TPoint aDest(dstrect->x, dstrect->y);
-        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
-    }
+    TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
+    TPoint aDest(dstrect->x, dstrect->y);
+    iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
 
     return true;
 }
@@ -359,65 +436,78 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
 bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE_CopyExData *copydata)
 {
     NGAGE_TextureData *phdata = (NGAGE_TextureData *)texture->internal;
-    if (!phdata) {
+    if (!phdata || !phdata->bitmap) {
         return false;
     }
 
     SDL_FColor *c = &texture->color;
-    int w = phdata->surface->w;
-    int h = phdata->surface->h;
-    int pitch = phdata->surface->pitch;
-    void *source = phdata->surface->pixels;
+
+    // Fast path: No transformations needed; direct BitBlt.
+    if (!copydata->flip &&
+        copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1) &&
+        copydata->angle == 0 &&
+        c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
+        TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
+        TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
+        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+        return true;
+    }
+
+    // Slow path: Transformations needed.
+    int w = phdata->cachedWidth;
+    int h = phdata->cachedHeight;
+    int pitch = phdata->cachedPitch;
+    void *source = phdata->cachedDataAddress;
     void *dest;
 
     if (!source) {
         return false;
     }
 
-    void *pixel_buffer_a = SDL_calloc(1, pitch * h);
-    if (!pixel_buffer_a) {
+    // Ensure work buffers have sufficient capacity.
+    TInt bufferSize = pitch * h;
+    if (!EnsureWorkBufferCapacity(bufferSize)) {
         return false;
     }
-    dest = pixel_buffer_a;
 
-    void *pixel_buffer_b = SDL_calloc(1, pitch * h);
-    if (!pixel_buffer_a) {
-        SDL_free(pixel_buffer_a);
-        return false;
-    }
+    dest = iWorkBuffer1;
+    bool useBuffer1 = true;
 
     if (copydata->flip) {
         ApplyFlip(dest, source, pitch, w, h, copydata->flip);
         source = dest;
+        useBuffer1 = !useBuffer1;
     }
 
-    if (copydata->scale_x != 1.f || copydata->scale_y != 1.f) {
-        dest == pixel_buffer_a ? dest = pixel_buffer_b : dest = pixel_buffer_a;
+    if (copydata->scale_x != Int2Fix(1) || copydata->scale_y != Int2Fix(1)) {
+        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyScale(dest, source, pitch, w, h, copydata->center.x, copydata->center.y, copydata->scale_x, copydata->scale_y);
         source = dest;
+        useBuffer1 = !useBuffer1;
     }
 
     if (copydata->angle) {
-        dest == pixel_buffer_a ? dest = pixel_buffer_b : dest = pixel_buffer_a;
+        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyRotation(dest, source, pitch, w, h, copydata->center.x, copydata->center.y, copydata->angle);
         source = dest;
+        useBuffer1 = !useBuffer1;
     }
 
     if (c->a != 1.f || c->r != 1.f || c->g != 1.f || c->b != 1.f) {
-        dest == pixel_buffer_a ? dest = pixel_buffer_b : dest = pixel_buffer_a;
+        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyColorMod(dest, source, pitch, w, h, texture->color);
         source = dest;
+        useBuffer1 = !useBuffer1;
     }
 
-    Mem::Copy(phdata->bitmap->DataAddress(), source, pitch * h);
-    SDL_free(pixel_buffer_a);
-    SDL_free(pixel_buffer_b);
+    // Render directly from work buffer without copying back to bitmap.
+    // Note: We need a temporary bitmap for rendering the transformed data.
+    // For now, copy to original bitmap (this could be further optimized with a render target).
+    Mem::Copy(phdata->cachedDataAddress, source, pitch * h);
 
-    if (phdata->bitmap) {
-        TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
-        TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
-        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
-    }
+    TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
+    TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
+    iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
 
     return true;
 }
@@ -439,6 +529,13 @@ bool CRenderer::CreateTextureData(NGAGE_TextureData *aTextureData, const TInt aW
         aTextureData->bitmap = NULL;
         return false;
     }
+
+    // Cache texture properties to avoid repeated API calls.
+    TSize bitmapSize = aTextureData->bitmap->SizeInPixels();
+    aTextureData->cachedWidth = bitmapSize.iWidth;
+    aTextureData->cachedHeight = bitmapSize.iHeight;
+    aTextureData->cachedPitch = aTextureData->bitmap->ScanLineLength(aWidth, aTextureData->bitmap->DisplayMode());
+    aTextureData->cachedDataAddress = aTextureData->bitmap->DataAddress();
 
     return true;
 }

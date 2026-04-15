@@ -20,8 +20,8 @@
 */
 #include "SDL_internal.h"
 
-#include <3dtypes.h>
 #include "SDL_render_ops.hpp"
+#include <3dtypes.h>
 
 void ApplyColorMod(void *dest, void *source, int pitch, int width, int height, SDL_FColor color)
 {
@@ -32,18 +32,22 @@ void ApplyColorMod(void *dest, void *source, int pitch, int width, int height, S
     TFixed gf = Real2Fix(color.g);
     TFixed bf = Real2Fix(color.b);
 
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
-            TUint16 pixel = src_pixels[y * pitch / 2 + x];
+    // Pre-calculate pitch in pixels to avoid repeated division.
+    const TInt pitchPixels = pitch >> 1;
+
+    for (int y = 0; y < height; ++y) {
+        // Calculate row offset once per row.
+        TInt rowOffset = y * pitchPixels;
+
+        for (int x = 0; x < width; ++x) {
+            TUint16 pixel = src_pixels[rowOffset + x];
             TUint8 r = (pixel & 0xF800) >> 8;
             TUint8 g = (pixel & 0x07E0) >> 3;
             TUint8 b = (pixel & 0x001F) << 3;
             r = FixMul(r, rf);
             g = FixMul(g, gf);
             b = FixMul(b, bf);
-            dst_pixels[y * pitch / 2 + x] = (r << 8) | (g << 3) | (b >> 3);
+            dst_pixels[rowOffset + x] = (r << 8) | (g << 3) | (b >> 3);
         }
     }
 }
@@ -53,20 +57,16 @@ void ApplyFlip(void *dest, void *source, int pitch, int width, int height, SDL_F
     TUint16 *src_pixels = static_cast<TUint16 *>(source);
     TUint16 *dst_pixels = static_cast<TUint16 *>(dest);
 
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
             int src_x = x;
             int src_y = y;
 
-            if (flip & SDL_FLIP_HORIZONTAL)
-            {
+            if (flip & SDL_FLIP_HORIZONTAL) {
                 src_x = width - 1 - x;
             }
 
-            if (flip & SDL_FLIP_VERTICAL)
-            {
+            if (flip & SDL_FLIP_VERTICAL) {
                 src_y = height - 1 - y;
             }
 
@@ -83,15 +83,12 @@ void ApplyRotation(void *dest, void *source, int pitch, int width, int height, T
     TFixed cos_angle = 0;
     TFixed sin_angle = 0;
 
-    if (angle != 0)
-    {
+    if (angle != 0) {
         FixSinCos(angle, sin_angle, cos_angle);
     }
 
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
             // Translate point to origin.
             TFixed translated_x = Int2Fix(x) - center_x;
             TFixed translated_y = Int2Fix(y) - center_y;
@@ -105,12 +102,9 @@ void ApplyRotation(void *dest, void *source, int pitch, int width, int height, T
             int final_y = Fix2Int(rotated_y + center_y);
 
             // Check bounds.
-            if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height)
-            {
+            if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height) {
                 dst_pixels[y * pitch / 2 + x] = src_pixels[final_y * pitch / 2 + final_x];
-            }
-            else
-            {
+            } else {
                 dst_pixels[y * pitch / 2 + x] = 0;
             }
         }
@@ -122,10 +116,8 @@ void ApplyScale(void *dest, void *source, int pitch, int width, int height, TFix
     TUint16 *src_pixels = static_cast<TUint16 *>(source);
     TUint16 *dst_pixels = static_cast<TUint16 *>(dest);
 
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
             // Translate point to origin.
             TFixed translated_x = Int2Fix(x) - center_x;
             TFixed translated_y = Int2Fix(y) - center_y;
@@ -139,12 +131,9 @@ void ApplyScale(void *dest, void *source, int pitch, int width, int height, TFix
             int final_y = Fix2Int(scaled_y + center_y);
 
             // Check bounds.
-            if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height)
-            {
+            if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height) {
                 dst_pixels[y * pitch / 2 + x] = src_pixels[final_y * pitch / 2 + final_x];
-            }
-            else
-            {
+            } else {
                 dst_pixels[y * pitch / 2 + x] = 0;
             }
         }

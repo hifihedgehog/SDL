@@ -160,13 +160,6 @@ static bool NGAGE_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture, SD
         return false;
     }
 
-    SDL_Surface *surface = SDL_CreateSurface(texture->w, texture->h, texture->format);
-    if (!surface) {
-        SDL_free(data);
-        return false;
-    }
-
-    data->surface = surface;
     texture->internal = data;
 
     return true;
@@ -447,29 +440,25 @@ static bool NGAGE_UpdateTexture(SDL_Renderer *renderer, SDL_Texture *texture, co
 {
     NGAGE_TextureData *phdata = (NGAGE_TextureData *)texture->internal;
 
-    SDL_Surface *surface = phdata->surface;
-    Uint8 *src, *dst;
-    int row;
-    size_t length;
-
-    if (SDL_MUSTLOCK(surface)) {
-        if (!SDL_LockSurface(surface)) {
-            return false;
-        }
+    if (!phdata) {
+        return false;
     }
-    src = (Uint8 *)pixels;
-    dst = (Uint8 *)surface->pixels +
-          rect->y * surface->pitch +
-          rect->x * surface->fmt->bytes_per_pixel;
 
-    length = (size_t)rect->w * surface->fmt->bytes_per_pixel;
-    for (row = 0; row < rect->h; ++row) {
+    void *bitmapData = NGAGE_GetBitmapDataAddress(phdata);
+    int bitmapPitch = NGAGE_GetBitmapPitch(phdata);
+
+    if (!bitmapData || bitmapPitch == 0) {
+        return false;
+    }
+
+    Uint8 *src = (Uint8 *)pixels;
+    Uint8 *dst = (Uint8 *)bitmapData + rect->y * bitmapPitch + rect->x * 2; // 2 bytes per pixel for EColor4K
+
+    size_t length = (size_t)rect->w * 2; // 2 bytes per pixel for EColor4K
+    for (int row = 0; row < rect->h; ++row) {
         SDL_memcpy(dst, src, length);
         src += pitch;
-        dst += surface->pitch;
-    }
-    if (SDL_MUSTLOCK(surface)) {
-        SDL_UnlockSurface(surface);
+        dst += bitmapPitch;
     }
 
     return true;
@@ -478,12 +467,20 @@ static bool NGAGE_UpdateTexture(SDL_Renderer *renderer, SDL_Texture *texture, co
 static bool NGAGE_LockTexture(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rect *rect, void **pixels, int *pitch)
 {
     NGAGE_TextureData *phdata = (NGAGE_TextureData *)texture->internal;
-    SDL_Surface *surface = phdata->surface;
 
-    *pixels =
-        (void *)((Uint8 *)surface->pixels + rect->y * surface->pitch +
-                 rect->x * surface->fmt->bytes_per_pixel);
-    *pitch = surface->pitch;
+    if (!phdata) {
+        return false;
+    }
+
+    void *bitmapData = NGAGE_GetBitmapDataAddress(phdata);
+    int bitmapPitch = NGAGE_GetBitmapPitch(phdata);
+
+    if (!bitmapData || bitmapPitch == 0) {
+        return false;
+    }
+
+    *pixels = (void *)((Uint8 *)bitmapData + rect->y * bitmapPitch + rect->x * 2); // 2 bytes per pixel for EColor4K
+    *pitch = bitmapPitch;
     return true;
 }
 
@@ -512,7 +509,6 @@ static void NGAGE_DestroyTexture(SDL_Renderer *renderer, SDL_Texture *texture)
 {
     NGAGE_TextureData *data = (NGAGE_TextureData *)texture->internal;
     if (data) {
-        SDL_DestroySurface(data->surface);
         NGAGE_DestroyTextureData(data);
         SDL_free(data);
         texture->internal = 0;

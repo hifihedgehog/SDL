@@ -86,6 +86,14 @@ class CRenderer : public MDirectScreenAccess
 
     // Screen saver.
     TBool iSuspendScreenSaver;
+
+    // Work buffers for texture transformations (reusable to avoid per-frame allocations).
+    void *iWorkBuffer1;
+    void *iWorkBuffer2;
+    TInt iWorkBufferSize;
+
+    // Helper method to ensure work buffers have sufficient capacity.
+    bool EnsureWorkBufferCapacity(TInt aRequiredSize);
 };
 
 #endif // ngage_video_render_ngage_c_hpp
