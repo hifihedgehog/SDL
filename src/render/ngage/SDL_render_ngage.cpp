@@ -69,6 +69,14 @@ void NGAGE_DestroyTextureData(NGAGE_TextureData *data)
     if (data) {
         delete data->bitmap;
         data->bitmap = NULL;
+
+        // Free cardinal rotation cache.
+        for (int i = 0; i < 4; i++) {
+            if (data->cardinalRotations[i]) {
+                delete data->cardinalRotations[i];
+                data->cardinalRotations[i] = NULL;
+            }
+        }
     }
 }
 
@@ -160,7 +168,7 @@ CRenderer *CRenderer::NewL()
     return self;
 }
 
-CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0) {}
+CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1) {}
 
 CRenderer::~CRenderer()
 {
@@ -361,6 +369,94 @@ bool CRenderer::EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight)
     return true;
 }
 
+void CRenderer::BuildColorModLUT(TFixed rf, TFixed gf, TFixed bf)
+{
+    // Build lookup tables for R, G, B channels.
+    for (int i = 0; i < 256; i++) {
+        TFixed val = i << 16;  // Convert to fixed-point
+        iColorModLUT[i]       = (TUint8)SDL_min(Fix2Int(FixMul(val, rf)), 255);  // R
+        iColorModLUT[i + 256] = (TUint8)SDL_min(Fix2Int(FixMul(val, gf)), 255);  // G
+        iColorModLUT[i + 512] = (TUint8)SDL_min(Fix2Int(FixMul(val, bf)), 255);  // B
+    }
+
+    // Remember the last color to avoid rebuilding unnecessarily.
+    iLastColorR = rf;
+    iLastColorG = gf;
+    iLastColorB = bf;
+}
+
+CFbsBitmap* CRenderer::GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt aAngleIndex)
+{
+    // Check if already cached.
+    if (aTextureData->cardinalRotations[aAngleIndex]) {
+        return aTextureData->cardinalRotations[aAngleIndex];
+    }
+
+    // Create rotated bitmap.
+    CFbsBitmap *rotated = new CFbsBitmap();
+    if (!rotated) {
+        return NULL;
+    }
+
+    TInt w = aTextureData->cachedWidth;
+    TInt h = aTextureData->cachedHeight;
+    TSize size(w, h);
+
+    // For 90 and 270 degree rotations, swap width/height.
+    if (aAngleIndex == 1 || aAngleIndex == 3) {
+        size = TSize(h, w);
+    }
+
+    TInt error = rotated->Create(size, EColor4K);
+    if (error != KErrNone) {
+        delete rotated;
+        return NULL;
+    }
+
+    // Rotate the bitmap data.
+    TUint16 *src = (TUint16 *)aTextureData->cachedDataAddress;
+    TUint16 *dst = (TUint16 *)rotated->DataAddress();
+    TInt srcPitch = aTextureData->cachedPitch >> 1;
+    TInt dstPitch = rotated->ScanLineLength(size.iWidth, rotated->DisplayMode()) >> 1;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            TUint16 pixel = src[y * srcPitch + x];
+            int dstX = 0;
+            int dstY = 0;
+
+            switch (aAngleIndex) {
+                case 0: // 0 degrees
+                    dstX = x;
+                    dstY = y;
+                    break;
+                case 1: // 90 degrees
+                    dstX = h - 1 - y;
+                    dstY = x;
+                    break;
+                case 2: // 180 degrees
+                    dstX = w - 1 - x;
+                    dstY = h - 1 - y;
+                    break;
+                case 3: // 270 degrees
+                    dstX = y;
+                    dstY = w - 1 - x;
+                    break;
+                default:
+                    // Should never happen, but initialize to avoid warnings
+                    dstX = x;
+                    dstY = y;
+                    break;
+            }
+
+            dst[dstY * dstPitch + dstX] = pixel;
+        }
+    }
+
+    aTextureData->cardinalRotations[aAngleIndex] = rotated;
+    return rotated;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -444,7 +540,16 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
     bool useBuffer1 = true;
 
     if (c->a != 1.f || c->r != 1.f || c->g != 1.f || c->b != 1.f) {
-        ApplyColorMod(dest, source, pitch, w, h, texture->color);
+        TFixed rf = Real2Fix(c->r);
+        TFixed gf = Real2Fix(c->g);
+        TFixed bf = Real2Fix(c->b);
+
+        // Build LUT if color changed.
+        if (rf != iLastColorR || gf != iLastColorG || bf != iLastColorB) {
+            BuildColorModLUT(rf, gf, bf);
+        }
+
+        ApplyColorMod(dest, source, pitch, w, h, texture->color, iColorModLUT);
         source = dest;
         useBuffer1 = !useBuffer1;
     }
@@ -485,6 +590,39 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
     }
 
     SDL_FColor *c = &texture->color;
+
+    // Check for cardinal rotation cache opportunity (0°, 90°, 180°, 270°).
+    TInt angleIndex = -1;
+    TFixed angle = copydata->angle;
+
+    if (!copydata->flip && 
+        copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1) &&
+        c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
+
+        // Convert angle to degrees and check if it's a cardinal angle.
+        // Angle is in fixed-point radians: 0, π/2, π, 3π/2
+        TFixed zero = 0;
+        TFixed pi_2 = Real2Fix(M_PI / 2.0);
+        TFixed pi = Real2Fix(M_PI);
+        TFixed pi3_2 = Real2Fix(3.0 * M_PI / 2.0);
+        TFixed pi2 = Real2Fix(2.0 * M_PI);
+
+        if (angle == zero) angleIndex = 0;
+        else if (SDL_abs(angle - pi_2) < 100) angleIndex = 1;      // 90°
+        else if (SDL_abs(angle - pi) < 100) angleIndex = 2;         // 180°
+        else if (SDL_abs(angle - pi3_2) < 100) angleIndex = 3;      // 270°
+        else if (SDL_abs(angle - pi2) < 100) angleIndex = 0;        // 360° = 0°
+
+        if (angleIndex >= 0) {
+            CFbsBitmap *cached = GetCardinalRotation(phdata, angleIndex);
+            if (cached) {
+                TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
+                TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
+                iRenderer->Gc()->BitBlt(aDest, cached, aSource);
+                return true;
+            }
+        }
+    }
 
     // Fast path: No transformations needed; direct BitBlt.
     if (!copydata->flip &&
@@ -538,8 +676,17 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
     }
 
     if (c->a != 1.f || c->r != 1.f || c->g != 1.f || c->b != 1.f) {
+        TFixed rf = Real2Fix(c->r);
+        TFixed gf = Real2Fix(c->g);
+        TFixed bf = Real2Fix(c->b);
+
+        // Build LUT if color changed.
+        if (rf != iLastColorR || gf != iLastColorG || bf != iLastColorB) {
+            BuildColorModLUT(rf, gf, bf);
+        }
+
         dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
-        ApplyColorMod(dest, source, pitch, w, h, texture->color);
+        ApplyColorMod(dest, source, pitch, w, h, texture->color, iColorModLUT);
         source = dest;
         useBuffer1 = !useBuffer1;
     }
@@ -584,6 +731,18 @@ bool CRenderer::CreateTextureData(NGAGE_TextureData *aTextureData, const TInt aW
     aTextureData->cachedHeight = bitmapSize.iHeight;
     aTextureData->cachedPitch = aTextureData->bitmap->ScanLineLength(aWidth, aTextureData->bitmap->DisplayMode());
     aTextureData->cachedDataAddress = aTextureData->bitmap->DataAddress();
+
+    // Initialize cardinal rotation cache to NULL.
+    for (int i = 0; i < 4; i++) {
+        aTextureData->cardinalRotations[i] = NULL;
+    }
+
+    // Initialize dirty tracking.
+    aTextureData->isDirty = true;  // New textures start dirty
+    aTextureData->dirtyRect.x = 0;
+    aTextureData->dirtyRect.y = 0;
+    aTextureData->dirtyRect.w = aWidth;
+    aTextureData->dirtyRect.h = aHeight;
 
     return true;
 }

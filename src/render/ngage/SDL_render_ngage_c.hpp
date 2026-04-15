@@ -23,6 +23,7 @@
 #define ngage_video_render_ngage_c_hpp
 
 #include "SDL_render_ngage_c.h"
+#include <3dtypes.h>
 #include <NRenderer.h>
 #include <e32std.h>
 #include <w32std.h>
@@ -97,9 +98,17 @@ class CRenderer : public MDirectScreenAccess
     TInt iTempRenderBitmapWidth;
     TInt iTempRenderBitmapHeight;
 
+    // Color modulation lookup tables (pre-calculated to avoid per-pixel FixMul).
+    TUint8 iColorModLUT[768]; // 256 entries each for R, G, B
+    TFixed iLastColorR;
+    TFixed iLastColorG;
+    TFixed iLastColorB;
+
     // Helper methods.
     bool EnsureWorkBufferCapacity(TInt aRequiredSize);
     bool EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight);
+    void BuildColorModLUT(TFixed rf, TFixed gf, TFixed bf);
+    CFbsBitmap *GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt aAngleIndex);
 };
 
 #endif // ngage_video_render_ngage_c_hpp

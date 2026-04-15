@@ -65,6 +65,13 @@ typedef struct NGAGE_TextureData
     int cachedPitch;
     void *cachedDataAddress;
 
+    // Cardinal rotation cache (0°, 90°, 180°, 270°) - created on demand.
+    CFbsBitmap *cardinalRotations[4];
+
+    // Dirty tracking to avoid redundant rendering.
+    bool isDirty;
+    SDL_Rect dirtyRect;
+
 } NGAGE_TextureData;
 
 typedef struct NGAGE_CopyExData

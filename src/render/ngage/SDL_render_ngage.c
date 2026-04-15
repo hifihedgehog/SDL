@@ -461,6 +461,10 @@ static bool NGAGE_UpdateTexture(SDL_Renderer *renderer, SDL_Texture *texture, co
         dst += bitmapPitch;
     }
 
+    // Mark texture as dirty.
+    phdata->isDirty = true;
+    phdata->dirtyRect = *rect;
+
     return true;
 }
 
@@ -481,11 +485,21 @@ static bool NGAGE_LockTexture(SDL_Renderer *renderer, SDL_Texture *texture, cons
 
     *pixels = (void *)((Uint8 *)bitmapData + rect->y * bitmapPitch + rect->x * 2); // 2 bytes per pixel for EColor4K
     *pitch = bitmapPitch;
+
+    // Store the lock rectangle for dirty tracking.
+    phdata->dirtyRect = *rect;
+
     return true;
 }
 
 static void NGAGE_UnlockTexture(SDL_Renderer *renderer, SDL_Texture *texture)
 {
+    NGAGE_TextureData *phdata = (NGAGE_TextureData *)texture->internal;
+
+    if (phdata) {
+        // Mark texture as dirty after unlock (assume it was modified).
+        phdata->isDirty = true;
+    }
 }
 
 static bool NGAGE_SetRenderTarget(SDL_Renderer *renderer, SDL_Texture *texture)
