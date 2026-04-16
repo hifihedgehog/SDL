@@ -82,7 +82,7 @@ void NGAGE_DestroyTextureData(NGAGE_TextureData *data)
 
 void *NGAGE_GetBitmapDataAddress(NGAGE_TextureData *data)
 {
-    if (data && data->bitmap) {
+    if (data) {
         return data->bitmap->DataAddress();
     }
     return NULL;
@@ -90,25 +90,24 @@ void *NGAGE_GetBitmapDataAddress(NGAGE_TextureData *data)
 
 int NGAGE_GetBitmapPitch(NGAGE_TextureData *data)
 {
-    if (data && data->bitmap) {
-        TSize size = data->bitmap->SizeInPixels();
-        return data->bitmap->ScanLineLength(size.iWidth, data->bitmap->DisplayMode());
+    if (data) {
+        return data->cachedPitch;
     }
     return 0;
 }
 
 int NGAGE_GetBitmapWidth(NGAGE_TextureData *data)
 {
-    if (data && data->bitmap) {
-        return data->bitmap->SizeInPixels().iWidth;
+    if (data) {
+        return data->cachedWidth;
     }
     return 0;
 }
 
 int NGAGE_GetBitmapHeight(NGAGE_TextureData *data)
 {
-    if (data && data->bitmap) {
-        return data->bitmap->SizeInPixels().iHeight;
+    if (data) {
+        return data->cachedHeight;
     }
     return 0;
 }
@@ -140,9 +139,7 @@ void NGAGE_SetClipRect(const SDL_Rect *rect)
 
 void NGAGE_SetDrawColor(const Uint32 color)
 {
-    if (gRenderer) {
-        gRenderer->SetDrawColor(color);
-    }
+    gRenderer->SetDrawColor(color);
 }
 
 void NGAGE_PumpEventsInternal()
@@ -177,7 +174,9 @@ CRenderer *CRenderer::NewL()
     return self;
 }
 
-CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1), iLinePointsBuffer(0), iLinePointsBufferCapacity(0), iLastDrawColor(0xFFFFFFFF) {}
+CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1), iLinePointsBuffer(0), iLinePointsBufferCapacity(0), iLastDrawColor(0)
+{
+}
 
 CRenderer::~CRenderer()
 {
@@ -505,13 +504,9 @@ Uint32 NGAGE_ConvertColor(float r, float g, float b, float a, float color_scale)
     TFixed bf = Real2Fix(b);
     TFixed af = Real2Fix(a);
 
-    rf = FixMul(rf, scalef);
-    gf = FixMul(gf, scalef);
-    bf = FixMul(bf, scalef);
-
-    rf = SDL_clamp(rf, 0, ff);
-    gf = SDL_clamp(gf, 0, ff);
-    bf = SDL_clamp(bf, 0, ff);
+    rf = SDL_clamp(FixMul(rf, scalef), 0, ff);
+    gf = SDL_clamp(FixMul(gf, scalef), 0, ff);
+    bf = SDL_clamp(FixMul(bf, scalef), 0, ff);
     af = SDL_clamp(af, 0, ff);
 
     rf = FixMul(rf, ff) >> 16;
@@ -539,25 +534,18 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
 
     SDL_FColor *c = &texture->color;
 
-    // Fast path 1: No transformations needed; direct BitBlt.
-    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
-        // Get render scale.
-        float sx;
-        float sy;
-        SDL_GetRenderScale(renderer, &sx, &sy);
-
-        if (sx == 1.f && sy == 1.f) {
-            TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
-            TPoint aDest(dstrect->x, dstrect->y);
-            iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
-            return true;
-        }
-    }
-
-    // Get render scale (moved here to avoid redundant call in fast path).
+    // Get render scale once.
     float sx;
     float sy;
     SDL_GetRenderScale(renderer, &sx, &sy);
+
+    // Fast path 1: No transformations needed; direct BitBlt.
+    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f && sx == 1.f && sy == 1.f) {
+        TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
+        TPoint aDest(dstrect->x, dstrect->y);
+        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+        return true;
+    }
 
     // Slow path: Transformations needed.
     int w = phdata->cachedWidth;
@@ -577,7 +565,6 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
     }
 
     dest = iWorkBuffer1;
-    bool useBuffer1 = true;
 
     if (c->a != 1.f || c->r != 1.f || c->g != 1.f || c->b != 1.f) {
         TFixed rf = Real2Fix(c->r);
@@ -591,7 +578,7 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
 
         ApplyColorMod(dest, source, pitch, w, h, texture->color, iColorModLUT);
         source = dest;
-        useBuffer1 = !useBuffer1;
+        dest = (dest == iWorkBuffer1) ? iWorkBuffer2 : iWorkBuffer1;
     }
 
     if (sx != 1.f || sy != 1.f) {
@@ -600,10 +587,8 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
         TFixed center_x = Int2Fix(w / 2);
         TFixed center_y = Int2Fix(h / 2);
 
-        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyScale(dest, source, pitch, w, h, center_x, center_y, scale_x, scale_y);
         source = dest;
-        useBuffer1 = !useBuffer1;
     }
 
     // Use temp bitmap to avoid destroying source texture.
@@ -637,14 +622,22 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
     const bool isNoFlip = (!copydata->flip);
     const bool isNoColorMod = (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f);
 
-    // Fast path 1: Check for cardinal rotation cache opportunity (0°, 90°, 180°, 270°).
-    if (isNoFlip && isIdentityScale && isNoColorMod && !isNoRotation) {
-        TInt angleIndex = -1;
-        TFixed angle = copydata->angle;
+    // Fast path 1: No transformations needed; direct BitBlt.
+    if (isNoFlip && isIdentityScale && isNoRotation && isNoColorMod) {
+        TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
+        TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
+        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+        return true;
+    }
 
-        // Use pre-calculated angle constants for comparison.
-        if (angle == kAngleZero) {
-            angleIndex = 0;
+    // Fast path 2: Check for cardinal rotation cache opportunity (0°, 90°, 180°, 270°).
+    if (isNoFlip && isIdentityScale && isNoColorMod && !isNoRotation) {
+        TFixed angle = copydata->angle;
+        TInt angleIndex = -1;
+
+        // Check cardinal angles with tolerance - optimized for early exit.
+        if (SDL_abs(angle - kAngleZero) < kAngleTolerance) {
+            angleIndex = 0; // 0°
         } else if (SDL_abs(angle - kAnglePi_2) < kAngleTolerance) {
             angleIndex = 1; // 90°
         } else if (SDL_abs(angle - kAnglePi) < kAngleTolerance) {
@@ -666,14 +659,6 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
         }
     }
 
-    // Fast path 2: No transformations needed; direct BitBlt.
-    if (isNoFlip && isIdentityScale && isNoRotation && isNoColorMod) {
-        TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
-        TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
-        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
-        return true;
-    }
-
     // Slow path: Transformations needed.
     int w = phdata->cachedWidth;
     int h = phdata->cachedHeight;
@@ -692,26 +677,23 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
     }
 
     dest = iWorkBuffer1;
-    bool useBuffer1 = true;
 
     if (copydata->flip) {
         ApplyFlip(dest, source, pitch, w, h, copydata->flip);
         source = dest;
-        useBuffer1 = !useBuffer1;
+        dest = (dest == iWorkBuffer1) ? iWorkBuffer2 : iWorkBuffer1;
     }
 
     if (!isIdentityScale) {
-        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyScale(dest, source, pitch, w, h, copydata->center.x, copydata->center.y, copydata->scale_x, copydata->scale_y);
         source = dest;
-        useBuffer1 = !useBuffer1;
+        dest = (dest == iWorkBuffer1) ? iWorkBuffer2 : iWorkBuffer1;
     }
 
     if (copydata->angle) {
-        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyRotation(dest, source, pitch, w, h, copydata->center.x, copydata->center.y, copydata->angle);
         source = dest;
-        useBuffer1 = !useBuffer1;
+        dest = (dest == iWorkBuffer1) ? iWorkBuffer2 : iWorkBuffer1;
     }
 
     if (!isNoColorMod) {
@@ -724,10 +706,8 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
             BuildColorModLUT(rf, gf, bf);
         }
 
-        dest = useBuffer1 ? iWorkBuffer1 : iWorkBuffer2;
         ApplyColorMod(dest, source, pitch, w, h, texture->color, iColorModLUT);
         source = dest;
-        useBuffer1 = !useBuffer1;
     }
 
     // Use temp bitmap to avoid destroying source texture.
@@ -799,10 +779,12 @@ void CRenderer::DrawLines(NGAGE_Vertex *aVerts, const TInt aCount)
             iLinePointsBuffer[i] = TPoint(aVerts[i].x, aVerts[i].y);
         }
 
-        TUint32 aColor = (((TUint8)aVerts->color.a << 24) |
-                          ((TUint8)aVerts->color.b << 16) |
-                          ((TUint8)aVerts->color.g << 8) |
-                          (TUint8)aVerts->color.r);
+        // Pack color once - all vertices use the same color in polyline.
+        Uint8 ca = aVerts->color.a;
+        Uint8 cr = aVerts->color.r;
+        Uint8 cg = aVerts->color.g;
+        Uint8 cb = aVerts->color.b;
+        TUint32 aColor = (ca << 24) | (cb << 16) | (cg << 8) | cr;
 
         iRenderer->Gc()->SetPenColor(aColor);
         iRenderer->Gc()->DrawPolyLineNoEndPoint(iLinePointsBuffer, aCount);
@@ -813,14 +795,15 @@ void CRenderer::DrawPoints(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
         // Batch points by color to minimize SetPenColor calls.
-        TUint32 currentColor = 0xFFFFFFFF; // Invalid initial color
+        TUint32 currentColor = 0;
         bool colorSet = false;
 
         for (TInt i = 0; i < aCount; i++, aVerts++) {
-            TUint32 aColor = (((TUint8)aVerts->color.a << 24) |
-                              ((TUint8)aVerts->color.b << 16) |
-                              ((TUint8)aVerts->color.g << 8) |
-                              (TUint8)aVerts->color.r);
+            Uint8 ca = aVerts->color.a;
+            Uint8 cr = aVerts->color.r;
+            Uint8 cg = aVerts->color.g;
+            Uint8 cb = aVerts->color.b;
+            TUint32 aColor = (ca << 24) | (cb << 16) | (cg << 8) | cr;
 
             // Only set pen color when it changes.
             if (!colorSet || aColor != currentColor) {
@@ -838,7 +821,7 @@ void CRenderer::FillRects(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
         // Batch rectangles by color to minimize SetPenColor/SetBrushColor calls.
-        TUint32 currentColor = 0xFFFFFFFF; // Invalid initial color
+        TUint32 currentColor = 0;
         bool colorSet = false;
 
         // Process rectangles (each rect uses 2 vertices: position and size).
@@ -847,10 +830,11 @@ void CRenderer::FillRects(NGAGE_Vertex *aVerts, const TInt aCount)
             TSize size(aVerts[i + 1].x, aVerts[i + 1].y);
             TRect rect(pos, size);
 
-            TUint32 aColor = (((TUint8)aVerts[i].color.a << 24) |
-                              ((TUint8)aVerts[i].color.b << 16) |
-                              ((TUint8)aVerts[i].color.g << 8) |
-                              (TUint8)aVerts[i].color.r);
+            Uint8 ca = aVerts[i].color.a;
+            Uint8 cr = aVerts[i].color.r;
+            Uint8 cg = aVerts[i].color.g;
+            Uint8 cb = aVerts[i].color.b;
+            TUint32 aColor = (ca << 24) | (cb << 16) | (cg << 8) | cr;
 
             // Only set colors when they change.
             if (!colorSet || aColor != currentColor) {
