@@ -159,6 +159,15 @@ void NGAGE_SuspendScreenSaverInternal(bool suspend)
 }
 #endif
 
+// Pre-calculated fixed-point angle constants for cardinal rotation checks.
+// These avoid repeated Real2Fix conversions in CopyEx hot path.
+static const TFixed kAngleZero = 0;
+static const TFixed kAnglePi_2 = Real2Fix(M_PI / 2.0);        // 90 degrees
+static const TFixed kAnglePi = Real2Fix(M_PI);                // 180 degrees
+static const TFixed kAnglePi3_2 = Real2Fix(3.0 * M_PI / 2.0); // 270 degrees
+static const TFixed kAnglePi2 = Real2Fix(2.0 * M_PI);         // 360 degrees
+static const TFixed kAngleTolerance = 100;                    // Tolerance for angle comparison
+
 CRenderer *CRenderer::NewL()
 {
     CRenderer *self = new (ELeave) CRenderer();
@@ -168,7 +177,7 @@ CRenderer *CRenderer::NewL()
     return self;
 }
 
-CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1) {}
+CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1), iLinePointsBuffer(0), iLinePointsBufferCapacity(0), iLastDrawColor(0xFFFFFFFF) {}
 
 CRenderer::~CRenderer()
 {
@@ -187,6 +196,11 @@ CRenderer::~CRenderer()
     iTempRenderBitmap = 0;
     iTempRenderBitmapWidth = 0;
     iTempRenderBitmapHeight = 0;
+
+    // Free line points buffer.
+    delete[] iLinePointsBuffer;
+    iLinePointsBuffer = 0;
+    iLinePointsBufferCapacity = 0;
 }
 
 void CRenderer::ConstructL()
@@ -335,10 +349,30 @@ bool CRenderer::EnsureWorkBufferCapacity(TInt aRequiredSize)
     return true;
 }
 
+bool CRenderer::EnsureLinePointsCapacity(TInt aRequiredCount)
+{
+    if (aRequiredCount <= iLinePointsBufferCapacity) {
+        return true;
+    }
+
+    // Free old buffer.
+    delete[] iLinePointsBuffer;
+
+    // Allocate new buffer.
+    iLinePointsBuffer = new TPoint[aRequiredCount];
+    if (!iLinePointsBuffer) {
+        iLinePointsBufferCapacity = 0;
+        return false;
+    }
+
+    iLinePointsBufferCapacity = aRequiredCount;
+    return true;
+}
+
 bool CRenderer::EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight)
 {
-    if (iTempRenderBitmap && 
-        iTempRenderBitmapWidth >= aWidth && 
+    if (iTempRenderBitmap &&
+        iTempRenderBitmapWidth >= aWidth &&
         iTempRenderBitmapHeight >= aHeight) {
         return true;
     }
@@ -373,10 +407,10 @@ void CRenderer::BuildColorModLUT(TFixed rf, TFixed gf, TFixed bf)
 {
     // Build lookup tables for R, G, B channels.
     for (int i = 0; i < 256; i++) {
-        TFixed val = i << 16;  // Convert to fixed-point
-        iColorModLUT[i]       = (TUint8)SDL_min(Fix2Int(FixMul(val, rf)), 255);  // R
-        iColorModLUT[i + 256] = (TUint8)SDL_min(Fix2Int(FixMul(val, gf)), 255);  // G
-        iColorModLUT[i + 512] = (TUint8)SDL_min(Fix2Int(FixMul(val, bf)), 255);  // B
+        TFixed val = i << 16;                                                   // Convert to fixed-point
+        iColorModLUT[i] = (TUint8)SDL_min(Fix2Int(FixMul(val, rf)), 255);       // R
+        iColorModLUT[i + 256] = (TUint8)SDL_min(Fix2Int(FixMul(val, gf)), 255); // G
+        iColorModLUT[i + 512] = (TUint8)SDL_min(Fix2Int(FixMul(val, bf)), 255); // B
     }
 
     // Remember the last color to avoid rebuilding unnecessarily.
@@ -385,7 +419,7 @@ void CRenderer::BuildColorModLUT(TFixed rf, TFixed gf, TFixed bf)
     iLastColorB = bf;
 }
 
-CFbsBitmap* CRenderer::GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt aAngleIndex)
+CFbsBitmap *CRenderer::GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt aAngleIndex)
 {
     // Check if already cached.
     if (aTextureData->cardinalRotations[aAngleIndex]) {
@@ -426,27 +460,27 @@ CFbsBitmap* CRenderer::GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt
             int dstY = 0;
 
             switch (aAngleIndex) {
-                case 0: // 0 degrees
-                    dstX = x;
-                    dstY = y;
-                    break;
-                case 1: // 90 degrees
-                    dstX = h - 1 - y;
-                    dstY = x;
-                    break;
-                case 2: // 180 degrees
-                    dstX = w - 1 - x;
-                    dstY = h - 1 - y;
-                    break;
-                case 3: // 270 degrees
-                    dstX = y;
-                    dstY = w - 1 - x;
-                    break;
-                default:
-                    // Should never happen, but initialize to avoid warnings
-                    dstX = x;
-                    dstY = y;
-                    break;
+            case 0: // 0 degrees
+                dstX = x;
+                dstY = y;
+                break;
+            case 1: // 90 degrees
+                dstX = h - 1 - y;
+                dstY = x;
+                break;
+            case 2: // 180 degrees
+                dstX = w - 1 - x;
+                dstY = h - 1 - y;
+                break;
+            case 3: // 270 degrees
+                dstX = y;
+                dstY = w - 1 - x;
+                break;
+            default:
+                // Should never happen, but initialize to avoid warnings
+                dstX = x;
+                dstY = y;
+                break;
             }
 
             dst[dstY * dstPitch + dstX] = pixel;
@@ -608,18 +642,18 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
         TInt angleIndex = -1;
         TFixed angle = copydata->angle;
 
-        // Convert angle to degrees and check if it's a cardinal angle.
-        TFixed zero = 0;
-        TFixed pi_2 = Real2Fix(M_PI / 2.0);
-        TFixed pi = Real2Fix(M_PI);
-        TFixed pi3_2 = Real2Fix(3.0 * M_PI / 2.0);
-        TFixed pi2 = Real2Fix(2.0 * M_PI);
-
-        if (angle == zero) angleIndex = 0;
-        else if (SDL_abs(angle - pi_2) < 100) angleIndex = 1;      // 90°
-        else if (SDL_abs(angle - pi) < 100) angleIndex = 2;         // 180°
-        else if (SDL_abs(angle - pi3_2) < 100) angleIndex = 3;      // 270°
-        else if (SDL_abs(angle - pi2) < 100) angleIndex = 0;        // 360° = 0°
+        // Use pre-calculated angle constants for comparison.
+        if (angle == kAngleZero) {
+            angleIndex = 0;
+        } else if (SDL_abs(angle - kAnglePi_2) < kAngleTolerance) {
+            angleIndex = 1; // 90°
+        } else if (SDL_abs(angle - kAnglePi) < kAngleTolerance) {
+            angleIndex = 2; // 180°
+        } else if (SDL_abs(angle - kAnglePi3_2) < kAngleTolerance) {
+            angleIndex = 3; // 270°
+        } else if (SDL_abs(angle - kAnglePi2) < kAngleTolerance) {
+            angleIndex = 0; // 360° = 0°
+        }
 
         if (angleIndex >= 0) {
             CFbsBitmap *cached = GetCardinalRotation(phdata, angleIndex);
@@ -743,7 +777,7 @@ bool CRenderer::CreateTextureData(NGAGE_TextureData *aTextureData, const TInt aW
     }
 
     // Initialize dirty tracking.
-    aTextureData->isDirty = true;  // New textures start dirty
+    aTextureData->isDirty = true; // New textures start dirty.
     aTextureData->dirtyRect.x = 0;
     aTextureData->dirtyRect.y = 0;
     aTextureData->dirtyRect.w = aWidth;
@@ -755,10 +789,14 @@ bool CRenderer::CreateTextureData(NGAGE_TextureData *aTextureData, const TInt aW
 void CRenderer::DrawLines(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
-        TPoint *aPoints = new TPoint[aCount];
+        // Ensure reusable buffer has sufficient capacity.
+        if (!EnsureLinePointsCapacity(aCount)) {
+            return;
+        }
 
+        // Fill points from vertex data.
         for (TInt i = 0; i < aCount; i++) {
-            aPoints[i] = TPoint(aVerts[i].x, aVerts[i].y);
+            iLinePointsBuffer[i] = TPoint(aVerts[i].x, aVerts[i].y);
         }
 
         TUint32 aColor = (((TUint8)aVerts->color.a << 24) |
@@ -767,9 +805,7 @@ void CRenderer::DrawLines(NGAGE_Vertex *aVerts, const TInt aCount)
                           (TUint8)aVerts->color.r);
 
         iRenderer->Gc()->SetPenColor(aColor);
-        iRenderer->Gc()->DrawPolyLineNoEndPoint(aPoints, aCount);
-
-        delete[] aPoints;
+        iRenderer->Gc()->DrawPolyLineNoEndPoint(iLinePointsBuffer, aCount);
     }
 }
 
@@ -777,7 +813,7 @@ void CRenderer::DrawPoints(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
         // Batch points by color to minimize SetPenColor calls.
-        TUint32 currentColor = 0xFFFFFFFF;  // Invalid initial color
+        TUint32 currentColor = 0xFFFFFFFF; // Invalid initial color
         bool colorSet = false;
 
         for (TInt i = 0; i < aCount; i++, aVerts++) {
@@ -802,7 +838,7 @@ void CRenderer::FillRects(NGAGE_Vertex *aVerts, const TInt aCount)
 {
     if (iRenderer && iRenderer->Gc()) {
         // Batch rectangles by color to minimize SetPenColor/SetBrushColor calls.
-        TUint32 currentColor = 0xFFFFFFFF;  // Invalid initial color
+        TUint32 currentColor = 0xFFFFFFFF; // Invalid initial color
         bool colorSet = false;
 
         // Process rectangles (each rect uses 2 vertices: position and size).
@@ -876,6 +912,11 @@ void CRenderer::Flip()
 void CRenderer::SetDrawColor(TUint32 iColor)
 {
     if (iRenderer && iRenderer->Gc()) {
+        // Skip redundant calls if color hasn't changed.
+        if (iColor == iLastDrawColor) {
+            return;
+        }
+
         iRenderer->Gc()->SetPenColor(iColor);
         iRenderer->Gc()->SetBrushColor(iColor);
         iRenderer->Gc()->SetBrushStyle(CGraphicsContext::ESolidBrush);
@@ -884,6 +925,8 @@ void CRenderer::SetDrawColor(TUint32 iColor)
         if (err != KErrNone) {
             return;
         }
+
+        iLastDrawColor = iColor;
     }
 }
 
@@ -899,10 +942,17 @@ void CRenderer::UpdateFPS()
 {
     static TTime lastTime;
     static TInt frameCount = 0;
+    static TBool initialized = EFalse;
     TTime currentTime;
-    const TUint KOneSecond = 1000000; // 1s in ms.
+    const TUint KOneSecond = 1000000; // 1s in microseconds.
 
     currentTime.HomeTime();
+
+    if (!initialized) {
+        lastTime = currentTime;
+        initialized = ETrue;
+    }
+
     ++frameCount;
 
     TTimeIntervalMicroSeconds timeDiff = currentTime.MicroSecondsFrom(lastTime);
@@ -1022,6 +1072,7 @@ void CRenderer::HandleEvent(const TWsEvent &aWsEvent)
     case EEventKeyUp: /* Key events */
         timestamp = SDL_GetPerformanceCounter();
         SDL_SendKeyboardKey(timestamp, 1, aWsEvent.Key()->iCode, ConvertScancode(aWsEvent.Key()->iScanCode), false);
+        break;
 
     case EEventFocusGained:
         DisableKeyBlocking();

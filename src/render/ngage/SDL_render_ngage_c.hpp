@@ -104,9 +104,17 @@ class CRenderer : public MDirectScreenAccess
     TFixed iLastColorG;
     TFixed iLastColorB;
 
+    // Reusable line points buffer to avoid per-frame allocations in DrawLines.
+    TPoint *iLinePointsBuffer;
+    TInt iLinePointsBufferCapacity;
+
+    // Cached draw color to avoid redundant SetPenColor/SetBrushColor calls.
+    TUint32 iLastDrawColor;
+
     // Helper methods.
     bool EnsureWorkBufferCapacity(TInt aRequiredSize);
     bool EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight);
+    bool EnsureLinePointsCapacity(TInt aRequiredCount);
     void BuildColorModLUT(TFixed rf, TFixed gf, TFixed bf);
     CFbsBitmap *GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt aAngleIndex);
 };
