@@ -174,7 +174,7 @@ CRenderer *CRenderer::NewL()
     return self;
 }
 
-CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1), iLinePointsBuffer(0), iLinePointsBufferCapacity(0), iLastDrawColor(0)
+CRenderer::CRenderer() : iRenderer(0), iDirectScreen(0), iScreenGc(0), iWsSession(), iWsWindowGroup(), iWsWindowGroupID(0), iWsWindow(), iWsScreen(0), iWsEventStatus(), iWsEvent(), iShowFPS(EFalse), iFPS(0), iFont(0), iWorkBuffer1(0), iWorkBuffer2(0), iWorkBufferSize(0), iTempRenderBitmap(0), iTempRenderBitmapWidth(0), iTempRenderBitmapHeight(0), iLastColorR(-1), iLastColorG(-1), iLastColorB(-1), iLinePointsBuffer(0), iLinePointsBufferCapacity(0), iLastDrawColor(0), iLastClearColor(0xFFFFFFFF)
 {
 }
 
@@ -313,7 +313,11 @@ void CRenderer::AbortNow(RDirectScreenAccess::TTerminationReasons aReason)
 void CRenderer::Clear(TUint32 iColor)
 {
     if (iRenderer && iRenderer->Gc()) {
-        iRenderer->Gc()->SetBrushColor(iColor);
+        // Skip redundant SetBrushColor if color hasn't changed.
+        if (iColor != iLastClearColor) {
+            iRenderer->Gc()->SetBrushColor(iColor);
+            iLastClearColor = iColor;
+        }
         iRenderer->Gc()->Clear();
     }
 }
@@ -534,20 +538,24 @@ bool CRenderer::Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rec
 
     SDL_FColor *c = &texture->color;
 
-    // Get render scale once.
-    float sx;
-    float sy;
-    SDL_GetRenderScale(renderer, &sx, &sy);
-
     // Fast path 1: No transformations needed; direct BitBlt.
-    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f && sx == 1.f && sy == 1.f) {
-        TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
-        TPoint aDest(dstrect->x, dstrect->y);
-        iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
-        return true;
+    if (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f) {
+        // Only check render scale if color mod passes.
+        float sx;
+        float sy;
+        SDL_GetRenderScale(renderer, &sx, &sy);
+        if (sx == 1.f && sy == 1.f) {
+            TRect aSource(TPoint(srcrect->x, srcrect->y), TSize(srcrect->w, srcrect->h));
+            TPoint aDest(dstrect->x, dstrect->y);
+            iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
+            return true;
+        }
     }
 
     // Slow path: Transformations needed.
+    float sx;
+    float sy;
+    SDL_GetRenderScale(renderer, &sx, &sy);
     int w = phdata->cachedWidth;
     int h = phdata->cachedHeight;
     int pitch = phdata->cachedPitch;
@@ -617,13 +625,13 @@ bool CRenderer::CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE
     SDL_FColor *c = &texture->color;
 
     // Pre-calculate common checks.
-    const bool isIdentityScale = (copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1));
-    const bool isNoRotation = (copydata->angle == 0);
     const bool isNoFlip = (!copydata->flip);
+    const bool isNoRotation = (copydata->angle == 0);
     const bool isNoColorMod = (c->a == 1.f && c->r == 1.f && c->g == 1.f && c->b == 1.f);
+    const bool isIdentityScale = (copydata->scale_x == Int2Fix(1) && copydata->scale_y == Int2Fix(1));
 
     // Fast path 1: No transformations needed; direct BitBlt.
-    if (isNoFlip && isIdentityScale && isNoRotation && isNoColorMod) {
+    if (isNoFlip && isNoRotation && isNoColorMod && isIdentityScale) {
         TRect aSource(TPoint(copydata->srcrect.x, copydata->srcrect.y), TSize(copydata->srcrect.w, copydata->srcrect.h));
         TPoint aDest(copydata->dstrect.x, copydata->dstrect.y);
         iRenderer->Gc()->BitBlt(aDest, phdata->bitmap, aSource);
@@ -799,11 +807,8 @@ void CRenderer::DrawPoints(NGAGE_Vertex *aVerts, const TInt aCount)
         bool colorSet = false;
 
         for (TInt i = 0; i < aCount; i++, aVerts++) {
-            Uint8 ca = aVerts->color.a;
-            Uint8 cr = aVerts->color.r;
-            Uint8 cg = aVerts->color.g;
-            Uint8 cb = aVerts->color.b;
-            TUint32 aColor = (ca << 24) | (cb << 16) | (cg << 8) | cr;
+            TUint32 aColor = (TUint32(aVerts->color.a) << 24) | (TUint32(aVerts->color.b) << 16) |
+                             (TUint32(aVerts->color.g) << 8) | TUint32(aVerts->color.r);
 
             // Only set pen color when it changes.
             if (!colorSet || aColor != currentColor) {
@@ -830,11 +835,8 @@ void CRenderer::FillRects(NGAGE_Vertex *aVerts, const TInt aCount)
             TSize size(aVerts[i + 1].x, aVerts[i + 1].y);
             TRect rect(pos, size);
 
-            Uint8 ca = aVerts[i].color.a;
-            Uint8 cr = aVerts[i].color.r;
-            Uint8 cg = aVerts[i].color.g;
-            Uint8 cb = aVerts[i].color.b;
-            TUint32 aColor = (ca << 24) | (cb << 16) | (cg << 8) | cr;
+            TUint32 aColor = (TUint32(aVerts[i].color.a) << 24) | (TUint32(aVerts[i].color.b) << 16) |
+                             (TUint32(aVerts[i].color.g) << 8) | TUint32(aVerts[i].color.r);
 
             // Only set colors when they change.
             if (!colorSet || aColor != currentColor) {

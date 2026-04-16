@@ -111,6 +111,9 @@ class CRenderer : public MDirectScreenAccess
     // Cached draw color to avoid redundant SetPenColor/SetBrushColor calls.
     TUint32 iLastDrawColor;
 
+    // Cached clear color to avoid redundant SetBrushColor calls.
+    TUint32 iLastClearColor;
+
     // Helper methods.
     bool EnsureWorkBufferCapacity(TInt aRequiredSize);
     bool EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight);

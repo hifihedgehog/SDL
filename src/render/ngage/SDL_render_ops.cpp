@@ -98,6 +98,22 @@ void ApplyFlip(void *dest, void *source, int pitch, int width, int height, SDL_F
     const bool flipHorizontal = (flip & SDL_FLIP_HORIZONTAL) != 0;
     const bool flipVertical = (flip & SDL_FLIP_VERTICAL) != 0;
 
+    // Fast path: No flip; just copy entire buffer.
+    if (!flipHorizontal && !flipVertical) {
+        Mem::Copy(dest, source, pitch * height);
+        return;
+    }
+
+    // Fast path: Vertical-only flip; copy rows in reverse order.
+    if (flipVertical && !flipHorizontal) {
+        for (int y = 0; y < height; ++y) {
+            const int src_y = height - 1 - y;
+            Mem::Copy(&dst_pixels[y * pitchPixels], &src_pixels[src_y * pitchPixels], pitch);
+        }
+        return;
+    }
+
+    // Slow path: Horizontal or both flips; need pixel-level operations.
     // Pre-calculate width/height bounds for horizontal/vertical flipping.
     const int width_m1 = width - 1;
     const int height_m1 = height - 1;
@@ -150,6 +166,27 @@ void ApplyRotation(void *dest, void *source, int pitch, int width, int height, T
     // Pre-calculate pitch in pixels to avoid repeated division.
     const TInt pitchPixels = pitch >> 1;
 
+    // Pre-check if rotation keeps all pixels within bounds to skip per-pixel checks.
+    // Calculate the four corners of the image after rotation around center.
+    bool allInBounds = true;
+    if (angle != 0) {
+        // Check corners: (0,0), (width-1,0), (0,height-1), (width-1,height-1)
+        TFixed corners_x[4] = { -center_x, Int2Fix(width - 1) - center_x, -center_x, Int2Fix(width - 1) - center_x };
+        TFixed corners_y[4] = { -center_y, -center_y, Int2Fix(height - 1) - center_y, Int2Fix(height - 1) - center_y };
+
+        for (int i = 0; i < 4; ++i) {
+            TFixed rot_x = FixMul(corners_x[i], cos_angle) - FixMul(corners_y[i], sin_angle) + center_x;
+            TFixed rot_y = FixMul(corners_x[i], sin_angle) + FixMul(corners_y[i], cos_angle) + center_y;
+            int final_x = Fix2Int(rot_x);
+            int final_y = Fix2Int(rot_y);
+
+            if (final_x < 0 || final_x >= width || final_y < 0 || final_y >= height) {
+                allInBounds = false;
+                break;
+            }
+        }
+    }
+
     // Incremental DDA: Calculate per-pixel increments.
     // As we move right (x+1), the rotated position changes by (cos, -sin).
     const TFixed dx_cos = cos_angle;
@@ -172,55 +209,99 @@ void ApplyRotation(void *dest, void *source, int pitch, int width, int height, T
 
         int x = 0;
 
-        // Process 4 pixels at once.
-        for (; x < width - 3; x += 4) {
-            // Pixel 0
-            int final_x0 = Fix2Int(src_x);
-            int final_y0 = Fix2Int(src_y);
-            src_x += dx_cos;
-            src_y += dx_sin;
+        if (allInBounds) {
+            // Fast path: No bounds checking needed.
+            for (; x < width - 3; x += 4) {
+                // Pixel 0
+                int final_x0 = Fix2Int(src_x);
+                int final_y0 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
 
-            // Pixel 1
-            int final_x1 = Fix2Int(src_x);
-            int final_y1 = Fix2Int(src_y);
-            src_x += dx_cos;
-            src_y += dx_sin;
+                // Pixel 1
+                int final_x1 = Fix2Int(src_x);
+                int final_y1 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
 
-            // Pixel 2
-            int final_x2 = Fix2Int(src_x);
-            int final_y2 = Fix2Int(src_y);
-            src_x += dx_cos;
-            src_y += dx_sin;
+                // Pixel 2
+                int final_x2 = Fix2Int(src_x);
+                int final_y2 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
 
-            // Pixel 3
-            int final_x3 = Fix2Int(src_x);
-            int final_y3 = Fix2Int(src_y);
-            src_x += dx_cos;
-            src_y += dx_sin;
+                // Pixel 3
+                int final_x3 = Fix2Int(src_x);
+                int final_y3 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
 
-            // Write all 4 pixels with bounds checking.
-            dst_pixels[dstRowOffset + x] = (final_x0 >= 0 && final_x0 < width && final_y0 >= 0 && final_y0 < height) ? src_pixels[final_y0 * pitchPixels + final_x0] : 0;
-            dst_pixels[dstRowOffset + x + 1] = (final_x1 >= 0 && final_x1 < width && final_y1 >= 0 && final_y1 < height) ? src_pixels[final_y1 * pitchPixels + final_x1] : 0;
-            dst_pixels[dstRowOffset + x + 2] = (final_x2 >= 0 && final_x2 < width && final_y2 >= 0 && final_y2 < height) ? src_pixels[final_y2 * pitchPixels + final_x2] : 0;
-            dst_pixels[dstRowOffset + x + 3] = (final_x3 >= 0 && final_x3 < width && final_y3 >= 0 && final_y3 < height) ? src_pixels[final_y3 * pitchPixels + final_x3] : 0;
-        }
-
-        // Handle remaining pixels.
-        for (; x < width; ++x) {
-            // Convert to integer coordinates.
-            int final_x = Fix2Int(src_x);
-            int final_y = Fix2Int(src_y);
-
-            // Check bounds.
-            if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height) {
-                dst_pixels[dstRowOffset + x] = src_pixels[final_y * pitchPixels + final_x];
-            } else {
-                dst_pixels[dstRowOffset + x] = 0;
+                // Write all 4 pixels without bounds checking.
+                dst_pixels[dstRowOffset + x] = src_pixels[final_y0 * pitchPixels + final_x0];
+                dst_pixels[dstRowOffset + x + 1] = src_pixels[final_y1 * pitchPixels + final_x1];
+                dst_pixels[dstRowOffset + x + 2] = src_pixels[final_y2 * pitchPixels + final_x2];
+                dst_pixels[dstRowOffset + x + 3] = src_pixels[final_y3 * pitchPixels + final_x3];
             }
 
-            // Incremental step: move to next pixel (just additions, no multiplications!).
-            src_x += dx_cos;
-            src_y += dx_sin;
+            // Handle remaining pixels.
+            for (; x < width; ++x) {
+                int final_x = Fix2Int(src_x);
+                int final_y = Fix2Int(src_y);
+                dst_pixels[dstRowOffset + x] = src_pixels[final_y * pitchPixels + final_x];
+                src_x += dx_cos;
+                src_y += dx_sin;
+            }
+        } else {
+            // Slow path: Bounds checking required.
+            for (; x < width - 3; x += 4) {
+                // Pixel 0
+                int final_x0 = Fix2Int(src_x);
+                int final_y0 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
+
+                // Pixel 1
+                int final_x1 = Fix2Int(src_x);
+                int final_y1 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
+
+                // Pixel 2
+                int final_x2 = Fix2Int(src_x);
+                int final_y2 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
+
+                // Pixel 3
+                int final_x3 = Fix2Int(src_x);
+                int final_y3 = Fix2Int(src_y);
+                src_x += dx_cos;
+                src_y += dx_sin;
+
+                // Write all 4 pixels with bounds checking.
+                dst_pixels[dstRowOffset + x] = (final_x0 >= 0 && final_x0 < width && final_y0 >= 0 && final_y0 < height) ? src_pixels[final_y0 * pitchPixels + final_x0] : 0;
+                dst_pixels[dstRowOffset + x + 1] = (final_x1 >= 0 && final_x1 < width && final_y1 >= 0 && final_y1 < height) ? src_pixels[final_y1 * pitchPixels + final_x1] : 0;
+                dst_pixels[dstRowOffset + x + 2] = (final_x2 >= 0 && final_x2 < width && final_y2 >= 0 && final_y2 < height) ? src_pixels[final_y2 * pitchPixels + final_x2] : 0;
+                dst_pixels[dstRowOffset + x + 3] = (final_x3 >= 0 && final_x3 < width && final_y3 >= 0 && final_y3 < height) ? src_pixels[final_y3 * pitchPixels + final_x3] : 0;
+            }
+
+            // Handle remaining pixels.
+            for (; x < width; ++x) {
+                // Convert to integer coordinates.
+                int final_x = Fix2Int(src_x);
+                int final_y = Fix2Int(src_y);
+
+                // Check bounds.
+                if (final_x >= 0 && final_x < width && final_y >= 0 && final_y < height) {
+                    dst_pixels[dstRowOffset + x] = src_pixels[final_y * pitchPixels + final_x];
+                } else {
+                    dst_pixels[dstRowOffset + x] = 0;
+                }
+
+                // Incremental step: move to next pixel (just additions, no multiplications!).
+                src_x += dx_cos;
+                src_y += dx_sin;
+            }
         }
     }
 }
@@ -229,6 +310,13 @@ void ApplyScale(void *dest, void *source, int pitch, int width, int height, TFix
 {
     TUint16 *src_pixels = static_cast<TUint16 *>(source);
     TUint16 *dst_pixels = static_cast<TUint16 *>(dest);
+
+    // Fast path: Identity scale; just copy entire buffer.
+    const TFixed identity = Int2Fix(1);
+    if (scale_x == identity && scale_y == identity) {
+        Mem::Copy(dest, source, pitch * height);
+        return;
+    }
 
     // Pre-calculate pitch in pixels to avoid repeated division.
     const TInt pitchPixels = pitch >> 1;
