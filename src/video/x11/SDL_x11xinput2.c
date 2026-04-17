@@ -542,7 +542,7 @@ void X11_HandleXinput2Event(SDL_VideoDevice *_this, XGenericEventCookie *cookie)
     {
         const XIDeviceEvent *xev = (const XIDeviceEvent *)cookie->data;
 
-#ifdef XINPUT2_USE_KEYBOARD
+#ifdef USE_XINPUT2_KEYBOARD
         SDL_WindowData *windowdata = X11_FindWindow(videodata, xev->event);
         XEvent xevent;
 
