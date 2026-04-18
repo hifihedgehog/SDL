@@ -34,6 +34,7 @@ extern "C" {
 typedef struct NGAGE_RendererData
 {
     SDL_Rect *viewport;
+    SDL_Texture *current_target;
 
 } NGAGE_RendererData;
 
@@ -54,23 +55,14 @@ typedef struct NGAGE_Vertex
 } NGAGE_Vertex;
 
 typedef struct CFbsBitmap CFbsBitmap;
+typedef struct CFbsBitGc CFbsBitGc;
+typedef struct CFbsDevice CFbsDevice;
 
 typedef struct NGAGE_TextureData
 {
     CFbsBitmap *bitmap;
-
-    // Cached properties to avoid repeated API calls.
-    int cachedWidth;
-    int cachedHeight;
-    int cachedPitch;
-    void *cachedDataAddress;
-
-    // Cardinal rotation cache (0°, 90°, 180°, 270°) - created on demand.
-    CFbsBitmap *cardinalRotations[4];
-
-    // Dirty tracking to avoid redundant rendering.
-    bool isDirty;
-    SDL_Rect dirtyRect;
+    CFbsBitGc *gc;
+    CFbsDevice *device;
 
 } NGAGE_TextureData;
 
@@ -99,12 +91,9 @@ void NGAGE_Clear(const Uint32 color);
 Uint32 NGAGE_ConvertColor(float r, float g, float b, float a, float color_scale);
 bool NGAGE_Copy(SDL_Renderer *renderer, SDL_Texture *texture, SDL_Rect *srcrect, SDL_Rect *dstrect);
 bool NGAGE_CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, NGAGE_CopyExData *copydata);
-bool NGAGE_CreateTextureData(NGAGE_TextureData *data, const int width, const int height);
+bool NGAGE_CreateTextureData(NGAGE_TextureData *data, const int width, const int height, const int access);
 void NGAGE_DestroyTextureData(NGAGE_TextureData *data);
-void *NGAGE_GetBitmapDataAddress(NGAGE_TextureData *data);
-int NGAGE_GetBitmapPitch(NGAGE_TextureData *data);
-int NGAGE_GetBitmapWidth(NGAGE_TextureData *data);
-int NGAGE_GetBitmapHeight(NGAGE_TextureData *data);
+void* NGAGE_GetBitmapDataAddress(NGAGE_TextureData *data);
 void NGAGE_DrawLines(NGAGE_Vertex *verts, const int count);
 void NGAGE_DrawPoints(NGAGE_Vertex *verts, const int count);
 void NGAGE_FillRects(NGAGE_Vertex *verts, const int count);
@@ -113,6 +102,7 @@ void NGAGE_SetClipRect(const SDL_Rect *rect);
 void NGAGE_SetDrawColor(const Uint32 color);
 void NGAGE_PumpEventsInternal(void);
 void NGAGE_SuspendScreenSaverInternal(bool suspend);
+void NGAGE_SetRenderTargetInternal(NGAGE_TextureData *target);
 
 #ifdef __cplusplus
 }

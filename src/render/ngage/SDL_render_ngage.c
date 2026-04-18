@@ -155,7 +155,7 @@ static bool NGAGE_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture, SD
         return false;
     }
 
-    if (!NGAGE_CreateTextureData(data, texture->w, texture->h)) {
+    if (!NGAGE_CreateTextureData(data, texture->w, texture->h, texture->access)) {
         SDL_free(data);
         return false;
     }
@@ -283,8 +283,12 @@ static bool NGAGE_QueueCopyEx(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SD
     verts->dstrect.h = (int)dstrect->h;
 
     verts->angle = Real2Fix(angle);
-    verts->center.x = Real2Fix(center->x);
-    verts->center.y = Real2Fix(center->y);
+    // Convert center from destination-space to source-space.
+    // Center is relative to dstrect, but rotation is applied in source texture space.
+    float center_x_src = (center->x / dstrect->w) * srcquad->w;
+    float center_y_src = (center->y / dstrect->h) * srcquad->h;
+    verts->center.x = Real2Fix(center_x_src);
+    verts->center.y = Real2Fix(center_y_src);
     verts->scale_x = Real2Fix(scale_x);
     verts->scale_y = Real2Fix(scale_y);
 
@@ -444,26 +448,23 @@ static bool NGAGE_UpdateTexture(SDL_Renderer *renderer, SDL_Texture *texture, co
         return false;
     }
 
-    void *bitmapData = NGAGE_GetBitmapDataAddress(phdata);
-    int bitmapPitch = NGAGE_GetBitmapPitch(phdata);
-
-    if (!bitmapData || bitmapPitch == 0) {
+    Uint8 *dst = (Uint8 *)NGAGE_GetBitmapDataAddress(phdata);
+    if (!dst) {
         return false;
     }
 
-    Uint8 *src = (Uint8 *)pixels;
-    Uint8 *dst = (Uint8 *)bitmapData + rect->y * bitmapPitch + rect->x * 2; // 2 bytes per pixel for EColor4K
+    const int bytes_per_pixel = 2;
+    const int bitmap_pitch = texture->w * bytes_per_pixel;
 
-    size_t length = (size_t)rect->w * 2; // 2 bytes per pixel for EColor4K
+    const Uint8 *src = (const Uint8 *)pixels;
+    dst += rect->y * bitmap_pitch + rect->x * bytes_per_pixel;
+
+    const size_t length = (size_t)rect->w * bytes_per_pixel;
     for (int row = 0; row < rect->h; ++row) {
         SDL_memcpy(dst, src, length);
         src += pitch;
-        dst += bitmapPitch;
+        dst += bitmap_pitch;
     }
-
-    // Mark texture as dirty.
-    phdata->isDirty = true;
-    phdata->dirtyRect = *rect;
 
     return true;
 }
@@ -476,34 +477,39 @@ static bool NGAGE_LockTexture(SDL_Renderer *renderer, SDL_Texture *texture, cons
         return false;
     }
 
-    void *bitmapData = NGAGE_GetBitmapDataAddress(phdata);
-    int bitmapPitch = NGAGE_GetBitmapPitch(phdata);
-
-    if (!bitmapData || bitmapPitch == 0) {
+    Uint8 *data = (Uint8 *)NGAGE_GetBitmapDataAddress(phdata);
+    if (!data) {
         return false;
     }
 
-    *pixels = (void *)((Uint8 *)bitmapData + rect->y * bitmapPitch + rect->x * 2); // 2 bytes per pixel for EColor4K
-    *pitch = bitmapPitch;
+    const int bytes_per_pixel = 2;
+    const int bitmap_pitch = texture->w * bytes_per_pixel;
 
-    // Store the lock rectangle for dirty tracking.
-    phdata->dirtyRect = *rect;
-
+    *pixels = (void *)(data + rect->y * bitmap_pitch + rect->x * bytes_per_pixel);
+    *pitch = bitmap_pitch;
     return true;
 }
 
 static void NGAGE_UnlockTexture(SDL_Renderer *renderer, SDL_Texture *texture)
 {
-    NGAGE_TextureData *phdata = (NGAGE_TextureData *)texture->internal;
-
-    if (phdata) {
-        // Mark texture as dirty after unlock (assume it was modified).
-        phdata->isDirty = true;
-    }
 }
 
 static bool NGAGE_SetRenderTarget(SDL_Renderer *renderer, SDL_Texture *texture)
 {
+    NGAGE_RendererData *data = (NGAGE_RendererData *)renderer->internal;
+
+    if (texture) {
+        NGAGE_TextureData *texturedata = (NGAGE_TextureData *)texture->internal;
+        if (!texturedata || !texturedata->gc) {
+            return SDL_SetError("Texture is not a render target");
+        }
+        data->current_target = texture;
+        NGAGE_SetRenderTargetInternal(texturedata);
+    } else {
+        data->current_target = NULL;
+        NGAGE_SetRenderTargetInternal(NULL);
+    }
+
     return true;
 }
 

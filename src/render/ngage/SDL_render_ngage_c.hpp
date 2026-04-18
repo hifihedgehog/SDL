@@ -23,7 +23,6 @@
 #define ngage_video_render_ngage_c_hpp
 
 #include "SDL_render_ngage_c.h"
-#include <3dtypes.h>
 #include <NRenderer.h>
 #include <e32std.h>
 #include <w32std.h>
@@ -38,7 +37,7 @@ class CRenderer : public MDirectScreenAccess
     void Clear(TUint32 iColor);
     bool Copy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rect *srcrect, const SDL_Rect *dstrect);
     bool CopyEx(SDL_Renderer *renderer, SDL_Texture *texture, const NGAGE_CopyExData *copydata);
-    bool CreateTextureData(NGAGE_TextureData *aTextureData, const TInt aWidth, const TInt aHeight);
+    bool CreateTextureData(NGAGE_TextureData *aTextureData, const TInt aWidth, const TInt aHeight, const TInt aAccess);
     void DrawLines(NGAGE_Vertex *aVerts, const TInt aCount);
     void DrawPoints(NGAGE_Vertex *aVerts, const TInt aCount);
     void FillRects(NGAGE_Vertex *aVerts, const TInt aCount);
@@ -47,6 +46,10 @@ class CRenderer : public MDirectScreenAccess
     void SetClipRect(TInt aX, TInt aY, TInt aWidth, TInt aHeight);
     void UpdateFPS();
     void SuspendScreenSaver(TBool aSuspend);
+
+    // Render target management.
+    void SetRenderTarget(NGAGE_TextureData *aTarget);
+    CFbsBitGc* GetCurrentGc();
 
     // Event handling.
     void DisableKeyBlocking();
@@ -88,38 +91,15 @@ class CRenderer : public MDirectScreenAccess
     // Screen saver.
     TBool iSuspendScreenSaver;
 
-    // Work buffers for texture transformations (reusable to avoid per-frame allocations).
-    void *iWorkBuffer1;
-    void *iWorkBuffer2;
-    TInt iWorkBufferSize;
+    // Render target.
+    NGAGE_TextureData *iCurrentRenderTarget;
 
-    // Temporary render bitmap to avoid destroying source textures.
-    CFbsBitmap *iTempRenderBitmap;
-    TInt iTempRenderBitmapWidth;
-    TInt iTempRenderBitmapHeight;
-
-    // Color modulation lookup tables (pre-calculated to avoid per-pixel FixMul).
-    TUint8 iColorModLUT[768]; // 256 entries each for R, G, B
-    TFixed iLastColorR;
-    TFixed iLastColorG;
-    TFixed iLastColorB;
-
-    // Reusable line points buffer to avoid per-frame allocations in DrawLines.
-    TPoint *iLinePointsBuffer;
-    TInt iLinePointsBufferCapacity;
-
-    // Cached draw color to avoid redundant SetPenColor/SetBrushColor calls.
-    TUint32 iLastDrawColor;
-
-    // Cached clear color to avoid redundant SetBrushColor calls.
-    TUint32 iLastClearColor;
-
-    // Helper methods.
-    bool EnsureWorkBufferCapacity(TInt aRequiredSize);
-    bool EnsureTempBitmapCapacity(TInt aWidth, TInt aHeight);
-    bool EnsureLinePointsCapacity(TInt aRequiredCount);
-    void BuildColorModLUT(TFixed rf, TFixed gf, TFixed bf);
-    CFbsBitmap *GetCardinalRotation(NGAGE_TextureData *aTextureData, TInt aAngleIndex);
+    // Persistent buffers to avoid per-frame allocations.
+    void *iPixelBufferA;
+    void *iPixelBufferB;
+    TInt iPixelBufferSize;
+    TPoint *iPointsBuffer;
+    TInt iPointsBufferSize;
 };
 
 #endif // ngage_video_render_ngage_c_hpp
