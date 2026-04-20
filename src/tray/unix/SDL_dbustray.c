@@ -28,6 +28,7 @@
 #ifdef SDL_USE_LIBDBUS
 
 #include "../../video/SDL_surface_c.h"
+#include "../../core/unix/SDL_appid.h"
 #include "../SDL_tray_utils.h"
 #include "SDL_unixtray.h"
 #include <unistd.h>
@@ -468,7 +469,11 @@ SDL_Tray *CreateTray(SDL_TrayDriver *driver, SDL_PropertiesID props)
 
     /* Request name */
     driver->count++;
-    SDL_asprintf(&tray_dbus->service_name, "org.kde.StatusNotifierItem-%d-%d", getpid(), driver->count);
+    if (SDL_GetSandbox() == SDL_SANDBOX_FLATPAK) {
+        SDL_asprintf(&tray_dbus->service_name, "%s.tray%d", SDL_GetAppID(), driver->count);
+    } else {
+        SDL_asprintf(&tray_dbus->service_name, "org.kde.StatusNotifierItem-%d-%d", getpid(), driver->count);
+    }
     status = dbus_driver->dbus->bus_request_name(tray_dbus->connection, tray_dbus->service_name, DBUS_NAME_FLAG_REPLACE_EXISTING, &err);
     if (dbus_driver->dbus->error_is_set(&err)) {
         SDL_SetError("Unable to create tray: %s", err.message);
