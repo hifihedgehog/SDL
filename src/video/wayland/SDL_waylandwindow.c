@@ -362,8 +362,8 @@ static void ConfigureWindowGeometry(SDL_Window *window)
                 data->current.logical_height = window->current_fullscreen_mode.h;
             }
 
-            data->pointer_scale.x = (double)window_width / (double)data->current.logical_width;
-            data->pointer_scale.y = (double)window_height / (double)data->current.logical_height;
+            data->pointer_scale.x = (double)window_width / (double)viewport_width;
+            data->pointer_scale.y = (double)window_height / (double)viewport_height;
         }
     } else {
         if (!data->scale_to_display) {
