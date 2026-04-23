@@ -884,6 +884,15 @@ static void RAWINPUT_AddDevice(HANDLE hDevice)
     CHECK(GetRawInputDeviceInfoA(hDevice, RIDI_DEVICENAME, dev_name, &size) != (UINT)-1);
     // Only take XInput-capable devices
     CHECK(SDL_strstr(dev_name, "IG_") != NULL);
+
+    /* PadForge: skip HIDMaestro virtual controllers if/when RawInput is
+       enabled. Walks the HID's PnP parent chain looking for HIDMaestro
+       in Hardware IDs. Defense in depth — SDL3's default is RawInput off,
+       but if it's turned on this keeps the backend clean. */
+    {
+        extern int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path);
+        CHECK(!SDL_HidmaestroIsAnsiHidPathHm(dev_name));
+    }
     CHECK(!SDL_ShouldIgnoreJoystick((Uint16)rdi.hid.dwVendorId, (Uint16)rdi.hid.dwProductId, (Uint16)rdi.hid.dwVersionNumber, ""));
     CHECK(!SDL_JoystickHandledByAnotherDriver(&SDL_RAWINPUT_JoystickDriver, (Uint16)rdi.hid.dwVendorId, (Uint16)rdi.hid.dwProductId, (Uint16)rdi.hid.dwVersionNumber, ""));
 
