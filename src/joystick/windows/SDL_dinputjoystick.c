@@ -411,6 +411,16 @@ static BOOL CALLBACK EnumJoystickDetectCallback(LPCDIDEVICEINSTANCE pDeviceInsta
     CHECK(QueryDevicePath(dxdevice, &hidPath));
     CHECK(QueryDeviceInfo(dxdevice, &vendor, &product));
     CHECK(QueryDeviceName(dxdevice, &product_string));
+
+    /* PadForge: DirectInput sees HIDMaestro virtuals (including the DInput
+       mirrors of Xbox-style virtuals that xinputhid doesn't claim at the
+       DInput layer).  Classify via the same PnP-ancestor walk used by
+       the HIDAPI filter. */
+    {
+        extern int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path);
+        CHECK(!SDL_HidmaestroIsAnsiHidPathHm(hidPath));
+    }
+
     CHECK(DINPUT_handle_xinput || !SDL_IsXInputDevice(vendor, product, hidPath));
 
     entry = (DINPUT_CachedDevice *)SDL_calloc(1, sizeof(*entry));
