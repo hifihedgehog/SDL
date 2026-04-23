@@ -940,6 +940,182 @@ static struct hid_device_info *hid_internal_get_device_info(const wchar_t *path,
 	return dev;
 }
 
+/* PadForge/HIDMaestro filter.
+
+   Returns 1 if this HID device interface belongs to a HIDMaestro virtual
+   controller. max_depth controls how far up the PnP parent chain to walk:
+     1 — depth 0 only. Sufficient for non-Xbox HIDMaestro profiles (DS4,
+         DualSense, wheels, flight sticks), which carry "HID\HIDMaestro"
+         directly in their Hardware IDs at the HID child devnode. Cheap:
+         one CM interface-id lookup + one CM Hardware IDs read per device.
+     N > 1 — walk up to N parents. Needed when the caller passes an
+         XInput-class HID (path contains "&IG_"), because Xbox-family
+         profiles spoof the real Microsoft Hardware IDs at the HID child
+         level and the HIDMaestro marker only appears at the root
+         enumerator a few levels up.
+
+   Callers: SDL's own hid_enumerate loop already skips "&IG_" devices
+   before calling this, so it can use max_depth=1. The XInput-backend
+   autonomous filter inspects HIDs matching an occupied XInput slot's
+   VID/PID, which includes "&IG_" ones, so it passes max_depth=3. */
+/* Cache of device-interface path -> is_hidmaestro result.  HID interface
+   paths are stable per device instance, so once we've walked the PnP tree
+   for one we can reuse the result on every subsequent enumeration.  The
+   cache entry stores the depth at which we walked so a later caller
+   requesting deeper inspection re-walks.  With this cache, a steady-state
+   hid_enumerate pass is O(paths) of cached lookups + zero CM calls. */
+#define HM_CACHE_CAP 256
+typedef struct {
+	wchar_t path[260];
+	int checked_depth;
+	int is_hm;
+} hm_cache_entry;
+static hm_cache_entry hm_cache[HM_CACHE_CAP];
+static int hm_cache_size = 0;
+static CRITICAL_SECTION hm_cache_cs;
+static int hm_cache_cs_init = 0;
+
+static int hm_cache_lookup(const wchar_t *path, int max_depth, int *out_is_hm)
+{
+	int i;
+	if (!hm_cache_cs_init) {
+		InitializeCriticalSection(&hm_cache_cs);
+		hm_cache_cs_init = 1;
+	}
+	EnterCriticalSection(&hm_cache_cs);
+	for (i = 0; i < hm_cache_size; ++i) {
+		if (wcscmp(hm_cache[i].path, path) == 0) {
+			/* A positive result is definitive at any depth; a negative
+			   result is only valid if we already walked >= max_depth. */
+			if (hm_cache[i].is_hm || hm_cache[i].checked_depth >= max_depth) {
+				*out_is_hm = hm_cache[i].is_hm;
+				LeaveCriticalSection(&hm_cache_cs);
+				return 1;
+			}
+			break;
+		}
+	}
+	LeaveCriticalSection(&hm_cache_cs);
+	return 0;
+}
+
+static void hm_cache_store(const wchar_t *path, int checked_depth, int is_hm)
+{
+	int i;
+	if (!hm_cache_cs_init) return;
+	if (wcslen(path) >= 260) return;
+	EnterCriticalSection(&hm_cache_cs);
+	for (i = 0; i < hm_cache_size; ++i) {
+		if (wcscmp(hm_cache[i].path, path) == 0) {
+			hm_cache[i].checked_depth = checked_depth;
+			hm_cache[i].is_hm = is_hm;
+			LeaveCriticalSection(&hm_cache_cs);
+			return;
+		}
+	}
+	if (hm_cache_size < HM_CACHE_CAP) {
+		wcscpy_s(hm_cache[hm_cache_size].path, 260, path);
+		hm_cache[hm_cache_size].checked_depth = checked_depth;
+		hm_cache[hm_cache_size].is_hm = is_hm;
+		hm_cache_size++;
+	}
+	LeaveCriticalSection(&hm_cache_cs);
+}
+
+static int hid_internal_is_hidmaestro_device(const wchar_t *device_interface, int max_depth)
+{
+	wchar_t *instance_id = NULL;
+	DEVINST dev_node;
+	int is_hm = 0;
+	int depth;
+	int cached_result = 0;
+
+	if (!device_interface || max_depth <= 0) {
+		return 0;
+	}
+
+	if (hm_cache_lookup(device_interface, max_depth, &cached_result)) {
+		return cached_result;
+	}
+
+	/* Fast path: substring match on the interface symlink.  Avoids the
+	   CM calls entirely for unspoofed profiles and root-enumerator paths. */
+	{
+		size_t ilen = wcslen(device_interface);
+		wchar_t *ibuf = (wchar_t *)calloc(ilen + 1, sizeof(wchar_t));
+		if (ibuf) {
+			size_t i;
+			for (i = 0; i < ilen; ++i) {
+				ibuf[i] = (wchar_t)towupper(device_interface[i]);
+			}
+			if (wcsstr(ibuf, L"HIDMAESTRO") || wcsstr(ibuf, L"HMXINPUT")) {
+				free(ibuf);
+				hm_cache_store(device_interface, max_depth, 1);
+				return 1;
+			}
+			free(ibuf);
+		}
+	}
+
+	instance_id = (wchar_t *)hid_internal_get_device_interface_property(
+		device_interface, &DEVPKEY_Device_InstanceId, DEVPROP_TYPE_STRING);
+	if (!instance_id) {
+		return 0;
+	}
+
+	if (CM_Locate_DevNodeW(&dev_node, (DEVINSTID_W)instance_id, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) {
+		free(instance_id);
+		return 0;
+	}
+	free(instance_id);
+
+	for (depth = 0; depth < max_depth && !is_hm; ++depth) {
+		wchar_t *hardware_ids = (wchar_t *)hid_internal_get_devnode_property(
+			dev_node, &DEVPKEY_Device_HardwareIds, DEVPROP_TYPE_STRING_LIST);
+		if (hardware_ids) {
+			wchar_t *hid;
+			for (hid = hardware_ids; *hid; hid += wcslen(hid) + 1) {
+				wchar_t *p;
+				for (p = hid; *p; ++p) *p = (wchar_t)towupper(*p);
+				if (wcsstr(hid, L"HIDMAESTRO")) {
+					is_hm = 1;
+					break;
+				}
+			}
+			free(hardware_ids);
+		}
+
+		if (is_hm || depth + 1 >= max_depth) {
+			break;
+		}
+
+		if (CM_Get_Parent(&dev_node, dev_node, 0) != CR_SUCCESS) {
+			break;
+		}
+	}
+
+	hm_cache_store(device_interface, max_depth, is_hm);
+	return is_hm;
+}
+
+/* PadForge/HIDMaestro filter — ANSI HID interface path entry point.
+
+   Exported for SDL's RawInput joystick backend, which receives HID
+   interface paths as char* from GetRawInputDeviceInfoA. Converts to
+   wide and calls the core walker with depth 3 (covers the
+   HID-leaf → ROOT\HIDMaestro* parent chain). */
+int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path)
+{
+	wchar_t wpath[512];
+	int n;
+	if (!ansi_path || !ansi_path[0]) return 0;
+	n = MultiByteToWideChar(CP_ACP, 0, ansi_path, -1, wpath, 512);
+	if (n <= 0) return 0;
+	return hid_internal_is_hidmaestro_device(wpath, 3);
+}
+
+
+
 static int hid_blacklist(unsigned short vendor_id, unsigned short product_id)
 {
 	size_t i;
@@ -1015,6 +1191,14 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 
         /* XInput devices don't get real HID reports and are better handled by the raw input driver */
         if (wcsstr(device_interface, L"&IG_") != NULL) {
+            continue;
+        }
+
+        /* PadForge: skip HIDMaestro virtual controllers. Depth-0 only —
+           the "&IG_" skip above means only non-XInput HIDs reach here, and
+           non-Xbox HIDMaestro profiles carry "HID\HIDMaestro" in their
+           Hardware IDs at depth 0. */
+        if (hid_internal_is_hidmaestro_device(device_interface, 1)) {
             continue;
         }
 
