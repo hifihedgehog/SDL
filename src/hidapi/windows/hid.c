@@ -1048,7 +1048,7 @@ static int hid_internal_is_hidmaestro_device(const wchar_t *device_interface, in
 			for (i = 0; i < ilen; ++i) {
 				ibuf[i] = (wchar_t)towupper(device_interface[i]);
 			}
-			if (wcsstr(ibuf, L"HIDMAESTRO") || wcsstr(ibuf, L"HMXINPUT")) {
+			if (wcsstr(ibuf, L"HIDMAESTRO")) {
 				free(ibuf);
 				hm_cache_store(device_interface, max_depth, 1);
 				return 1;
