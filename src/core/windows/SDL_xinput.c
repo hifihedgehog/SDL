@@ -32,6 +32,7 @@ XInputSetState_t SDL_XInputSetState = NULL;
 XInputGetCapabilities_t SDL_XInputGetCapabilities = NULL;
 XInputGetCapabilitiesEx_t SDL_XInputGetCapabilitiesEx = NULL;
 XInputGetBatteryInformation_t SDL_XInputGetBatteryInformation = NULL;
+XInputGetSystemButtons_t SDL_XInputGetSystemButtons = NULL;
 
 static HMODULE s_pXInputDLL = NULL;
 static int s_XInputDLLRefCount = 0;
@@ -99,6 +100,10 @@ bool WIN_LoadXInputDLL(void)
     // 108 is the ordinal for _XInputGetCapabilitiesEx, which additionally returns VID/PID of the controller.
     SDL_XInputGetCapabilitiesEx = (XInputGetCapabilitiesEx_t)GetProcAddress(s_pXInputDLL, (LPCSTR)108);
     SDL_XInputGetBatteryInformation = (XInputGetBatteryInformation_t)GetProcAddress(s_pXInputDLL, "XInputGetBatteryInformation");
+    // 109 is the ordinal for XInputGetSystemButtons, an OpenXInput extension that
+    // exposes the Share button.  Microsoft's xinput1_4.dll does not export this;
+    // stays NULL there and the Share path no-ops.
+    SDL_XInputGetSystemButtons = (XInputGetSystemButtons_t)GetProcAddress(s_pXInputDLL, (LPCSTR)109);
     if (!SDL_XInputGetState || !SDL_XInputSetState || !SDL_XInputGetCapabilities) {
         WIN_UnloadXInputDLL();
         return false;
