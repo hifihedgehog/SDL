@@ -279,9 +279,11 @@ bool SDL_XINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
     joystick->hwdata->bXInputHaptic = (XINPUTSETSTATE(userId, &state) == ERROR_SUCCESS);
     joystick->hwdata->userid = userId;
 
-    // The XInput API has a hard coded button/axis mapping, so we just match it
+    // The XInput API has a hard coded button/axis mapping, so we just match it.
+    // OpenXInput exposes Share via XInputGetSystemButtons (ordinal 109); when
+    // that pointer is non-NULL the controller's Share button lands at index 11.
     joystick->naxes = 6;
-    joystick->nbuttons = 11;
+    joystick->nbuttons = SDL_XInputGetSystemButtons ? 12 : 11;
     joystick->nhats = 1;
 
     SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
@@ -416,6 +418,18 @@ void SDL_XINPUT_JoystickUpdate(SDL_Joystick *joystick)
         joystick->hwdata->dwPacketNumber = XInputState.dwPacketNumber;
     }
 #endif
+
+    // Poll the OpenXInput Share button channel (ordinal 109) every frame.
+    // The API has no packet number, so we read each tick and rely on
+    // SDL_SendJoystickButton to deduplicate unchanged state.
+    if (SDL_XInputGetSystemButtons) {
+        XINPUT_SYSTEM_BUTTONS sys;
+        SDL_zero(sys);
+        if (SDL_XInputGetSystemButtons(joystick->hwdata->userid, &sys, NULL) == ERROR_SUCCESS) {
+            bool share_down = (sys.ExtraSystemButtons & XINPUT_GAMEPAD_EXTRAS_SHARE) != 0;
+            SDL_SendJoystickButton(SDL_GetTicksNS(), joystick, 11, share_down);
+        }
+    }
 }
 
 void SDL_XINPUT_JoystickClose(SDL_Joystick *joystick)
