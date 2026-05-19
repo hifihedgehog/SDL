@@ -36,9 +36,13 @@ using namespace XInputOnGameInput;
 #endif
 #endif // HAVE_XINPUT_H
 
-#ifndef XUSER_MAX_COUNT
-#define XUSER_MAX_COUNT 4
+// PadForge ships a custom xinput1_4.dll (OpenXInput fork) that supports up to
+// 16 XInput user slots. The system xinput.h above hardcodes XUSER_MAX_COUNT=4;
+// override it here so SDL3's enumeration loops and per-slot arrays scale.
+#ifdef XUSER_MAX_COUNT
+#undef XUSER_MAX_COUNT
 #endif
+#define XUSER_MAX_COUNT 16
 #ifndef XUSER_INDEX_ANY
 #define XUSER_INDEX_ANY 0x000000FF
 #endif
