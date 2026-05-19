@@ -256,6 +256,32 @@ typedef DWORD(WINAPI *XInputGetBatteryInformation_t)(
     BYTE devType,
     XINPUT_BATTERY_INFORMATION_EX *pBatteryInformation);
 
+// OpenXInput-style extended system buttons (Share, etc.).
+// Microsoft's xinput1_4.dll does not export this entry; PadForge ships the
+// hifihedgehog/OpenXinput fork as xinput1_4.dll which exports it at ordinal
+// 109.  When unavailable, SDL_XInputGetSystemButtons stays NULL and the
+// Share-button dispatch path transparently no-ops.
+#ifndef XINPUT_GAMEPAD_EXTRAS_SHARE
+#define XINPUT_GAMEPAD_EXTRAS_SHARE 0x00000001
+#endif
+
+typedef struct
+{
+    DWORD StandardSystemButtons; // Guide (XINPUT_GAMEPAD_GUIDE)
+    DWORD ExtraSystemButtons;    // Share (XINPUT_GAMEPAD_EXTRAS_SHARE)
+    DWORD MoreSystemButtons1;
+    DWORD MoreSystemButtons2;
+    DWORD MoreSystemButtons3;
+    DWORD MoreSystemButtons4;
+    DWORD MoreSystemButtons5;
+    DWORD MoreSystemButtons6;
+} XINPUT_SYSTEM_BUTTONS;
+
+typedef DWORD(WINAPI *XInputGetSystemButtons_t)(
+    DWORD dwUserIndex,
+    XINPUT_SYSTEM_BUTTONS *pSystemButtons,
+    PVOID vReserved);
+
 extern bool WIN_LoadXInputDLL(void);
 extern void WIN_UnloadXInputDLL(void);
 
@@ -264,6 +290,7 @@ extern XInputSetState_t SDL_XInputSetState;
 extern XInputGetCapabilities_t SDL_XInputGetCapabilities;
 extern XInputGetCapabilitiesEx_t SDL_XInputGetCapabilitiesEx;
 extern XInputGetBatteryInformation_t SDL_XInputGetBatteryInformation;
+extern XInputGetSystemButtons_t SDL_XInputGetSystemButtons;
 
 // Ends C function definitions when using C++
 #ifdef __cplusplus
@@ -275,5 +302,6 @@ extern XInputGetBatteryInformation_t SDL_XInputGetBatteryInformation;
 #define XINPUTGETCAPABILITIES       SDL_XInputGetCapabilities
 #define XINPUTGETCAPABILITIESEX     SDL_XInputGetCapabilitiesEx
 #define XINPUTGETBATTERYINFORMATION SDL_XInputGetBatteryInformation
+#define XINPUTGETSYSTEMBUTTONS      SDL_XInputGetSystemButtons
 
 #endif // SDL_xinput_h_
