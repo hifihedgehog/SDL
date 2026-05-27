@@ -778,6 +778,26 @@ static void SortDevObjects(SDL_Joystick *joystick)
     }
 }
 
+// PadForge issue #1: replace the DIDC_FORCEFEEDBACK cap-flag gate with a
+// per-axis DIDOI_FFACTUATOR count.  DIDC_FORCEFEEDBACK is set by dinput8.dll
+// from its own OEM-effect-driver discovery and is not lit by some legitimate
+// ring-3 effect drivers (e.g. aitte2's dualshock_driver via Twin-USB + PS1
+// DualShock 1).  Microsoft's documented FFB contract is the CreateEffect
+// HRESULT, not the cap flag; FFConst sample, Dolphin, and Wine joy.cpl all
+// gate on DIDOI_FFACTUATOR instead.
+typedef struct
+{
+    int count;
+} FFActuatorCountCtx;
+
+static BOOL CALLBACK CountFFActuatorsCallback(LPCDIDEVICEOBJECTINSTANCE obj, LPVOID ctx)
+{
+    if ((obj->dwType & DIDFT_AXIS) && (obj->dwFlags & DIDOI_FFACTUATOR)) {
+        ((FFActuatorCountCtx *)ctx)->count++;
+    }
+    return DIENUM_CONTINUE;
+}
+
 bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joystickdevice)
 {
     HRESULT result;
@@ -827,8 +847,13 @@ bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
         }
     }
 
-    // Force capable?
-    if (joystick->hwdata->Capabilities.dwFlags & DIDC_FORCEFEEDBACK) {
+    // Force capable?  Per-axis DIDOI_FFACTUATOR replaces the legacy
+    // DIDC_FORCEFEEDBACK cap-flag gate (see CountFFActuatorsCallback above).
+    {
+        FFActuatorCountCtx ffctx = { 0 };
+        IDirectInputDevice8_EnumObjects(joystick->hwdata->InputDevice,
+                                        CountFFActuatorsCallback, &ffctx, DIDFT_AXIS);
+        if (ffctx.count > 0) {
         result = IDirectInputDevice8_Acquire(joystick->hwdata->InputDevice);
         if (FAILED(result)) {
             return SetDIerror("IDirectInputDevice8::Acquire", result);
@@ -868,6 +893,7 @@ bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
         */
 
         SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+        }
     }
 
     // What buttons and axes does it have?
