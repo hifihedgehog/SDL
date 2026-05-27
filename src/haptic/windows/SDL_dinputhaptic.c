@@ -121,13 +121,25 @@ bool SDL_DINPUT_HapticInit(void)
     return true;
 }
 
+// PadForge issue #1: replace the DIDC_FORCEFEEDBACK cap-flag gate with a
+// per-axis DIDOI_FFACTUATOR count.  See SDL_dinputjoystick.c for the full
+// rationale; the same reasoning applies on the haptic side.
+static BOOL CALLBACK CountFFActuatorsCallback(LPCDIDEVICEOBJECTINSTANCE obj, LPVOID ctx)
+{
+    if ((obj->dwType & DIDFT_AXIS) && (obj->dwFlags & DIDOI_FFACTUATOR)) {
+        (*(int *)ctx)++;
+    }
+    return DIENUM_CONTINUE;
+}
+
 bool SDL_DINPUT_HapticMaybeAddDevice(const DIDEVICEINSTANCE *pdidInstance)
 {
     HRESULT ret;
     LPDIRECTINPUTDEVICE8 device;
-    const DWORD needflags = DIDC_ATTACHED | DIDC_FORCEFEEDBACK;
+    const DWORD needflags = DIDC_ATTACHED;  // FFB removed; per-axis DIDOI_FFACTUATOR replaces it
     DIDEVCAPS capabilities;
     SDL_hapticlist_item *item = NULL;
+    int ffactuator_count = 0;
 
     if (!dinput) {
         return false; // not initialized. We'll pick these up on enumeration if we init later.
@@ -151,14 +163,24 @@ bool SDL_DINPUT_HapticMaybeAddDevice(const DIDEVICEINSTANCE *pdidInstance)
     SDL_zero(capabilities);
     capabilities.dwSize = sizeof(DIDEVCAPS);
     ret = IDirectInputDevice8_GetCapabilities(device, &capabilities);
-    IDirectInputDevice8_Release(device);
     if (FAILED(ret)) {
         // DI_SetError("Getting device capabilities",ret);
+        IDirectInputDevice8_Release(device);
         return false;
     }
 
     if ((capabilities.dwFlags & needflags) != needflags) {
+        IDirectInputDevice8_Release(device);
         return false; // not a device we can use.
+    }
+
+    // Count per-axis force-feedback actuators on the still-open device.
+    // EnumObjects does not require SetDataFormat or SetCooperativeLevel.
+    IDirectInputDevice8_EnumObjects(device, CountFFActuatorsCallback,
+                                    &ffactuator_count, DIDFT_AXIS);
+    IDirectInputDevice8_Release(device);
+    if (ffactuator_count == 0) {
+        return false; // no FFB-capable axes
     }
 
     item = (SDL_hapticlist_item *)SDL_calloc(1, sizeof(SDL_hapticlist_item));
