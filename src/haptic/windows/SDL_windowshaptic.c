@@ -177,18 +177,31 @@ int SDL_SYS_HapticMouse(void)
     return -1;
 }
 
+// PadForge issue #1: per-axis DIDOI_FFACTUATOR count, matching the
+// gate already used in SDL_dinputjoystick.c and SDL_dinputhaptic.c.
+// File-local since the other two sites define their own.
+static BOOL CALLBACK CountFFActuatorsCallback(LPCDIDEVICEOBJECTINSTANCE obj, LPVOID ctx)
+{
+    if ((obj->dwType & DIDFT_AXIS) && (obj->dwFlags & DIDOI_FFACTUATOR)) {
+        (*(int *)ctx)++;
+    }
+    return DIENUM_CONTINUE;
+}
+
 /*
  * Checks to see if a joystick has haptic features.
  */
 bool SDL_SYS_JoystickIsHaptic(SDL_Joystick *joystick)
 {
+    int ffactuator_count = 0;
+
     if (joystick->driver != &SDL_WINDOWS_JoystickDriver) {
         return false;
     }
-    if (joystick->hwdata->Capabilities.dwFlags & DIDC_FORCEFEEDBACK) {
-        return true;
-    }
-    return false;
+    IDirectInputDevice8_EnumObjects(joystick->hwdata->InputDevice,
+                                    CountFFActuatorsCallback,
+                                    &ffactuator_count, DIDFT_AXIS);
+    return ffactuator_count > 0;
 }
 
 /*
