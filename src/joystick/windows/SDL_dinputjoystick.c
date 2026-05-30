@@ -357,10 +357,61 @@ void FreeRumbleEffectData(DIEFFECT *effect)
     SDL_free(effect);
 }
 
-DIEFFECT *CreateRumbleEffectData(Sint16 magnitude)
+// PadForge issue #1 fix: populate rgdwAxes via EnumObjects(DIDFT_AXIS)
+// filtered by DIDOI_FFACTUATOR, mirroring DXSDK Jun 2010 FFConst sample
+// (Samples/C++/DirectInput/FFConst/ffconst.cpp lines 244-267). Previously
+// CreateRumbleEffectData left rgdwAxes zeroed via SDL_calloc, producing a
+// DIEFFECT with cAxes=2 and rgdwAxes={DIJOFS_X, DIJOFS_X} — two references
+// to the same axis. Tolerant FFB drivers (wheels, Sidewinder FF2, dinput8
+// XInput bridge) accepted it; stricter homebrew drivers (e.g. aitte2's
+// JoyFF.dll for Twin USB 0810:0001) returned no rumble.
+typedef struct
+{
+    DWORD axes[2];
+    DWORD count;
+} RumbleAxisCtx;
+
+static BOOL CALLBACK CollectRumbleAxesCallback(LPCDIDEVICEOBJECTINSTANCE obj, LPVOID ctx)
+{
+    RumbleAxisCtx *out = (RumbleAxisCtx *)ctx;
+    if ((obj->dwType & DIDFT_AXIS) && (obj->dwFlags & DIDOI_FFACTUATOR) && out->count < SDL_arraysize(out->axes)) {
+        DWORD offset = 0;
+        if (WIN_IsEqualGUID(&obj->guidType, &GUID_XAxis)) {
+            offset = DIJOFS_X;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_YAxis)) {
+            offset = DIJOFS_Y;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_ZAxis)) {
+            offset = DIJOFS_Z;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_RxAxis)) {
+            offset = DIJOFS_RX;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_RyAxis)) {
+            offset = DIJOFS_RY;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_RzAxis)) {
+            offset = DIJOFS_RZ;
+        } else {
+            return DIENUM_CONTINUE; // unknown axis kind, skip
+        }
+        out->axes[out->count++] = offset;
+    }
+    return DIENUM_CONTINUE;
+}
+
+DIEFFECT *CreateRumbleEffectData(LPDIRECTINPUTDEVICE8 device, Sint16 magnitude)
 {
     DIEFFECT *effect;
     DIPERIODIC *periodic;
+    RumbleAxisCtx axis_ctx = { { 0, 0 }, 0 };
+
+    if (device) {
+        IDirectInputDevice8_EnumObjects(device, CollectRumbleAxesCallback, &axis_ctx, DIDFT_AXIS);
+    }
+    if (axis_ctx.count == 0) {
+        // Device exposed no FFACTUATOR axes (shouldn't reach here per JoystickOpen
+        // gate, but guard anyway). Fall back to X axis so we don't ship a degenerate
+        // {0,0} effect; the call will likely fail downstream and propagate the error.
+        axis_ctx.axes[0] = DIJOFS_X;
+        axis_ctx.count = 1;
+    }
 
     // Create the effect
     effect = (DIEFFECT *)SDL_calloc(1, sizeof(*effect));
@@ -373,12 +424,13 @@ DIEFFECT *CreateRumbleEffectData(Sint16 magnitude)
     effect->dwDuration = SDL_MAX_RUMBLE_DURATION_MS * 1000; // In microseconds.
     effect->dwTriggerButton = DIEB_NOTRIGGER;
 
-    effect->cAxes = 2;
+    effect->cAxes = axis_ctx.count;
     effect->rgdwAxes = (DWORD *)SDL_calloc(effect->cAxes, sizeof(DWORD));
     if (!effect->rgdwAxes) {
         FreeRumbleEffectData(effect);
         return NULL;
     }
+    SDL_memcpy(effect->rgdwAxes, axis_ctx.axes, effect->cAxes * sizeof(DWORD));
 
     effect->rglDirection = (LONG *)SDL_calloc(effect->cAxes, sizeof(LONG));
     if (!effect->rglDirection) {
@@ -393,7 +445,9 @@ DIEFFECT *CreateRumbleEffectData(Sint16 magnitude)
         return NULL;
     }
     periodic->dwMagnitude = CONVERT_MAGNITUDE(magnitude);
-    periodic->dwPeriod = 1000000;
+    // 100 ms period == 10 Hz. Previous value of 1,000,000 us (1 Hz) is
+    // sub-perceptible. x360ce uses 60-120 ms for the same effect family.
+    periodic->dwPeriod = 100000;
 
     effect->cbTypeSpecificParams = sizeof(*periodic);
     effect->lpvTypeSpecificParams = periodic;
@@ -851,11 +905,17 @@ bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
             return SetDIerror("IDirectInputDevice8::Unacquire", result);
         }
 
-        /* Turn on auto-centering for a ForceFeedback device (until told
-         * otherwise). */
+        /* Disable the auto-centering spring for FFB devices.  Microsoft's
+         * FFConst sample (DXSDK Jun 2010, lines 232-241) and the Dolphin /
+         * x360ce FFB code all do this: "Since we will be playing force
+         * feedback effects, we should disable the auto-centering spring."
+         * Was DIPROPAUTOCENTER_ON; flipped 2026-05-30 per PadForge issue #1
+         * comparative analysis against FFConst.  Conflicted with the
+         * autocenter-OFF set in SDL_dinputhaptic.c:401 in a last-writer-
+         * wins race when both subsystems opened the same device. */
         dipdw.diph.dwObj = 0;
         dipdw.diph.dwHow = DIPH_DEVICE;
-        dipdw.dwData = DIPROPAUTOCENTER_ON;
+        dipdw.dwData = DIPROPAUTOCENTER_OFF;
 
         result =
             IDirectInputDevice8_SetProperty(joystick->hwdata->InputDevice,
@@ -930,7 +990,7 @@ static bool SDL_DINPUT_JoystickInitRumble(SDL_Joystick *joystick, Sint16 magnitu
     }
 
     // Create the effect
-    joystick->hwdata->ffeffect = CreateRumbleEffectData(magnitude);
+    joystick->hwdata->ffeffect = CreateRumbleEffectData(joystick->hwdata->InputDevice, magnitude);
     if (!joystick->hwdata->ffeffect) {
         return false;
     }
