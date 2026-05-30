@@ -401,53 +401,6 @@ DIEFFECT *CreateRumbleEffectData(Sint16 magnitude)
     return effect;
 }
 
-// PadForge issue #1: constant-force variant for FFB drivers that don't
-// implement periodic effects (e.g. aitte2's dualshock_driver for
-// Twin-USB + PS1 DualShock 1, the proximate case for the original report).
-// SDL_DINPUT_JoystickInitRumble falls back to this when CreateEffect with
-// GUID_Sine fails.
-static DIEFFECT *CreateRumbleEffectData_ConstantForce(Sint16 magnitude)
-{
-    DIEFFECT *effect;
-    DICONSTANTFORCE *constant;
-
-    effect = (DIEFFECT *)SDL_calloc(1, sizeof(*effect));
-    if (!effect) {
-        return NULL;
-    }
-    effect->dwSize = sizeof(*effect);
-    effect->dwGain = 10000;
-    effect->dwFlags = DIEFF_OBJECTOFFSETS;
-    effect->dwDuration = SDL_MAX_RUMBLE_DURATION_MS * 1000;
-    effect->dwTriggerButton = DIEB_NOTRIGGER;
-
-    effect->cAxes = 2;
-    effect->rgdwAxes = (DWORD *)SDL_calloc(effect->cAxes, sizeof(DWORD));
-    if (!effect->rgdwAxes) {
-        FreeRumbleEffectData(effect);
-        return NULL;
-    }
-
-    effect->rglDirection = (LONG *)SDL_calloc(effect->cAxes, sizeof(LONG));
-    if (!effect->rglDirection) {
-        FreeRumbleEffectData(effect);
-        return NULL;
-    }
-    effect->dwFlags |= DIEFF_CARTESIAN;
-
-    constant = (DICONSTANTFORCE *)SDL_calloc(1, sizeof(*constant));
-    if (!constant) {
-        FreeRumbleEffectData(effect);
-        return NULL;
-    }
-    constant->lMagnitude = CONVERT_MAGNITUDE(magnitude);
-
-    effect->cbTypeSpecificParams = sizeof(*constant);
-    effect->lpvTypeSpecificParams = constant;
-
-    return effect;
-}
-
 bool SDL_DINPUT_JoystickInit(void)
 {
     HRESULT result;
@@ -825,26 +778,6 @@ static void SortDevObjects(SDL_Joystick *joystick)
     }
 }
 
-// PadForge issue #1: replace the DIDC_FORCEFEEDBACK cap-flag gate with a
-// per-axis DIDOI_FFACTUATOR count.  DIDC_FORCEFEEDBACK is set by dinput8.dll
-// from its own OEM-effect-driver discovery and is not lit by some legitimate
-// ring-3 effect drivers (e.g. aitte2's dualshock_driver via Twin-USB + PS1
-// DualShock 1).  Microsoft's documented FFB contract is the CreateEffect
-// HRESULT, not the cap flag; FFConst sample, Dolphin, and Wine joy.cpl all
-// gate on DIDOI_FFACTUATOR instead.
-typedef struct
-{
-    int count;
-} FFActuatorCountCtx;
-
-static BOOL CALLBACK CountFFActuatorsCallback(LPCDIDEVICEOBJECTINSTANCE obj, LPVOID ctx)
-{
-    if ((obj->dwType & DIDFT_AXIS) && (obj->dwFlags & DIDOI_FFACTUATOR)) {
-        ((FFActuatorCountCtx *)ctx)->count++;
-    }
-    return DIENUM_CONTINUE;
-}
-
 bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joystickdevice)
 {
     HRESULT result;
@@ -894,13 +827,8 @@ bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
         }
     }
 
-    // Force capable?  Per-axis DIDOI_FFACTUATOR replaces the legacy
-    // DIDC_FORCEFEEDBACK cap-flag gate (see CountFFActuatorsCallback above).
-    {
-        FFActuatorCountCtx ffctx = { 0 };
-        IDirectInputDevice8_EnumObjects(joystick->hwdata->InputDevice,
-                                        CountFFActuatorsCallback, &ffctx, DIDFT_AXIS);
-        if (ffctx.count > 0) {
+    // Force capable?
+    if (joystick->hwdata->Capabilities.dwFlags & DIDC_FORCEFEEDBACK) {
         result = IDirectInputDevice8_Acquire(joystick->hwdata->InputDevice);
         if (FAILED(result)) {
             return SetDIerror("IDirectInputDevice8::Acquire", result);
@@ -940,7 +868,6 @@ bool SDL_DINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
         */
 
         SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
-        }
     }
 
     // What buttons and axes does it have?
@@ -1011,23 +938,7 @@ static bool SDL_DINPUT_JoystickInitRumble(SDL_Joystick *joystick, Sint16 magnitu
     result = IDirectInputDevice8_CreateEffect(joystick->hwdata->InputDevice, &GUID_Sine,
                                               joystick->hwdata->ffeffect, &joystick->hwdata->ffeffect_ref, NULL);
     if (FAILED(result)) {
-        // PadForge issue #1: not all FFB drivers implement periodic effects.
-        // Fall back to constant force; if that also fails, the device truly
-        // has no usable rumble path.  Without this, ring-3 effect drivers
-        // that only implement GUID_ConstantForce (e.g. aitte2's
-        // dualshock_driver) leave rumble silent even though the per-axis
-        // DIDOI_FFACTUATOR gate admits them.
-        FreeRumbleEffectData(joystick->hwdata->ffeffect);
-        joystick->hwdata->ffeffect = CreateRumbleEffectData_ConstantForce(magnitude);
-        if (!joystick->hwdata->ffeffect) {
-            return false;
-        }
-        result = IDirectInputDevice8_CreateEffect(joystick->hwdata->InputDevice, &GUID_ConstantForce,
-                                                  joystick->hwdata->ffeffect, &joystick->hwdata->ffeffect_ref, NULL);
-        if (FAILED(result)) {
-            return SetDIerror("IDirectInputDevice8::CreateEffect", result);
-        }
-        joystick->hwdata->ff_constant_force_fallback = true;
+        return SetDIerror("IDirectInputDevice8::CreateEffect", result);
     }
     return true;
 }
@@ -1039,21 +950,13 @@ bool SDL_DINPUT_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumb
     // Scale and average the two rumble strengths
     Sint16 magnitude = (Sint16)(((low_frequency_rumble / 2) + (high_frequency_rumble / 2)) / 2);
 
-    // PadForge issue #1: gate on the rumble-capability property the open path
-    // already determined (via per-axis DIDOI_FFACTUATOR count) instead of
-    // re-reading the unreliable DIDC_FORCEFEEDBACK cap flag here.
-    if (!SDL_GetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, false)) {
+    if (!(joystick->hwdata->Capabilities.dwFlags & DIDC_FORCEFEEDBACK)) {
         return SDL_Unsupported();
     }
 
     if (joystick->hwdata->ff_initialized) {
-        if (joystick->hwdata->ff_constant_force_fallback) {
-            DICONSTANTFORCE *constant = ((DICONSTANTFORCE *)joystick->hwdata->ffeffect->lpvTypeSpecificParams);
-            constant->lMagnitude = CONVERT_MAGNITUDE(magnitude);
-        } else {
-            DIPERIODIC *periodic = ((DIPERIODIC *)joystick->hwdata->ffeffect->lpvTypeSpecificParams);
-            periodic->dwMagnitude = CONVERT_MAGNITUDE(magnitude);
-        }
+        DIPERIODIC *periodic = ((DIPERIODIC *)joystick->hwdata->ffeffect->lpvTypeSpecificParams);
+        periodic->dwMagnitude = CONVERT_MAGNITUDE(magnitude);
 
         result = IDirectInputEffect_SetParameters(joystick->hwdata->ffeffect_ref, joystick->hwdata->ffeffect, (DIEP_DURATION | DIEP_TYPESPECIFICPARAMS));
         if (result == DIERR_INPUTLOST) {
