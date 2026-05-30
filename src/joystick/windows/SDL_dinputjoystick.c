@@ -377,9 +377,61 @@ static void FreeRumbleEffectData(DIEFFECT *effect)
     SDL_free(effect);  // it's all allocated in a single SDL_calloc() (or using static data) now.
 }
 
-static DIEFFECT *CreateRumbleEffectData(Sint16 magnitude)
+// PadForge issue #1: rgdwAxes names the device's force feedback actuators,
+// found with EnumObjects(DIDFT_AXIS) and DIDOI_FFACTUATOR. Each actuator's
+// guidType maps to its DIJOFS_* offset the way DI_DeviceObjectCallback in
+// SDL_dinputhaptic.c maps it, and cAxes is the actuator count, capped at two,
+// as in the DXSDK Jun 2010 FFConst sample
+// (Samples/C++/DirectInput/FFConst/ffconst.cpp lines 244-266). A device with
+// one actuator gets one axis rather than a fixed X and Y pair.
+typedef struct
 {
-    DIEFFECT *effect = (DIEFFECT *)SDL_calloc(1, sizeof(*effect) + sizeof (DIPERIODIC));
+    DWORD axes[2];
+    DWORD count;
+} RumbleAxisCtx;
+
+static BOOL CALLBACK CollectRumbleAxesCallback(LPCDIDEVICEOBJECTINSTANCE obj, LPVOID ctx)
+{
+    RumbleAxisCtx *out = (RumbleAxisCtx *)ctx;
+    if ((obj->dwType & DIDFT_AXIS) && (obj->dwFlags & DIDOI_FFACTUATOR) && out->count < SDL_arraysize(out->axes)) {
+        DWORD offset = 0;
+        if (WIN_IsEqualGUID(&obj->guidType, &GUID_XAxis)) {
+            offset = DIJOFS_X;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_YAxis)) {
+            offset = DIJOFS_Y;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_ZAxis)) {
+            offset = DIJOFS_Z;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_RxAxis)) {
+            offset = DIJOFS_RX;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_RyAxis)) {
+            offset = DIJOFS_RY;
+        } else if (WIN_IsEqualGUID(&obj->guidType, &GUID_RzAxis)) {
+            offset = DIJOFS_RZ;
+        } else {
+            return DIENUM_CONTINUE; // unknown axis kind, skip
+        }
+        out->axes[out->count++] = offset;
+    }
+    return DIENUM_CONTINUE;
+}
+
+static DIEFFECT *CreateRumbleEffectData(LPDIRECTINPUTDEVICE8 device, Sint16 magnitude)
+{
+    RumbleAxisCtx axis_ctx = { { 0, 0 }, 0 };
+
+    if (device) {
+        IDirectInputDevice8_EnumObjects(device, CollectRumbleAxesCallback, &axis_ctx, DIDFT_AXIS);
+    }
+    if (axis_ctx.count == 0) {
+        // A device can set DIDC_FORCEFEEDBACK without flagging an actuator axis.
+        // It gets the X axis alone, as Dolphin's ForceFeedbackDevice gives every
+        // device, and CreateEffect reports the error if the driver refuses it.
+        axis_ctx.axes[0] = DIJOFS_X;
+        axis_ctx.count = 1;
+    }
+
+    // The axis offsets follow the DIPERIODIC in the same allocation.
+    DIEFFECT *effect = (DIEFFECT *)SDL_calloc(1, sizeof(*effect) + sizeof (DIPERIODIC) + sizeof(axis_ctx.axes));
     if (!effect) {
         return NULL;
     }
@@ -390,17 +442,21 @@ static DIEFFECT *CreateRumbleEffectData(Sint16 magnitude)
     effect->dwDuration = SDL_MAX_RUMBLE_DURATION_MS * 1000; // In microseconds.
     effect->dwTriggerButton = DIEB_NOTRIGGER;
 
-    static DWORD rgdwAxes[] = { DIJOFS_X, DIJOFS_Y };
-    effect->cAxes = SDL_arraysize(rgdwAxes);
+    DWORD *rgdwAxes = (DWORD *)((DIPERIODIC *)(effect + 1) + 1);
+    SDL_memcpy(rgdwAxes, axis_ctx.axes, axis_ctx.count * sizeof(DWORD));
+    effect->cAxes = axis_ctx.count;
     effect->rgdwAxes = rgdwAxes;
 
+    // Two zero directions cover either axis count.
     static LONG rglDirection[] = { 0, 0 };
     effect->rglDirection = rglDirection;
     effect->dwFlags |= DIEFF_CARTESIAN;
 
     DIPERIODIC *periodic = (DIPERIODIC *)(effect + 1);  // we allocated this right after the effect struct.
     periodic->dwMagnitude = CONVERT_MAGNITUDE(magnitude);
-    periodic->dwPeriod = 1000000;
+    // 100 ms period == 10 Hz. Previous value of 1,000,000 us (1 Hz) is
+    // sub-perceptible. x360ce uses 60-120 ms for the same effect family.
+    periodic->dwPeriod = 100000;
 
     effect->cbTypeSpecificParams = sizeof(*periodic);
     effect->lpvTypeSpecificParams = periodic;
@@ -721,7 +777,7 @@ static bool DINPUT_JoystickInitRumble(SDL_Joystick *joystick, Sint16 magnitude)
     }
 
     // Create the effect
-    joystick->hwdata->ffeffect = CreateRumbleEffectData(magnitude);
+    joystick->hwdata->ffeffect = CreateRumbleEffectData(joystick->hwdata->InputDevice, magnitude);
     if (!joystick->hwdata->ffeffect) {
         return false;
     }
@@ -1382,11 +1438,17 @@ static bool DINPUT_JoystickOpen(SDL_Joystick *joystick, int device_index)
             goto error;
         }
 
-        /* Turn on auto-centering for a ForceFeedback device (until told
-         * otherwise). */
+        /* Disable the auto-centering spring for FFB devices, as Microsoft's
+         * FFConst sample (DXSDK Jun 2010, lines 232-241) and Dolphin's
+         * ForceFeedbackDevice do: "Since we will be playing force feedback
+         * effects, we should disable the auto-centering spring."  Was
+         * DIPROPAUTOCENTER_ON; flipped 2026-05-30 per PadForge issue #1.
+         * SDL_DINPUT_HapticOpenFromDevice (SDL_dinputhaptic.c) also turns it
+         * off, so the two no longer race when both subsystems open the same
+         * device. */
         dipdw.diph.dwObj = 0;
         dipdw.diph.dwHow = DIPH_DEVICE;
-        dipdw.dwData = DIPROPAUTOCENTER_ON;
+        dipdw.dwData = DIPROPAUTOCENTER_OFF;
 
         result =
             IDirectInputDevice8_SetProperty(joystick->hwdata->InputDevice,
