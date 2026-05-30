@@ -83,7 +83,6 @@ struct joystick_hwdata
     int NumInputs;
     int NumSliders;
     bool ff_initialized;
-    bool ff_constant_force_fallback; // ffeffect uses DICONSTANTFORCE instead of DIPERIODIC (set when GUID_Sine CreateEffect fails)
     DIEFFECT *ffeffect;
     LPDIRECTINPUTEFFECT ffeffect_ref;
 #endif
