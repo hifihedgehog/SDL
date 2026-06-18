@@ -1424,7 +1424,32 @@ end_of_function:
 static int hid_write_output_report(hid_device *dev, const unsigned char *data, size_t length)
 {
 	BOOL res;
-	res = HidD_SetOutputReport(dev->device_handle, (void *)data, (ULONG)length);
+	unsigned char *buf;
+	size_t length_to_send;
+
+	/* HidD_SetOutputReport(), like WriteFile(), expects at least
+	   caps.OutputReportByteLength bytes even when the report is shorter; a
+	   short buffer fails with ERROR_INVALID_PARAMETER. Zero-pad short reports
+	   into the cached write_buf, mirroring upstream hid_send_output_report()
+	   and the WriteFile path in hid_write(). */
+	if (length >= dev->output_report_length) {
+		buf = (unsigned char *) data;
+		length_to_send = length;
+	} else {
+		if (dev->write_buf == NULL) {
+			dev->write_buf = (unsigned char *) malloc(dev->output_report_length);
+			if (dev->write_buf == NULL) {
+				register_string_error(dev, L"hid_write_output_report/malloc");
+				return -1;
+			}
+		}
+		buf = dev->write_buf;
+		memcpy(buf, data, length);
+		memset(buf + length, 0, dev->output_report_length - length);
+		length_to_send = dev->output_report_length;
+	}
+
+	res = HidD_SetOutputReport(dev->device_handle, (void *)buf, (ULONG)length_to_send);
 	if (res)
 		return (int)length;
 	else
@@ -1472,12 +1497,30 @@ int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *
 	res = WriteFile(dev->device_handle, buf, (DWORD) length, &bytes_written, &dev->write_ol);
 
 	if (!res) {
-		if (GetLastError() != ERROR_IO_PENDING) {
+		DWORD error = GetLastError();
+		if (error == ERROR_IO_PENDING) {
+			/* WriteFile() is completing asynchronously; wait for it below. */
+			overlapped = TRUE;
+		} else if (error == ERROR_INVALID_PARAMETER && !dev->use_hid_write_output_report) {
+			/* The Microsoft in-box Bluetooth stack rejects WriteFile() for
+			   output reports on some devices (e.g. the Wii Remote, VID 0x057E
+			   PID 0x0306) but accepts HidD_SetOutputReport(). Switch this
+			   device over and retry once with the same, already-padded buffer.
+			   Keep the switch only if the retry succeeds, so a device that
+			   needs the interrupt-OUT WriteFile() path is not stranded on the
+			   control pipe. */
+			dev->use_hid_write_output_report = TRUE;
+			function_result = hid_write_output_report(dev, buf, length);
+			if (function_result < 0) {
+				dev->use_hid_write_output_report = FALSE;
+				register_winapi_error(dev, L"HidD_SetOutputReport");
+			}
+			goto end_of_function;
+		} else {
 			/* WriteFile() failed. Return error. */
 			register_winapi_error(dev, L"WriteFile");
 			goto end_of_function;
 		}
-		overlapped = TRUE;
 	} else {
 		/* WriteFile() succeeded synchronously. */
 		function_result = bytes_written;
