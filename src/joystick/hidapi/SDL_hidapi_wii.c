@@ -1581,9 +1581,27 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
         }
     }
 
-    if (size < 0 || ctx->m_bDisconnected) {
+    if (size < 0) {
         // Read error, device is disconnected
         HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+    } else if (ctx->m_bDisconnected) {
+        // An extension was hot-plugged (Nunchuk/Classic attach or detach, or a
+        // Motion Plus state change). The device stays physically present, so the
+        // HIDAPI core never tears it down and re-runs InitDevice. Re-identify in
+        // place: drop the old joystick, re-read the extension type, refresh the
+        // name/GUID, then re-add with the new capabilities. OpenJoystick re-applies
+        // nbuttons/naxes and per-extension sensors when the app reopens it.
+        HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+        ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
+        UpdateDeviceIdentity(device);
+        ctx->m_bDisconnected = false;
+        /* Re-seed the idle clock after the blocking identify (see the InitDevice
+         * seed for issue #3). ReadExtensionControllerType can block across several
+         * read attempts, and the no-input timeout check above is not gated on an
+         * open joystick, so a stale m_ulLastInput would disconnect the re-added
+         * joystick before the app can reopen it. */
+        ctx->m_ulLastInput = SDL_GetTicks();
+        HIDAPI_JoystickConnected(device, NULL);
     }
     return (size >= 0);
 }
