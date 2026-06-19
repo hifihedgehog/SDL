@@ -746,6 +746,16 @@ static bool HIDAPI_DriverWii_InitDevice(SDL_HIDAPI_Device *device)
     ctx->device = device;
     device->context = ctx;
 
+    /* Start the no-input grace period from when the device is added, not from 0.
+     * A Wii Remote does not stream until OpenJoystick sets the reporting mode,
+     * so no input arrives between here and OpenJoystick. With m_ulLastInput left
+     * at 0, UpdateDevice's "now >= m_ulLastInput + INPUT_WAIT_TIMEOUT_MS" check
+     * disconnects the device the moment app uptime passes 3s, before the app can
+     * open it (the "only works right after a restart" bug). Seeding it with the
+     * current tick gives every freshly-added Wii Remote the full timeout window
+     * to be opened, regardless of app uptime. */
+    ctx->m_ulLastInput = SDL_GetTicks();
+
     if (device->vendor_id == USB_VENDOR_NINTENDO) {
         ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
 
