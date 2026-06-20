@@ -774,6 +774,12 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
     if (!ctrl->vibration_char) {
         return false;
     }
+    // The NSO GameCube controller uses a different 4-byte packed rumble format
+    // (hid_reports.md:250-255), not the VibrationData motor group. Skip it rather
+    // than send a malformed packet; GC rumble is a separate TODO.
+    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER) {
+        return false;
+    }
     BLE_EncodeVibration(low, high, vib);
     BLE_EncodeVibration(0, 0, zero); // default VibrationData (default freq, 0 amp)
     group[0] = (Uint8)(0x50 | (ctrl->rumble_seq & 0x0F));
@@ -1049,7 +1055,13 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         break;
     }
 
-    // Command-response channel first (spec ordering: response before input).
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 connected: chars input=%d command=%d response=%d vibration=%d",
+                 ctrl->input_char != NULL, ctrl->command_char != NULL, ctrl->response_char != NULL, ctrl->vibration_char != NULL);
+
+    // Connect sequence per controller.py connect() (switch2-controllers/
+    // controller.py:253-265): enable the command-response notification first, then
+    // read calibration over the command channel, and only THEN enable the input
+    // report notification.
     if (ctrl->response_char) {
         response_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*response_handler));
         if (response_handler) {
@@ -1060,23 +1072,21 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
             BLE_EnableNotifications(ctrl->response_char);
         }
     }
+
+    // Read stick calibration over the command channel (best-effort).
+    BLE_ReadCalibration(ctrl);
+
     if (ctrl->input_char) {
         input_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*input_handler));
         if (input_handler) {
             input_handler->vtbl = (void *)&g_input_vtbl;
             input_handler->ctrl = ctrl;
             ctrl->input_handler = input_handler;
-            // Register the handler before enabling notifications (spec ordering).
+            // Register the handler before enabling notifications (controller.py order).
             __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(ctrl->input_char, (void *)input_handler, &ctrl->input_token);
             BLE_EnableNotifications(ctrl->input_char);
         }
     }
-
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 connected: chars input=%d command=%d response=%d vibration=%d",
-                 ctrl->input_char != NULL, ctrl->command_char != NULL, ctrl->response_char != NULL, ctrl->vibration_char != NULL);
-
-    // Read stick calibration over the command channel (best-effort).
-    BLE_ReadCalibration(ctrl);
 
     SDL_LockJoysticks();
     {
