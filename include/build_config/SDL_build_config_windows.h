@@ -225,6 +225,8 @@ typedef unsigned int uintptr_t;
 #define SDL_JOYSTICK_GAMEINPUT 1
 #define SDL_JOYSTICK_HIDAPI 1
 #define SDL_JOYSTICK_VIRTUAL 1
+// PadForge fork: WinRT BLE-GATT driver for the Switch 2 controllers (issue #5)
+#define SDL_JOYSTICK_BLE 1
 #define SDL_JOYSTICK_XINPUT 1
 #define SDL_HAPTIC_DINPUT 1
 
