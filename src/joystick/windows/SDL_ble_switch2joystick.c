@@ -487,7 +487,7 @@ static HRESULT STDMETHODCALLTYPE InputHandler_QueryInterface(void *This, REFIID 
         return S_OK;
     }
     *ppv = NULL;
-    return WIN_IsEqualIID(riid, &IID_IMarshal) ? E_NOINTERFACE : E_NOINTERFACE;
+    return E_NOINTERFACE;
 }
 static ULONG STDMETHODCALLTYPE InputHandler_AddRef(void *This) { (void)This; return 2; }
 static ULONG STDMETHODCALLTYPE InputHandler_Release(void *This) { (void)This; return 1; }
@@ -1468,8 +1468,12 @@ static void BLE_FreeController(BLE_Controller *ctrl)
     if (ctrl->response_sem) {
         SDL_DestroySemaphore(ctrl->response_sem);
     }
-    SDL_free(ctrl->input_handler);
-    SDL_free(ctrl->response_handler);
+    // Intentionally NOT freeing input_handler/response_handler: a ValueChanged
+    // callback may still be in-flight on a WinRT thread-pool thread after
+    // remove_ValueChanged returns (WinRT does not drain in-flight invocations).
+    // Freeing the delegate here would be a use-after-free in that callback.
+    // WGI takes the same stance with static, never-freed delegates. The leak is
+    // one small object per controller, reclaimed at process exit.
     SDL_free(ctrl->name);
     SDL_free(ctrl);
 }
