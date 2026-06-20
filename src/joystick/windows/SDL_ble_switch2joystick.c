@@ -1104,7 +1104,16 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
 
     SDL_LockJoysticks();
     {
-        BLE_Controller **grown = (BLE_Controller **)SDL_realloc(ble.controllers, sizeof(ble.controllers[0]) * (ble.controller_count + 1));
+        // Bail if a teardown ran while this connect was in WinRT discovery.
+        // SDL_QuitJoysticks holds SDL_LockJoysticks across driver->Quit(), and
+        // BLE_JoystickQuit clears ble.initialized last under that same lock
+        // (SDL_joystick.c:2275-2294). A connect callback that was blocked here
+        // during shutdown must not re-grow the freed ble.controllers array or
+        // register a joystick after SDL_joysticks_quitting is set. ctrl stays
+        // non-NULL and is torn down via the cleanup path below.
+        BLE_Controller **grown = ble.initialized
+            ? (BLE_Controller **)SDL_realloc(ble.controllers, sizeof(ble.controllers[0]) * (ble.controller_count + 1))
+            : NULL;
         // Re-check under the lock: another advertisement callback on a second
         // thread-pool thread may have connected the same device concurrently.
         if (grown) {
