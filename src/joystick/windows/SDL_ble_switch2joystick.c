@@ -241,11 +241,56 @@ static struct
 
     BLE_Controller **controllers;
     int controller_count;
+
+    // Addresses with a connect in progress, so repeated advertisements during
+    // the (multi-second) connect don't start a storm of duplicate connects.
+    Uint64 connecting[16];
+    int connecting_count;
 } ble;
 
 // Forward declarations.
 static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name);
 static void BLE_FreeController(BLE_Controller *ctrl);
+static BLE_Controller *BLE_GetControllerByAddress(Uint64 address);
+
+// Reserve an address for connecting. Returns false if it is already connected or
+// a connect is already in progress. Caller must BLE_ReleaseConnect on completion.
+static bool BLE_TryReserveConnect(Uint64 address)
+{
+    int i;
+    bool reserved = false;
+
+    SDL_LockJoysticks();
+    if (!BLE_GetControllerByAddress(address)) {
+        bool pending = false;
+        for (i = 0; i < ble.connecting_count; ++i) {
+            if (ble.connecting[i] == address) {
+                pending = true;
+                break;
+            }
+        }
+        if (!pending && ble.connecting_count < (int)SDL_arraysize(ble.connecting)) {
+            ble.connecting[ble.connecting_count++] = address;
+            reserved = true;
+        }
+    }
+    SDL_UnlockJoysticks();
+    return reserved;
+}
+
+static void BLE_ReleaseConnect(Uint64 address)
+{
+    int i;
+
+    SDL_LockJoysticks();
+    for (i = 0; i < ble.connecting_count; ++i) {
+        if (ble.connecting[i] == address) {
+            ble.connecting[i] = ble.connecting[--ble.connecting_count];
+            break;
+        }
+    }
+    SDL_UnlockJoysticks();
+}
 
 // ---------------------------------------------------------------------------
 // Activation helpers.
@@ -415,12 +460,15 @@ static int BLE_BufferToBytes(Buffer *buffer, Uint8 *dst, int dst_len)
     return copied;
 }
 
-// Write bytes to a characteristic (fire-and-forget, response-less).
-static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length)
+// Write bytes to a characteristic. Commands use WriteWithResponse (reliable, and
+// the char may not advertise write-without-response); the high-rate vibration
+// characteristic uses WriteWithoutResponse.
+static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length, bool with_response)
 {
     Buffer *buffer;
     void *op = NULL;
     bool result = false;
+    int option = with_response ? GattWriteOption_WriteWithResponse : GattWriteOption_WriteWithoutResponse;
 
     if (!characteristic) {
         return false;
@@ -429,7 +477,7 @@ static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes
     if (!buffer) {
         return false;
     }
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteValueWithOptionAsync(characteristic, buffer, GattWriteOption_WriteWithoutResponse, (void *)&op)) && op) {
+    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteValueWithOptionAsync(characteristic, buffer, option, (void *)&op)) && op) {
         result = BLE_Await(op);
         ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
     }
@@ -586,7 +634,7 @@ static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const 
     while (SDL_TryWaitSemaphore(ctrl->response_sem)) {
         // drain stale replies
     }
-    if (!BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len)) {
+    if (!BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
         return 0;
     }
     if (ctrl->response_sem && SDL_WaitSemaphoreTimeout(ctrl->response_sem, 500)) {
@@ -704,7 +752,7 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
         SDL_memcpy(&packet[17], group, 16);
         len = 33;
     }
-    return BLE_WriteCharacteristic(ctrl->vibration_char, packet, len);
+    return BLE_WriteCharacteristic(ctrl->vibration_char, packet, len, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -757,17 +805,16 @@ static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRe
                     if (n >= 7) {
                         Uint16 vendor = (Uint16)(data[3] | (data[4] << 8));
                         Uint16 product = (Uint16)(data[5] | (data[6] << 8));
-                        if (vendor == USB_VENDOR_NINTENDO && !BLE_GetControllerByAddress((Uint64)address)) {
-                            switch (product) {
-                            case USB_PRODUCT_NINTENDO_SWITCH2_PRO:
-                            case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
-                            case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
-                            case USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER:
-                                BLE_ConnectAndSubscribe((Uint64)address, vendor, product, NULL);
-                                break;
-                            default:
-                                break;
-                            }
+                        bool supported = (vendor == USB_VENDOR_NINTENDO) &&
+                                         (product == USB_PRODUCT_NINTENDO_SWITCH2_PRO ||
+                                          product == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
+                                          product == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT ||
+                                          product == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER);
+                        // Reserve the address so repeated advertisements during the
+                        // multi-second connect don't start duplicate connects.
+                        if (supported && BLE_TryReserveConnect((Uint64)address)) {
+                            BLE_ConnectAndSubscribe((Uint64)address, vendor, product, NULL);
+                            BLE_ReleaseConnect((Uint64)address);
                         }
                     }
                     __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(payload);
