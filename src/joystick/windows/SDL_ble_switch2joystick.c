@@ -686,6 +686,10 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
     if (!ctrl->vibration_char) {
         return false;
     }
+    // Clamp amplitude to the wired driver's RUMBLE_MAX (29000/65535, ~44%): the
+    // wired comment warns full power "might be dangerous to the controller".
+    low = (Uint16)((int)low * 29000 / 65535);
+    high = (Uint16)((int)high * 29000 / 65535);
     BLE_EncodeVibration(low, high, vib);
     group[0] = (Uint8)(0x50 | (ctrl->rumble_seq & 0x0F));
     SDL_memcpy(&group[1], vib, 5);
