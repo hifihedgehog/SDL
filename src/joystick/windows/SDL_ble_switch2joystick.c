@@ -110,6 +110,11 @@ DEFINE_GUID(GUID_Switch2Service,    0xab7de9be, 0x89fe, 0x49ad, 0x82, 0x8f, 0x11
 DEFINE_GUID(GUID_Switch2Input,      0xab7de9be, 0x89fe, 0x49ad, 0x82, 0x8f, 0x11, 0x8f, 0x09, 0xdf, 0x7f, 0xd2);
 DEFINE_GUID(GUID_Switch2Command,    0x649d4ac9, 0x8eb7, 0x4e6c, 0xaf, 0x44, 0x1e, 0xa5, 0x4f, 0xe5, 0xf0, 0x05);
 DEFINE_GUID(GUID_Switch2CmdResponse,0xc765a961, 0xd9d8, 0x4d36, 0xa2, 0x0a, 0x53, 0x15, 0xb1, 0x11, 0x83, 0x6a);
+// Per-controller-type vibration characteristics (handle 0x0012).
+DEFINE_GUID(GUID_Switch2VibePro,  0xcc483f51, 0x9258, 0x427d, 0xa9, 0x39, 0x63, 0x0c, 0x31, 0xf7, 0x2b, 0x05);
+DEFINE_GUID(GUID_Switch2VibeJCL,  0x289326cb, 0xa471, 0x485d, 0xa8, 0xf4, 0x24, 0x0c, 0x14, 0xf1, 0x82, 0x41);
+DEFINE_GUID(GUID_Switch2VibeJCR,  0xfa19b0fb, 0xcd1f, 0x46a7, 0x84, 0xa1, 0xbb, 0xb0, 0x9e, 0x00, 0xc1, 0x49);
+DEFINE_GUID(GUID_Switch2VibeGC,   0x3f8fb670, 0xab25, 0x45bf, 0xb5, 0x40, 0x38, 0xc7, 0x28, 0x34, 0xd0, 0x64);
 
 #define NINTENDO_BLE_COMPANY_ID 0x0553
 
@@ -139,6 +144,14 @@ typedef HRESULT(WINAPI *RoActivateInstance_t)(HSTRING activatableClassId, IInspe
 typedef HRESULT(WINAPI *WindowsCreateStringReference_t)(PCWSTR sourceString, UINT32 length, HSTRING_HEADER *header, HSTRING *string);
 typedef HRESULT(WINAPI *WindowsDeleteString_t)(HSTRING string);
 
+// Per-axis stick calibration (reimplemented; the wired versions are file-static).
+typedef struct
+{
+    Uint16 neutral;
+    Uint16 max;
+    Uint16 min;
+} Switch2_AxisCal;
+
 typedef struct BLE_Controller
 {
     SDL_JoystickID instance_id;
@@ -152,6 +165,7 @@ typedef struct BLE_Controller
     GattChar *input_char;
     GattChar *command_char;
     GattChar *response_char;
+    GattChar *vibration_char;
     EventRegistrationToken input_token;
     EventRegistrationToken response_token;
 
@@ -165,19 +179,46 @@ typedef struct BLE_Controller
     bool report_pending;
     Uint8 last_state[64];
     bool have_last_state;
+
+    // Command/response channel: a write to command_char produces a notification
+    // on response_char. The ValueChanged handler stashes it and signals.
+    SDL_Mutex *response_lock;
+    SDL_Semaphore *response_sem;
+    Uint8 response[64];
+    int response_size;
+
+    // Stick calibration (reimplemented from the wired driver; static there).
+    Switch2_AxisCal left_x, left_y, right_x, right_y;
+    bool calibrated;
+
+    // Rumble state.
+    Uint32 rumble_seq;
+    int player_index;
 } BLE_Controller;
 
-// Raw 12-bit stick value (0..4095, center ~2048) to Sint16 axis. M1 uses an
-// uncalibrated linear map; calibration read over the command channel is M2.
-static Sint16 BLE_StickAxis(int raw12, bool invert)
+static void BLE_ParseStickCalibration(Switch2_AxisCal *x, Switch2_AxisCal *y, const Uint8 *data)
 {
-    int scaled = (raw12 - 2048) * 16;
-    if (scaled > 32767) {
-        scaled = 32767;
-    } else if (scaled < -32768) {
-        scaled = -32768;
+    x->neutral = (Uint16)(data[0] | ((data[1] & 0x0F) << 8));
+    y->neutral = (Uint16)((data[1] >> 4) | (data[2] << 4));
+    x->max = (Uint16)(data[3] | ((data[4] & 0x0F) << 8));
+    y->max = (Uint16)((data[4] >> 4) | (data[5] << 4));
+    x->min = (Uint16)(data[6] | ((data[7] & 0x0F) << 8));
+    y->min = (Uint16)((data[7] >> 4) | (data[8] << 4));
+}
+
+static Sint16 BLE_MapStickAxis(const Switch2_AxisCal *calib, float value, bool invert)
+{
+    Sint16 mapped;
+    if (calib && calib->neutral && calib->min && calib->max) {
+        value -= calib->neutral;
+        value /= (value < 0) ? calib->min : calib->max;
+        mapped = (Sint16)SDL_clamp(value * SDL_MAX_SINT16, SDL_MIN_SINT16, SDL_MAX_SINT16);
+    } else {
+        // Uncalibrated linear map of the 12-bit range.
+        int scaled = ((int)value - 2048) * 16;
+        mapped = (Sint16)SDL_clamp(scaled, SDL_MIN_SINT16, SDL_MAX_SINT16);
     }
-    return (Sint16)(invert ? -scaled : scaled);
+    return (Sint16)(invert ? ~mapped : mapped);
 }
 
 static struct
@@ -458,6 +499,171 @@ static const struct
 } g_input_vtbl = { (void *)InputHandler_QueryInterface, (void *)InputHandler_AddRef, (void *)InputHandler_Release, (void *)InputHandler_Invoke };
 
 // ---------------------------------------------------------------------------
+// Command-response characteristic ValueChanged: stash the reply and signal.
+// ---------------------------------------------------------------------------
+static HRESULT STDMETHODCALLTYPE ResponseHandler_Invoke(void *This, void *sender, GattValueArgs *args)
+{
+    BLE_Controller *ctrl = (BLE_Controller *)((void **)This)[1];
+    Buffer *buffer = NULL;
+    (void)sender;
+
+    if (!args || !ctrl) {
+        return S_OK;
+    }
+    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattValueChangedEventArgs_get_CharacteristicValue(args, &buffer)) && buffer) {
+        SDL_LockMutex(ctrl->response_lock);
+        ctrl->response_size = BLE_BufferToBytes(buffer, ctrl->response, sizeof(ctrl->response));
+        SDL_UnlockMutex(ctrl->response_lock);
+        if (ctrl->response_size > 0) {
+            SDL_SignalSemaphore(ctrl->response_sem);
+        }
+        __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(buffer);
+    }
+    return S_OK;
+}
+static const struct
+{
+    void *QueryInterface;
+    void *AddRef;
+    void *Release;
+    void *Invoke;
+} g_response_vtbl = { (void *)InputHandler_QueryInterface, (void *)InputHandler_AddRef, (void *)InputHandler_Release, (void *)ResponseHandler_Invoke };
+
+// Send a command and wait (briefly) for the reply on the response characteristic.
+// Frame: [cmd] 0x91 0x01 [subcmd] 0x00 [data_len] 0x00 0x00 [data...]. Returns
+// the number of reply bytes copied, or 0 on timeout.
+static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len, Uint8 *reply, int reply_len)
+{
+    Uint8 frame[64];
+    int got = 0;
+
+    if (!ctrl->command_char || data_len < 0 || data_len + 8 > (int)sizeof(frame)) {
+        return 0;
+    }
+    frame[0] = cmd;
+    frame[1] = 0x91;
+    frame[2] = 0x01; // Bluetooth transport
+    frame[3] = subcmd;
+    frame[4] = 0x00;
+    frame[5] = (Uint8)data_len;
+    frame[6] = 0x00;
+    frame[7] = 0x00;
+    if (data_len > 0) {
+        SDL_memcpy(&frame[8], data, data_len);
+    }
+    while (SDL_TryWaitSemaphore(ctrl->response_sem)) {
+        // drain stale replies
+    }
+    if (!BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len)) {
+        return 0;
+    }
+    if (ctrl->response_sem && SDL_WaitSemaphoreTimeout(ctrl->response_sem, 500)) {
+        SDL_LockMutex(ctrl->response_lock);
+        got = ctrl->response_size;
+        if (reply && reply_len > 0) {
+            got = SDL_min(got, reply_len);
+            SDL_memcpy(reply, ctrl->response, got);
+        }
+        SDL_UnlockMutex(ctrl->response_lock);
+    }
+    return got;
+}
+
+// Read controller memory (command 0x02 / subcmd 0x04). The reply offset of the
+// memory payload is hardware-gated; we assume it follows the 8-byte header.
+static bool BLE_ReadMemory(BLE_Controller *ctrl, Uint32 addr, Uint8 len, Uint8 *out, int out_len)
+{
+    Uint8 req[8] = { len, 0x7E, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
+    Uint8 reply[64];
+    int got = BLE_SendCommand(ctrl, 0x02, 0x04, req, (int)sizeof(req), reply, (int)sizeof(reply));
+    int avail, n;
+
+    if (got <= 8) {
+        return false;
+    }
+    avail = got - 8;
+    n = SDL_min(avail, (int)len);
+    n = SDL_min(n, out_len);
+    SDL_memcpy(out, &reply[8], n);
+    return n >= (int)len;
+}
+
+// Read user (else factory) stick calibration. Best-effort: on failure the
+// uncalibrated linear map in BLE_MapStickAxis is used.
+static void BLE_ReadCalibration(BLE_Controller *ctrl)
+{
+    Uint8 cal[9];
+
+    if ((BLE_ReadMemory(ctrl, 0x1FC042, 9, cal, sizeof(cal)) && !(cal[0] == 0xFF && cal[1] == 0xFF && cal[2] == 0xFF)) ||
+        BLE_ReadMemory(ctrl, 0x0130A8, 9, cal, sizeof(cal))) {
+        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, cal);
+    }
+    if ((BLE_ReadMemory(ctrl, 0x1FC062, 9, cal, sizeof(cal)) && !(cal[0] == 0xFF && cal[1] == 0xFF && cal[2] == 0xFF)) ||
+        BLE_ReadMemory(ctrl, 0x0130E8, 9, cal, sizeof(cal))) {
+        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, cal);
+    }
+    ctrl->calibrated = true;
+}
+
+// Player LED (command 0x09 / subcmd 0x07).
+static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
+{
+    static const Uint8 pattern[] = { 0x1, 0x3, 0x7, 0xf, 0x9, 0x5, 0xd, 0x6 };
+    Uint8 data[4] = { 0, 0, 0, 0 };
+    if (player_index >= 0) {
+        data[0] = pattern[player_index % 8];
+    }
+    BLE_SendCommand(ctrl, 0x09, 0x07, data, sizeof(data), NULL, 0);
+}
+
+// VibrationData: 5-byte LE bit-pack per the reference reimplementations.
+static void BLE_EncodeVibration(Uint16 low, Uint16 high, Uint8 out[5])
+{
+    Uint32 lf_amp = (Uint32)(low >> 6) & 0x3FF;
+    Uint32 hf_amp = (Uint32)(high >> 6) & 0x3FF;
+    Uint64 v = (0x0E1ULL & 0x1FF) |                  // lf_freq default
+               ((Uint64)(lf_amp ? 1u : 0u) << 9) |   // en_lf
+               ((Uint64)lf_amp << 10) |              // lf_amp
+               ((0x1E1ULL & 0x1FF) << 20) |          // hf_freq default
+               ((Uint64)(hf_amp ? 1u : 0u) << 29) |  // en_hf
+               ((Uint64)hf_amp << 30);               // hf_amp
+    out[0] = (Uint8)v;
+    out[1] = (Uint8)(v >> 8);
+    out[2] = (Uint8)(v >> 16);
+    out[3] = (Uint8)(v >> 24);
+    out[4] = (Uint8)(v >> 32);
+}
+
+// Write a vibration packet: 0x00 + (packet_id + 3x VibrationData). Pro repeats
+// the 16-byte motor group (L then R).
+static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
+{
+    Uint8 group[16];
+    Uint8 packet[33];
+    Uint8 vib[5];
+    int len;
+
+    if (!ctrl->vibration_char) {
+        return false;
+    }
+    BLE_EncodeVibration(low, high, vib);
+    group[0] = (Uint8)(0x50 | (ctrl->rumble_seq & 0x0F));
+    SDL_memcpy(&group[1], vib, 5);
+    SDL_memcpy(&group[6], vib, 5);
+    SDL_memcpy(&group[11], vib, 5);
+    ctrl->rumble_seq++;
+
+    packet[0] = 0x00;
+    SDL_memcpy(&packet[1], group, 16);
+    len = 17;
+    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) {
+        SDL_memcpy(&packet[17], group, 16);
+        len = 33;
+    }
+    return BLE_WriteCharacteristic(ctrl->vibration_char, packet, len);
+}
+
+// ---------------------------------------------------------------------------
 // Advertisement Received: match Nintendo BLE company id, parse VID/PID, connect.
 // ---------------------------------------------------------------------------
 static HRESULT STDMETHODCALLTYPE Received_QueryInterface(void *This, REFIID riid, void **ppv)
@@ -583,6 +789,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     GattService3 *service3 = NULL;
     BLE_Controller *ctrl = NULL;
     InputHandlerObj *input_handler = NULL;
+    InputHandlerObj *response_handler = NULL;
 
     if (FAILED(BLE_GetActivationFactory(RuntimeClass_Windows_Devices_Bluetooth_BluetoothLEDevice, &IID_BleDeviceStatics, (void **)&statics))) {
         return;
@@ -672,10 +879,36 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     ctrl->instance_id = SDL_GetNextObjectID();
     ctrl->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, vendor_id, product_id, 0, NULL, ctrl->name, 'h', 0);
 
+    ctrl->response_lock = SDL_CreateMutex();
+    ctrl->response_sem = SDL_CreateSemaphore(0);
+    ctrl->player_index = -1;
+
     ctrl->input_char = BLE_FindCharacteristic(service3, &GUID_Switch2Input);
     ctrl->command_char = BLE_FindCharacteristic(service3, &GUID_Switch2Command);
     ctrl->response_char = BLE_FindCharacteristic(service3, &GUID_Switch2CmdResponse);
+    switch (product_id) {
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
+        ctrl->vibration_char = BLE_FindCharacteristic(service3, &GUID_Switch2VibeJCL);
+        break;
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
+        ctrl->vibration_char = BLE_FindCharacteristic(service3, &GUID_Switch2VibeJCR);
+        break;
+    default:
+        ctrl->vibration_char = BLE_FindCharacteristic(service3,
+            (product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) ? &GUID_Switch2VibePro : &GUID_Switch2VibeGC);
+        break;
+    }
 
+    // Command-response channel first (spec ordering: response before input).
+    if (ctrl->response_char) {
+        response_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*response_handler));
+        if (response_handler) {
+            response_handler->vtbl = (void *)&g_response_vtbl;
+            response_handler->ctrl = ctrl;
+            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(ctrl->response_char, (void *)response_handler, &ctrl->response_token);
+            BLE_EnableNotifications(ctrl->response_char);
+        }
+    }
     if (ctrl->input_char) {
         input_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*input_handler));
         if (input_handler) {
@@ -686,6 +919,9 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
             BLE_EnableNotifications(ctrl->input_char);
         }
     }
+
+    // Read stick calibration over the command channel (best-effort).
+    BLE_ReadCalibration(ctrl);
 
     SDL_LockJoysticks();
     {
@@ -710,6 +946,12 @@ cleanup:
         // Failed to publish; tear down.
         if (ctrl->report_lock) {
             SDL_DestroyMutex(ctrl->report_lock);
+        }
+        if (ctrl->response_lock) {
+            SDL_DestroyMutex(ctrl->response_lock);
+        }
+        if (ctrl->response_sem) {
+            SDL_DestroySemaphore(ctrl->response_sem);
         }
         SDL_free(ctrl->name);
         SDL_free(ctrl);
@@ -779,13 +1021,13 @@ static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Ui
 
     // Sticks: 12-bit packed at [10:13] (left) and [13:16] (right).
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTX,
-                         BLE_StickAxis(data[10] | ((data[11] & 0x0F) << 8), false));
+                         BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), false));
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTY,
-                         BLE_StickAxis((data[11] >> 4) | (data[12] << 4), true));
+                         BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTX,
-                         BLE_StickAxis(data[13] | ((data[14] & 0x0F) << 8), false));
+                         BLE_MapStickAxis(&ctrl->right_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTY,
-                         BLE_StickAxis((data[14] >> 4) | (data[15] << 4), true));
+                         BLE_MapStickAxis(&ctrl->right_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
 
     // IMU (scale reused from the wired driver; verify on hardware).
     if (size >= 60 && ctrl->joystick) {
@@ -810,6 +1052,115 @@ static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Ui
 
     SDL_memcpy(ctrl->last_state, data, SDL_min(size, (int)sizeof(ctrl->last_state)));
     ctrl->have_last_state = true;
+}
+
+// GameCube button indices (the wired SDL_GAMEPAD_BUTTON_SWITCH2_GAMECUBE_* enums
+// are file-static there). Joy-Con extras: SHARE=11, C=12, paddles 13..16.
+enum { GC_GUIDE = 4, GC_START, GC_LSHOULDER, GC_RSHOULDER, GC_SHARE, GC_C, GC_LTRIGGER, GC_RTRIGGER };
+
+static Sint16 BLE_RemapTrigger(Uint8 value)
+{
+    float t = SDL_clamp((float)value / 232.0f, 0.0f, 1.0f);
+    return (Sint16)(SDL_MIN_SINT16 + t * ((float)SDL_MAX_SINT16 - (float)SDL_MIN_SINT16));
+}
+
+// All BLE decoders run at offset -1 vs the wired report (BLE omits the report-ID
+// prefix). SDL_SendJoystick* filters unchanged values, so we emit every report.
+static void BLE_DecodeGameCube(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
+{
+    Uint64 ts = SDL_GetTicksNS();
+    Uint8 hat = 0;
+    if (size < 62) {
+        return;
+    }
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[4] & 0x01) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_NORTH, ((data[4] & 0x02) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_SOUTH, ((data[4] & 0x04) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_EAST, ((data[4] & 0x08) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_RTRIGGER, ((data[4] & 0x40) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_RSHOULDER, ((data[4] & 0x80) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_START, ((data[5] & 0x02) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_GUIDE, ((data[5] & 0x10) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_SHARE, ((data[5] & 0x20) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_C, ((data[5] & 0x40) != 0));
+    if (data[6] & 0x01) { hat |= SDL_HAT_DOWN; }
+    if (data[6] & 0x02) { hat |= SDL_HAT_UP; }
+    if (data[6] & 0x04) { hat |= SDL_HAT_RIGHT; }
+    if (data[6] & 0x08) { hat |= SDL_HAT_LEFT; }
+    SDL_SendJoystickHat(ts, joystick, 0, hat);
+    SDL_SendJoystickButton(ts, joystick, GC_LTRIGGER, ((data[6] & 0x40) != 0));
+    SDL_SendJoystickButton(ts, joystick, GC_LSHOULDER, ((data[6] & 0x80) != 0));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, BLE_RemapTrigger(data[60]));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, BLE_RemapTrigger(data[61]));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), false));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTX, BLE_MapStickAxis(&ctrl->right_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTY, BLE_MapStickAxis(&ctrl->right_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
+}
+
+// Standalone (mini) Joy-Con 2 Left, held sideways.
+static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
+{
+    Uint64 ts = SDL_GetTicksNS();
+    if (size < 14) {
+        return;
+    }
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_START, ((data[5] & 0x01) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, ((data[5] & 0x08) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_GUIDE, ((data[5] & 0x20) != 0));
+    SDL_SendJoystickButton(ts, joystick, 11 /* JoyCon Share */, ((data[5] & 0x10) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[6] & 0x01) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_NORTH, ((data[6] & 0x02) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_SOUTH, ((data[6] & 0x04) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_EAST, ((data[6] & 0x08) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, ((data[6] & 0x10) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, ((data[6] & 0x20) != 0));
+    SDL_SendJoystickButton(ts, joystick, 14 /* JoyCon left paddle 1 */, ((data[6] & 0x40) != 0));
+    SDL_SendJoystickButton(ts, joystick, 16 /* JoyCon left paddle 2 */, ((data[6] & 0x80) != 0));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), true));
+}
+
+// Standalone (mini) Joy-Con 2 Right, held sideways.
+static void BLE_DecodeJoyConRight(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
+{
+    Uint64 ts = SDL_GetTicksNS();
+    if (size < 16) {
+        return;
+    }
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[4] & 0x01) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_NORTH, ((data[4] & 0x02) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_SOUTH, ((data[4] & 0x04) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_EAST, ((data[4] & 0x08) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, ((data[4] & 0x10) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, ((data[4] & 0x20) != 0));
+    SDL_SendJoystickButton(ts, joystick, 13 /* JoyCon right paddle 1 */, ((data[4] & 0x40) != 0));
+    SDL_SendJoystickButton(ts, joystick, 15 /* JoyCon right paddle 2 */, ((data[4] & 0x80) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_START, ((data[5] & 0x02) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, ((data[5] & 0x04) != 0));
+    SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_GUIDE, ((data[5] & 0x10) != 0));
+    SDL_SendJoystickButton(ts, joystick, 12 /* JoyCon C */, ((data[5] & 0x40) != 0));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_y, (float)((data[14] >> 4) | (data[15] << 4)), false));
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
+}
+
+static void BLE_DecodeReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
+{
+    switch (ctrl->product_id) {
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
+        BLE_DecodeJoyConLeft(ctrl, joystick, data, size);
+        break;
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
+        BLE_DecodeJoyConRight(ctrl, joystick, data, size);
+        break;
+    default: // Pro Controller and GameCube share the full layout
+        if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) {
+            BLE_DecodeProReport(ctrl, joystick, data, size);
+        } else {
+            BLE_DecodeGameCube(ctrl, joystick, data, size);
+        }
+        break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -911,8 +1262,11 @@ static int BLE_JoystickGetDevicePlayerIndex(int device_index)
 
 static void BLE_JoystickSetDevicePlayerIndex(int device_index, int player_index)
 {
-    (void)device_index;
-    (void)player_index;
+    if (device_index >= 0 && device_index < ble.controller_count) {
+        BLE_Controller *ctrl = ble.controllers[device_index];
+        ctrl->player_index = player_index;
+        BLE_SetPlayerLED(ctrl, player_index);
+    }
 }
 
 static SDL_GUID BLE_JoystickGetDeviceGUID(int device_index)
@@ -942,22 +1296,35 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
     ctrl = ble.controllers[device_index];
     ctrl->joystick = joystick;
 
-    joystick->nbuttons = 15; // a..y, back, guide, start, sticks, shoulders, share, C, paddles
+    switch (ctrl->product_id) {
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
+        joystick->nbuttons = 17; // SDL_GAMEPAD_NUM_SWITCH2_JOYCON_BUTTONS
+        break;
+    default:
+        joystick->nbuttons = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) ? 15 : 12;
+        break;
+    }
     joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     joystick->nhats = 1;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
     SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 250.0f);
     SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 250.0f);
+
+    // Light the player LED for this slot.
+    ctrl->player_index = SDL_GetJoystickPlayerIndex(joystick);
+    BLE_SetPlayerLED(ctrl, ctrl->player_index);
     return true;
 }
 
 static bool BLE_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
-    (void)joystick;
-    (void)low_frequency_rumble;
-    (void)high_frequency_rumble;
-    return SDL_Unsupported(); // M2
+    BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
+    if (!ctrl || !ctrl->vibration_char) {
+        return SDL_Unsupported();
+    }
+    return BLE_WriteRumble(ctrl, low_frequency_rumble, high_frequency_rumble);
 }
 
 static bool BLE_JoystickRumbleTriggers(SDL_Joystick *joystick, Uint16 left_rumble, Uint16 right_rumble)
@@ -974,7 +1341,7 @@ static bool BLE_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green, U
     (void)red;
     (void)green;
     (void)blue;
-    return SDL_Unsupported();
+    return SDL_Unsupported(); // No RGB; player LED is set from the player index
 }
 
 static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
@@ -1010,9 +1377,9 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
     SDL_UnlockMutex(ctrl->report_lock);
 
     if (size > 0) {
-        // report[0] is the report id 0x05; pass the full buffer (decode uses
-        // absolute BLE offsets that already account for the missing prefix).
-        BLE_DecodeProReport(ctrl, joystick, data, size);
+        // The BLE notification is the raw report (no report-ID prefix); the
+        // decoders use absolute BLE offsets. Dispatch by controller type.
+        BLE_DecodeReport(ctrl, joystick, data, size);
     }
 }
 
@@ -1034,13 +1401,23 @@ static void BLE_FreeController(BLE_Controller *ctrl)
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->command_char);
     }
     if (ctrl->response_char) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->response_char, ctrl->response_token);
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->response_char);
+    }
+    if (ctrl->vibration_char) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->vibration_char);
     }
     if (ctrl->device) {
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(ctrl->device);
     }
     if (ctrl->report_lock) {
         SDL_DestroyMutex(ctrl->report_lock);
+    }
+    if (ctrl->response_lock) {
+        SDL_DestroyMutex(ctrl->response_lock);
+    }
+    if (ctrl->response_sem) {
+        SDL_DestroySemaphore(ctrl->response_sem);
     }
     SDL_free(ctrl->name);
     SDL_free(ctrl);
