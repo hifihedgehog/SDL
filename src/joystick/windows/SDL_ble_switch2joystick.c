@@ -664,49 +664,65 @@ static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const 
     return got;
 }
 
-// Read a 0x40-byte flash block, transcribed from the wired ReadFlashBlock
-// (SDL_hidapi_switch2.c:344-370): command 0x02/0x01 with data {0,0,0,0, addr LE},
-// the flash payload at reply offset 0x10. Returns true if at least the header
-// plus some payload arrived. out must be 0x40 bytes.
-static bool BLE_ReadFlashBlock(BLE_Controller *ctrl, Uint32 addr, Uint8 *out)
+// Read controller memory, transcribed from the BLE reference controller.py
+// read_memory (switch2-controllers/controller.py:339-347): command 0x02/0x04
+// with data {length, 0x7e, 0, 0, addr LE}. controller.py strips an 8-byte header
+// in write_command and another 8 in read_memory, so the payload sits at raw reply
+// offset 0x10. Returns the number of payload bytes copied (0 on failure).
+static int BLE_ReadMemory(BLE_Controller *ctrl, Uint8 length, Uint32 addr, Uint8 *out, int out_len)
 {
-    Uint8 req[8] = { 0x00, 0x00, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
+    Uint8 req[8] = { length, 0x7e, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
     Uint8 reply[128];
-    int got = BLE_SendCommand(ctrl, 0x02, 0x01, req, (int)sizeof(req), reply, (int)sizeof(reply));
-    int avail;
+    int got = BLE_SendCommand(ctrl, 0x02, 0x04, req, (int)sizeof(req), reply, (int)sizeof(reply));
+    int n;
 
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 flash read addr 0x%06x: %d reply bytes", (unsigned)addr, got);
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 memory read addr 0x%06x len %d: %d reply bytes", (unsigned)addr, length, got);
     if (got > 0) {
-        BLE_LogBytes("flash reply", reply, got); // confirms the 0x10 payload offset + MTU
+        BLE_LogBytes("memory reply", reply, got); // confirms the 0x10 payload offset + MTU
     }
-    if (got <= 0x10) {
-        return false;
+    if (got < 0x10) {
+        return 0;
     }
-    avail = SDL_min(got - 0x10, 0x40);
-    SDL_memset(out, 0, 0x40);
-    SDL_memcpy(out, &reply[0x10], avail);
-    return true;
+    n = SDL_min(got - 0x10, (int)length);
+    n = SDL_min(n, out_len);
+    SDL_memcpy(out, &reply[0x10], n);
+    return n;
 }
 
-// Read stick calibration, transcribed from the wired path (SDL_hidapi_switch2.c
-// :646-691): factory baseline (left 0x13080, right 0x130C0, parsed at +0x28),
-// then user override (left 0x1FC040, right 0x1FC080, magic b2 a1 at [0:2], parsed
-// at +2). Best-effort: on failure BLE_MapStickAxis falls back to a linear map.
+// Read stick calibration, transcribed from controller.py read_calibration_data
+// (switch2-controllers/controller.py:353-368): user slot first (0x1FC042 /
+// 0x1FC062), falling back to factory (0x0130A8 / 0x0130E8) when the first 3 bytes
+// read 0xFFFFFF; parse StickCalibrationData directly from the 9-byte payload. A
+// Joy-Con stores its single-stick calibration in the first slot. The decoders use
+// left_x/left_y for the single Joy-Con stick, so both L and R store there. Best-
+// effort: on failure BLE_MapStickAxis falls back to a linear map.
+static bool BLE_ReadCalibSlot(BLE_Controller *ctrl, Uint32 user_addr, Uint32 factory_addr, Uint8 *out9)
+{
+    Uint8 cal[16];
+    if (BLE_ReadMemory(ctrl, 0x0b, user_addr, cal, sizeof(cal)) >= 9 &&
+        !(cal[0] == 0xFF && cal[1] == 0xFF && cal[2] == 0xFF)) {
+        SDL_memcpy(out9, cal, 9);
+        return true;
+    }
+    if (BLE_ReadMemory(ctrl, 0x0b, factory_addr, cal, sizeof(cal)) >= 9) {
+        SDL_memcpy(out9, cal, 9);
+        return true;
+    }
+    return false;
+}
+
 static void BLE_ReadCalibration(BLE_Controller *ctrl)
 {
-    Uint8 block[0x40];
+    Uint8 slot1[9], slot2[9];
 
-    if (BLE_ReadFlashBlock(ctrl, 0x13080, block)) {
-        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, &block[0x28]);
+    if (BLE_ReadCalibSlot(ctrl, 0x1FC042, 0x0130A8, slot1)) {
+        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, slot1);
     }
-    if (BLE_ReadFlashBlock(ctrl, 0x130C0, block)) {
-        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, &block[0x28]);
-    }
-    if (BLE_ReadFlashBlock(ctrl, 0x1FC040, block) && block[0] == 0xb2 && block[1] == 0xa1) {
-        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, &block[2]);
-    }
-    if (BLE_ReadFlashBlock(ctrl, 0x1FC080, block) && block[0] == 0xb2 && block[1] == 0xa1) {
-        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, &block[2]);
+    // Pro/GameCube have a second stick; a Joy-Con uses only the first slot.
+    if (ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT &&
+        ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT &&
+        BLE_ReadCalibSlot(ctrl, 0x1FC062, 0x0130E8, slot2)) {
+        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, slot2);
     }
     ctrl->calibrated = true;
 }
@@ -723,17 +739,19 @@ static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
     BLE_SendCommand(ctrl, 0x09, 0x07, data, sizeof(data), NULL, 0);
 }
 
-// VibrationData: 5-byte LE bit-pack per the reference reimplementations.
+// VibrationData 5-byte LE bit-pack, transcribed from controller.py
+// VibrationData.get_bytes (switch2-controllers/controller.py:196-209): lf_freq
+// at bits 0-8, en_lf at 9, lf_amp at 10-19, hf_freq at 20-28, en_hf at 29, hf_amp
+// at 30-39. The BLE reference (virtual_controller.py:29-31) scales amplitude as
+// 800*motor/256 (so ~0..800 of the 10-bit field) and leaves the en_tone bits 0.
 static void BLE_EncodeVibration(Uint16 low, Uint16 high, Uint8 out[5])
 {
-    Uint32 lf_amp = (Uint32)(low >> 6) & 0x3FF;
-    Uint32 hf_amp = (Uint32)(high >> 6) & 0x3FF;
-    Uint64 v = (0x0E1ULL & 0x1FF) |                  // lf_freq default
-               ((Uint64)(lf_amp ? 1u : 0u) << 9) |   // en_lf
-               ((Uint64)lf_amp << 10) |              // lf_amp
-               ((0x1E1ULL & 0x1FF) << 20) |          // hf_freq default
-               ((Uint64)(hf_amp ? 1u : 0u) << 29) |  // en_hf
-               ((Uint64)hf_amp << 30);               // hf_amp
+    Uint32 lf_amp = (Uint32)((int)low * 800 / 65535) & 0x3FF;
+    Uint32 hf_amp = (Uint32)((int)high * 800 / 65535) & 0x3FF;
+    Uint64 v = (0x0E1ULL & 0x1FF) |        // lf_freq default (en_lf bit 9 stays 0)
+               ((Uint64)lf_amp << 10) |    // lf_amp
+               ((0x1E1ULL & 0x1FF) << 20) | // hf_freq default (en_hf bit 29 stays 0)
+               ((Uint64)hf_amp << 30);     // hf_amp
     out[0] = (Uint8)v;
     out[1] = (Uint8)(v >> 8);
     out[2] = (Uint8)(v >> 16);
@@ -741,27 +759,27 @@ static void BLE_EncodeVibration(Uint16 low, Uint16 high, Uint8 out[5])
     out[4] = (Uint8)(v >> 32);
 }
 
-// Write a vibration packet: 0x00 + (packet_id + 3x VibrationData). Pro repeats
-// the 16-byte motor group (L then R).
+// Write a vibration packet, transcribed from controller.py set_vibration
+// (switch2-controllers/controller.py:288-302): 0x00 + packet_id + the amplitude
+// VibrationData + two default (zero-amplitude) VibrationData blocks. Pro repeats
+// the 16-byte motor group (L then R). SDL re-calls Rumble periodically
+// (SDL_RUMBLE_RESEND_MS), which sustains the effect.
 static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
 {
     Uint8 group[16];
     Uint8 packet[33];
-    Uint8 vib[5];
+    Uint8 vib[5], zero[5];
     int len;
 
     if (!ctrl->vibration_char) {
         return false;
     }
-    // Clamp amplitude to the wired driver's RUMBLE_MAX (29000/65535, ~44%): the
-    // wired comment warns full power "might be dangerous to the controller".
-    low = (Uint16)((int)low * 29000 / 65535);
-    high = (Uint16)((int)high * 29000 / 65535);
     BLE_EncodeVibration(low, high, vib);
+    BLE_EncodeVibration(0, 0, zero); // default VibrationData (default freq, 0 amp)
     group[0] = (Uint8)(0x50 | (ctrl->rumble_seq & 0x0F));
     SDL_memcpy(&group[1], vib, 5);
-    SDL_memcpy(&group[6], vib, 5);
-    SDL_memcpy(&group[11], vib, 5);
+    SDL_memcpy(&group[6], zero, 5);
+    SDL_memcpy(&group[11], zero, 5);
     ctrl->rumble_seq++;
 
     packet[0] = 0x00;
@@ -1486,15 +1504,17 @@ static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int
 static bool BLE_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
-    // Enable/disable the IMU on the device, mirroring the wired driver's
-    // 0x0c/0x04 feature command (SDL_hidapi_switch2.c:862-869, 1369-1374): base
-    // byte 0x23, OR 0x04 to enable -> 0x27.
-    Uint8 data[4] = { enabled ? (Uint8)0x27 : (Uint8)0x23, 0x00, 0x00, 0x00 };
+    // Enable/disable the IMU via the BLE reference's enableFeatures
+    // (controller.py:370-373): command 0x0c/0x02 (init) then 0x0c/0x04 (enable),
+    // both carrying the feature mask. FEATURE_MOTION = 0x04 (controller.py:59).
+    // The wired driver's 0x27 is a USB-path value and sets unrelated bits here.
+    Uint8 flags[4] = { enabled ? (Uint8)0x04 : (Uint8)0x00, 0x00, 0x00, 0x00 };
     if (!ctrl) {
         return SDL_SetError("No BLE controller for joystick");
     }
     ctrl->sensors_enabled = enabled;
-    BLE_SendCommand(ctrl, 0x0c, 0x04, data, sizeof(data), NULL, 0);
+    BLE_SendCommand(ctrl, 0x0c, 0x02, flags, sizeof(flags), NULL, 0);
+    BLE_SendCommand(ctrl, 0x0c, 0x04, flags, sizeof(flags), NULL, 0);
     return true;
 }
 
