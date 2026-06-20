@@ -2113,6 +2113,27 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH2 "SDL_JOYSTICK_HIDAPI_SWITCH2"
 
 /**
+ * A variable controlling whether the WinRT BLE-GATT driver for wireless
+ * Nintendo Switch 2 controllers (Pro Controller, Joy-Con 2) should be used.
+ *
+ * This is a PadForge fork addition. The Switch 2 advertises a custom GATT
+ * service over Bluetooth LE rather than HID-over-GATT, so the HIDAPI driver
+ * cannot see it. This driver owns a WinRT BLE connection instead.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": BLE driver is not used. (default)
+ * - "1": BLE driver is used.
+ *
+ * The default is off so a BLE scan never runs unless the app opts in.
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.4.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_SWITCH2 "SDL_JOYSTICK_BLE_SWITCH2"
+
+/**
  * A variable controlling whether Nintendo Switch Joy-Con controllers will be
  * in vertical mode when using the HIDAPI driver.
  *

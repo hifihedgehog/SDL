@@ -323,6 +323,7 @@
 #cmakedefine SDL_JOYSTICK_VIRTUAL 1
 #cmakedefine SDL_JOYSTICK_VITA 1
 #cmakedefine SDL_JOYSTICK_WGI 1
+#cmakedefine SDL_JOYSTICK_BLE 1
 #cmakedefine SDL_JOYSTICK_XINPUT 1
 
 #cmakedefine SDL_JOYSTICK_PRIVATE 1
