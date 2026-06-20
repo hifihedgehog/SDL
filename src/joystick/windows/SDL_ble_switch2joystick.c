@@ -475,18 +475,32 @@ static void BLE_LogBytes(const char *label, const Uint8 *data, int len)
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 %s (%d bytes): %s", label, len, hex);
 }
 
-// Write bytes to a characteristic. Commands use WriteWithResponse (reliable, and
-// the char may not advertise write-without-response); the high-rate vibration
-// characteristic uses WriteWithoutResponse.
-static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length, bool with_response)
+// Write bytes to a characteristic. The caller's prefer_response hint asks for a
+// reliable (acknowledged) write for the command channel, but the Switch 2 command
+// characteristic only advertises write-without-response on real hardware
+// (switch2-bt docs/HARDWARE-TEST.md: "command write ... props=write-without-
+// response"; joycon2cpp testapp.cpp:446 and controller.py via Bleak both write
+// commands without response). Honoring a WriteWithResponse against a char that
+// lacks the Write property fails at the ATT layer, so choose the option from the
+// characteristic's actual properties: WriteWithResponse only when Write (0x8) is
+// advertised, otherwise WriteWithoutResponse. The reply still arrives over the
+// response notification, independent of the write acknowledgment.
+static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length, bool prefer_response)
 {
     Buffer *buffer;
     void *op = NULL;
     bool result = false;
-    int option = with_response ? GattWriteOption_WriteWithResponse : GattWriteOption_WriteWithoutResponse;
+    int option = GattWriteOption_WriteWithoutResponse;
 
     if (!characteristic) {
         return false;
+    }
+    if (prefer_response) {
+        enum __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CGattCharacteristicProperties props = 0;
+        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_get_CharacteristicProperties(characteristic, &props)) &&
+            (props & GattCharacteristicProperties_Write)) {
+            option = GattWriteOption_WriteWithResponse;
+        }
     }
     buffer = BLE_BufferFromBytes(bytes, (UINT32)length);
     if (!buffer) {
