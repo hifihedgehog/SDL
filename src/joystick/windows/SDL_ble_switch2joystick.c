@@ -181,6 +181,7 @@ typedef struct BLE_Controller
     bool report_pending;
     Uint8 last_state[64];
     bool have_last_state;
+    bool logged_first_report; // one-shot debug dump of the first input notification
 
     // Command/response channel: a write to command_char produces a notification
     // on response_char. The ValueChanged handler stashes it and signals. A flash
@@ -460,6 +461,20 @@ static int BLE_BufferToBytes(Buffer *buffer, Uint8 *dst, int dst_len)
     return copied;
 }
 
+// Debug hex dump (visible at SDL_LOG_PRIORITY_DEBUG). Used to capture the real
+// on-wire layout so the transport-specific unknowns (input report offsets, flash
+// reply offset) can be confirmed against the reference on first hardware contact.
+static void BLE_LogBytes(const char *label, const Uint8 *data, int len)
+{
+    char hex[3 * 64 + 1];
+    int i, n = SDL_min(len, 64);
+    for (i = 0; i < n; ++i) {
+        (void)SDL_snprintf(&hex[i * 3], 4, "%02x ", data[i]);
+    }
+    hex[n > 0 ? n * 3 : 0] = '\0';
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 %s (%d bytes): %s", label, len, hex);
+}
+
 // Write bytes to a characteristic. Commands use WriteWithResponse (reliable, and
 // the char may not advertise write-without-response); the high-rate vibration
 // characteristic uses WriteWithoutResponse.
@@ -660,6 +675,10 @@ static bool BLE_ReadFlashBlock(BLE_Controller *ctrl, Uint32 addr, Uint8 *out)
     int got = BLE_SendCommand(ctrl, 0x02, 0x01, req, (int)sizeof(req), reply, (int)sizeof(reply));
     int avail;
 
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 flash read addr 0x%06x: %d reply bytes", (unsigned)addr, got);
+    if (got > 0) {
+        BLE_LogBytes("flash reply", reply, got); // confirms the 0x10 payload offset + MTU
+    }
     if (got <= 0x10) {
         return false;
     }
@@ -813,6 +832,7 @@ static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRe
                         // Reserve the address so repeated advertisements during the
                         // multi-second connect don't start duplicate connects.
                         if (supported && BLE_TryReserveConnect((Uint64)address)) {
+                            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx", vendor, product, (unsigned long long)address);
                             BLE_ConnectAndSubscribe((Uint64)address, vendor, product, NULL);
                             BLE_ReleaseConnect((Uint64)address);
                         }
@@ -1033,6 +1053,9 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
             BLE_EnableNotifications(ctrl->input_char);
         }
     }
+
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 connected: chars input=%d command=%d response=%d vibration=%d",
+                 ctrl->input_char != NULL, ctrl->command_char != NULL, ctrl->response_char != NULL, ctrl->vibration_char != NULL);
 
     // Read stick calibration over the command channel (best-effort).
     BLE_ReadCalibration(ctrl);
@@ -1495,6 +1518,10 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
     if (size > 0) {
         // The BLE notification is the raw report (no report-ID prefix); the
         // decoders use absolute BLE offsets. Dispatch by controller type.
+        if (!ctrl->logged_first_report) {
+            ctrl->logged_first_report = true;
+            BLE_LogBytes("first input report", data, size); // confirms the byte offsets
+        }
         BLE_DecodeReport(ctrl, joystick, data, size);
     }
 }
