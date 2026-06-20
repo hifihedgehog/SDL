@@ -1078,23 +1078,21 @@ static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Ui
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTY,
                          BLE_MapStickAxis(&ctrl->right_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
 
-    // IMU (scale reused from the wired driver; verify on hardware).
+    // IMU, transcribed from the wired HandleStatePacket (SDL_hidapi_switch2.c
+    // :1379-1392) at BLE offset -1. The axes are NOT sequential: accel maps
+    // X<-0x31, Y<-0x35, Z<-0x33(neg); gyro X<-0x37, Y<-0x3b, Z<-0x39(neg). The
+    // wired gyro_coeff is 34.8 (its dynamic 34.8-vs-40 calibration is not ported;
+    // 34.8 is the nominal case, flagged for hardware confirmation). Biases are 0.
     if (size >= 60 && ctrl->joystick) {
-        Sint16 ax = (Sint16)(data[48] | (data[49] << 8));
-        Sint16 ay = (Sint16)(data[50] | (data[51] << 8));
-        Sint16 az = (Sint16)(data[52] | (data[53] << 8));
-        Sint16 gx = (Sint16)(data[54] | (data[55] << 8));
-        Sint16 gy = (Sint16)(data[56] | (data[57] << 8));
-        Sint16 gz = (Sint16)(data[58] | (data[59] << 8));
         const float accel_scale = SDL_STANDARD_GRAVITY * 8.0f / 32767.0f;
-        const float gyro_scale = 34.8f * (SDL_PI_F / 180.0f) / 1000.0f;
+        const float gyro_scale = 34.8f / 32767.0f;
         float accel[3], gyro[3];
-        accel[0] = ax * accel_scale;
-        accel[1] = ay * accel_scale;
-        accel[2] = az * accel_scale;
-        gyro[0] = gx * gyro_scale;
-        gyro[1] = gy * gyro_scale;
-        gyro[2] = gz * gyro_scale;
+        accel[0] = (Sint16)(data[48] | (data[49] << 8)) * accel_scale;
+        accel[1] = (Sint16)(data[52] | (data[53] << 8)) * accel_scale;
+        accel[2] = (Sint16)(data[50] | (data[51] << 8)) * -accel_scale;
+        gyro[0] = (Sint16)(data[54] | (data[55] << 8)) * gyro_scale;
+        gyro[1] = (Sint16)(data[58] | (data[59] << 8)) * gyro_scale;
+        gyro[2] = (Sint16)(data[56] | (data[57] << 8)) * -gyro_scale;
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_ACCEL, timestamp, accel, 3);
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_GYRO, timestamp, gyro, 3);
     }
@@ -1442,6 +1440,10 @@ static void BLE_JoystickClose(SDL_Joystick *joystick)
 
 static void BLE_FreeController(BLE_Controller *ctrl)
 {
+    // Stop new notifications and release the WinRT COM objects. An in-flight
+    // ValueChanged callback uses only its event args and the controller's own
+    // buffers, not these objects, so releasing them here is safe. (WinRT holds
+    // its own reference to the characteristic for the duration of a callback.)
     if (ctrl->input_char) {
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->input_char, ctrl->input_token);
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->input_char);
@@ -1459,23 +1461,15 @@ static void BLE_FreeController(BLE_Controller *ctrl)
     if (ctrl->device) {
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(ctrl->device);
     }
-    if (ctrl->report_lock) {
-        SDL_DestroyMutex(ctrl->report_lock);
-    }
-    if (ctrl->response_lock) {
-        SDL_DestroyMutex(ctrl->response_lock);
-    }
-    if (ctrl->response_sem) {
-        SDL_DestroySemaphore(ctrl->response_sem);
-    }
-    // Intentionally NOT freeing input_handler/response_handler: a ValueChanged
-    // callback may still be in-flight on a WinRT thread-pool thread after
-    // remove_ValueChanged returns (WinRT does not drain in-flight invocations).
-    // Freeing the delegate here would be a use-after-free in that callback.
-    // WGI takes the same stance with static, never-freed delegates. The leak is
-    // one small object per controller, reclaimed at process exit.
-    SDL_free(ctrl->name);
-    SDL_free(ctrl);
+
+    // Deliberately leak the controller struct, its locks/semaphore, buffers, and
+    // the delegates. A GATT ValueChanged callback may still be in-flight on a
+    // WinRT thread-pool thread and touches exactly these, and GATT
+    // remove_ValueChanged does not drain in-flight invocations. Destroying the
+    // mutex or freeing the struct here would be a use-after-free. The leak is
+    // bounded (one controller per connection attempt, reclaimed at process exit);
+    // a future refcounted-controller design could free it deterministically.
+    (void)ctrl;
 }
 
 static void BLE_JoystickQuit(void)
