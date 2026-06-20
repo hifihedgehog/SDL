@@ -64,6 +64,9 @@ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
 #if defined(SDL_JOYSTICK_DINPUT)
     &SDL_DINPUT_JoystickDriver,
 #endif
+#ifdef SDL_JOYSTICK_BLE // PadForge fork: WinRT BLE-GATT Switch 2 driver (issue #5)
+    &SDL_BLE_JoystickDriver,
+#endif
 #ifdef SDL_JOYSTICK_LINUX
     &SDL_LINUX_JoystickDriver,
 #endif
