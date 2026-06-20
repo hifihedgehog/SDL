@@ -168,6 +168,8 @@ typedef struct BLE_Controller
     GattChar *vibration_char;
     EventRegistrationToken input_token;
     EventRegistrationToken response_token;
+    void *input_handler;    // heap delegate, freed in BLE_FreeController
+    void *response_handler; // heap delegate, freed in BLE_FreeController
 
     SDL_Joystick *joystick; // set in Open, NULL otherwise
 
@@ -241,6 +243,7 @@ static struct
 
 // Forward declarations.
 static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name);
+static void BLE_FreeController(BLE_Controller *ctrl);
 
 // ---------------------------------------------------------------------------
 // Activation helpers.
@@ -280,6 +283,7 @@ static HRESULT BLE_ActivateInstance(PCWSTR class_name, REFIID iid, void **out)
 typedef struct BLE_Awaiter
 {
     void *lpVtbl;
+    SDL_AtomicInt refcount;
     SDL_Semaphore *sem;
 } BLE_Awaiter;
 
@@ -297,8 +301,21 @@ static HRESULT STDMETHODCALLTYPE Awaiter_QueryInterface(void *This, REFIID riid,
     *ppv = This;
     return S_OK;
 }
-static ULONG STDMETHODCALLTYPE Awaiter_AddRef(void *This) { (void)This; return 2; }
-static ULONG STDMETHODCALLTYPE Awaiter_Release(void *This) { (void)This; return 1; }
+static ULONG STDMETHODCALLTYPE Awaiter_AddRef(void *This)
+{
+    BLE_Awaiter *self = (BLE_Awaiter *)This;
+    return (ULONG)(SDL_AddAtomicInt(&self->refcount, 1) + 1);
+}
+static ULONG STDMETHODCALLTYPE Awaiter_Release(void *This)
+{
+    BLE_Awaiter *self = (BLE_Awaiter *)This;
+    int rc = SDL_AddAtomicInt(&self->refcount, -1) - 1;
+    if (rc == 0) {
+        SDL_DestroySemaphore(self->sem);
+        SDL_free(self);
+    }
+    return (ULONG)rc;
+}
 static HRESULT STDMETHODCALLTYPE Awaiter_Invoke(void *This, void *op, int status)
 {
     BLE_Awaiter *self = (BLE_Awaiter *)This;
@@ -315,31 +332,44 @@ static const struct
     void *Invoke;
 } g_awaiter_vtbl = { (void *)Awaiter_QueryInterface, (void *)Awaiter_AddRef, (void *)Awaiter_Release, (void *)Awaiter_Invoke };
 
-// Block until the IAsyncOperation completes. Returns false on failure to arm.
+// Block (with a timeout) until the IAsyncOperation completes. The handler is
+// heap-allocated and refcounted: WinRT holds a reference until it finishes, so a
+// timeout here cannot free the handler out from under a later completion. Returns
+// false on arm failure or timeout.
 static bool BLE_Await(void *async_op)
 {
     typedef HRESULT(STDMETHODCALLTYPE * put_Completed_t)(void *This, void *handler);
     void ***vtbl;
     put_Completed_t put_Completed;
-    BLE_Awaiter awaiter;
+    BLE_Awaiter *awaiter;
     HRESULT hr;
+    bool completed;
 
     if (!async_op) {
         return false;
     }
-    awaiter.lpVtbl = (void *)&g_awaiter_vtbl;
-    awaiter.sem = SDL_CreateSemaphore(0);
-    if (!awaiter.sem) {
+    awaiter = (BLE_Awaiter *)SDL_calloc(1, sizeof(*awaiter));
+    if (!awaiter) {
         return false;
     }
+    awaiter->lpVtbl = (void *)&g_awaiter_vtbl;
+    awaiter->sem = SDL_CreateSemaphore(0);
+    if (!awaiter->sem) {
+        SDL_free(awaiter);
+        return false;
+    }
+    SDL_SetAtomicInt(&awaiter->refcount, 1); // our reference
+
     vtbl = (void ***)async_op;
     put_Completed = (put_Completed_t)(*vtbl)[6]; // IInspectable(0..5) then put_Completed(6)
-    hr = put_Completed(async_op, &awaiter);
+    hr = put_Completed(async_op, awaiter);      // WinRT takes its own reference
     if (SUCCEEDED(hr)) {
-        SDL_WaitSemaphore(awaiter.sem);
+        completed = SDL_WaitSemaphoreTimeout(awaiter->sem, 3000);
+    } else {
+        completed = false;
     }
-    SDL_DestroySemaphore(awaiter.sem);
-    return SUCCEEDED(hr);
+    Awaiter_Release(awaiter); // drop our reference; WinRT frees it when it is done
+    return completed;
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +748,7 @@ static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRe
                             case USB_PRODUCT_NINTENDO_SWITCH2_PRO:
                             case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
                             case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
+                            case USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER:
                                 BLE_ConnectAndSubscribe((Uint64)address, vendor, product, NULL);
                                 break;
                             default:
@@ -874,8 +905,28 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     ctrl->bluetooth_address = bluetooth_address;
     ctrl->vendor_id = vendor_id;
     ctrl->product_id = product_id;
-    ctrl->name = name ? name : SDL_strdup("Nintendo Switch 2 Pro Controller");
+    if (name) {
+        ctrl->name = name;
+    } else {
+        const char *type_name;
+        switch (product_id) {
+        case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
+            type_name = "Nintendo Switch 2 Joy-Con (L)";
+            break;
+        case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
+            type_name = "Nintendo Switch 2 Joy-Con (R)";
+            break;
+        case USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER:
+            type_name = "Nintendo Switch 2 GameCube Controller";
+            break;
+        default:
+            type_name = "Nintendo Switch 2 Pro Controller";
+            break;
+        }
+        ctrl->name = SDL_strdup(type_name);
+    }
     ctrl->device = device;
+    device = NULL; // ownership transferred to ctrl; cleanup releases via ctrl
     ctrl->instance_id = SDL_GetNextObjectID();
     ctrl->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, vendor_id, product_id, 0, NULL, ctrl->name, 'h', 0);
 
@@ -905,6 +956,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         if (response_handler) {
             response_handler->vtbl = (void *)&g_response_vtbl;
             response_handler->ctrl = ctrl;
+            ctrl->response_handler = response_handler;
             __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(ctrl->response_char, (void *)response_handler, &ctrl->response_token);
             BLE_EnableNotifications(ctrl->response_char);
         }
@@ -914,6 +966,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         if (input_handler) {
             input_handler->vtbl = (void *)&g_input_vtbl;
             input_handler->ctrl = ctrl;
+            ctrl->input_handler = input_handler;
             // Register the handler before enabling notifications (spec ordering).
             __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(ctrl->input_char, (void *)input_handler, &ctrl->input_token);
             BLE_EnableNotifications(ctrl->input_char);
@@ -926,11 +979,15 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     SDL_LockJoysticks();
     {
         BLE_Controller **grown = (BLE_Controller **)SDL_realloc(ble.controllers, sizeof(ble.controllers[0]) * (ble.controller_count + 1));
+        // Re-check under the lock: another advertisement callback on a second
+        // thread-pool thread may have connected the same device concurrently.
         if (grown) {
             ble.controllers = grown;
-            ble.controllers[ble.controller_count++] = ctrl;
-            SDL_PrivateJoystickAdded(ctrl->instance_id);
-            ctrl = NULL; // owned by the array now
+            if (!BLE_GetControllerByAddress(bluetooth_address)) {
+                ble.controllers[ble.controller_count++] = ctrl;
+                SDL_PrivateJoystickAdded(ctrl->instance_id);
+                ctrl = NULL; // owned by the array now
+            }
         }
     }
     SDL_UnlockJoysticks();
@@ -943,21 +1000,13 @@ cleanup:
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_Release(device3);
     }
     if (ctrl) {
-        // Failed to publish; tear down.
-        if (ctrl->report_lock) {
-            SDL_DestroyMutex(ctrl->report_lock);
-        }
-        if (ctrl->response_lock) {
-            SDL_DestroyMutex(ctrl->response_lock);
-        }
-        if (ctrl->response_sem) {
-            SDL_DestroySemaphore(ctrl->response_sem);
-        }
-        SDL_free(ctrl->name);
-        SDL_free(ctrl);
-        if (device) {
-            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
-        }
+        // Failed to publish (calloc failure or a concurrent duplicate connect).
+        // Full teardown: unregister the ValueChanged handlers, release the
+        // characteristics and device, free the handlers/locks. ctrl->device == device
+        // at this point, so this also releases device.
+        BLE_FreeController(ctrl);
+    } else if (device) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
     }
 }
 
@@ -989,7 +1038,7 @@ static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Ui
         SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_RIGHT_STICK, ((data[5] & 0x04) != 0));
         SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, ((data[5] & 0x08) != 0));
         SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_GUIDE, ((data[5] & 0x10) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_MISC1, ((data[5] & 0x20) != 0)); // Share
+        SDL_SendJoystickButton(timestamp, joystick, 11 /* Share */, ((data[5] & 0x20) != 0));
         SDL_SendJoystickButton(timestamp, joystick, 12 /* C */, ((data[5] & 0x40) != 0));
     }
     if (!ctrl->have_last_state || data[6] != ctrl->last_state[6]) {
@@ -1419,6 +1468,8 @@ static void BLE_FreeController(BLE_Controller *ctrl)
     if (ctrl->response_sem) {
         SDL_DestroySemaphore(ctrl->response_sem);
     }
+    SDL_free(ctrl->input_handler);
+    SDL_free(ctrl->response_handler);
     SDL_free(ctrl->name);
     SDL_free(ctrl);
 }
