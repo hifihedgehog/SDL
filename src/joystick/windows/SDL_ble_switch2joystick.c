@@ -183,15 +183,17 @@ typedef struct BLE_Controller
     bool have_last_state;
 
     // Command/response channel: a write to command_char produces a notification
-    // on response_char. The ValueChanged handler stashes it and signals.
+    // on response_char. The ValueChanged handler stashes it and signals. A flash
+    // read reply is 0x10 header + 0x40 data = 0x50 bytes, so size for that.
     SDL_Mutex *response_lock;
     SDL_Semaphore *response_sem;
-    Uint8 response[64];
+    Uint8 response[128];
     int response_size;
 
     // Stick calibration (reimplemented from the wired driver; static there).
     Switch2_AxisCal left_x, left_y, right_x, right_y;
     bool calibrated;
+    bool sensors_enabled; // IMU streams only after the enable command is sent
 
     // Rumble state.
     Uint32 rumble_seq;
@@ -599,47 +601,55 @@ static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const 
     return got;
 }
 
-// Read controller memory (command 0x02 / subcmd 0x04). The reply offset of the
-// memory payload is hardware-gated; we assume it follows the 8-byte header.
-static bool BLE_ReadMemory(BLE_Controller *ctrl, Uint32 addr, Uint8 len, Uint8 *out, int out_len)
+// Read a 0x40-byte flash block, transcribed from the wired ReadFlashBlock
+// (SDL_hidapi_switch2.c:344-370): command 0x02/0x01 with data {0,0,0,0, addr LE},
+// the flash payload at reply offset 0x10. Returns true if at least the header
+// plus some payload arrived. out must be 0x40 bytes.
+static bool BLE_ReadFlashBlock(BLE_Controller *ctrl, Uint32 addr, Uint8 *out)
 {
-    Uint8 req[8] = { len, 0x7E, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
-    Uint8 reply[64];
-    int got = BLE_SendCommand(ctrl, 0x02, 0x04, req, (int)sizeof(req), reply, (int)sizeof(reply));
-    int avail, n;
+    Uint8 req[8] = { 0x00, 0x00, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
+    Uint8 reply[128];
+    int got = BLE_SendCommand(ctrl, 0x02, 0x01, req, (int)sizeof(req), reply, (int)sizeof(reply));
+    int avail;
 
-    if (got <= 8) {
+    if (got <= 0x10) {
         return false;
     }
-    avail = got - 8;
-    n = SDL_min(avail, (int)len);
-    n = SDL_min(n, out_len);
-    SDL_memcpy(out, &reply[8], n);
-    return n >= (int)len;
+    avail = SDL_min(got - 0x10, 0x40);
+    SDL_memset(out, 0, 0x40);
+    SDL_memcpy(out, &reply[0x10], avail);
+    return true;
 }
 
-// Read user (else factory) stick calibration. Best-effort: on failure the
-// uncalibrated linear map in BLE_MapStickAxis is used.
+// Read stick calibration, transcribed from the wired path (SDL_hidapi_switch2.c
+// :646-691): factory baseline (left 0x13080, right 0x130C0, parsed at +0x28),
+// then user override (left 0x1FC040, right 0x1FC080, magic b2 a1 at [0:2], parsed
+// at +2). Best-effort: on failure BLE_MapStickAxis falls back to a linear map.
 static void BLE_ReadCalibration(BLE_Controller *ctrl)
 {
-    Uint8 cal[9];
+    Uint8 block[0x40];
 
-    if ((BLE_ReadMemory(ctrl, 0x1FC042, 9, cal, sizeof(cal)) && !(cal[0] == 0xFF && cal[1] == 0xFF && cal[2] == 0xFF)) ||
-        BLE_ReadMemory(ctrl, 0x0130A8, 9, cal, sizeof(cal))) {
-        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, cal);
+    if (BLE_ReadFlashBlock(ctrl, 0x13080, block)) {
+        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, &block[0x28]);
     }
-    if ((BLE_ReadMemory(ctrl, 0x1FC062, 9, cal, sizeof(cal)) && !(cal[0] == 0xFF && cal[1] == 0xFF && cal[2] == 0xFF)) ||
-        BLE_ReadMemory(ctrl, 0x0130E8, 9, cal, sizeof(cal))) {
-        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, cal);
+    if (BLE_ReadFlashBlock(ctrl, 0x130C0, block)) {
+        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, &block[0x28]);
+    }
+    if (BLE_ReadFlashBlock(ctrl, 0x1FC040, block) && block[0] == 0xb2 && block[1] == 0xa1) {
+        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, &block[2]);
+    }
+    if (BLE_ReadFlashBlock(ctrl, 0x1FC080, block) && block[0] == 0xb2 && block[1] == 0xa1) {
+        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, &block[2]);
     }
     ctrl->calibrated = true;
 }
 
-// Player LED (command 0x09 / subcmd 0x07).
+// Player LED (command 0x09 / subcmd 0x07). The wired UpdateSlotLED
+// (SDL_hidapi_switch2.c:327-337) sends 8 data bytes with the pattern in data[0].
 static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
 {
     static const Uint8 pattern[] = { 0x1, 0x3, 0x7, 0xf, 0x9, 0x5, 0xd, 0x6 };
-    Uint8 data[4] = { 0, 0, 0, 0 };
+    Uint8 data[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
     if (player_index >= 0) {
         data[0] = pattern[player_index % 8];
     }
@@ -1083,7 +1093,7 @@ static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Ui
     // X<-0x31, Y<-0x35, Z<-0x33(neg); gyro X<-0x37, Y<-0x3b, Z<-0x39(neg). The
     // wired gyro_coeff is 34.8 (its dynamic 34.8-vs-40 calibration is not ported;
     // 34.8 is the nominal case, flagged for hardware confirmation). Biases are 0.
-    if (size >= 60 && ctrl->joystick) {
+    if (size >= 60 && ctrl->joystick && ctrl->sensors_enabled) {
         const float accel_scale = SDL_STANDARD_GRAVITY * 8.0f / 32767.0f;
         const float gyro_scale = 34.8f / 32767.0f;
         float accel[3], gyro[3];
@@ -1401,9 +1411,17 @@ static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int
 
 static bool BLE_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
 {
-    (void)joystick;
-    (void)enabled;
-    return true; // IMU is always streamed in report 0x05
+    BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
+    // Enable/disable the IMU on the device, mirroring the wired driver's
+    // 0x0c/0x04 feature command (SDL_hidapi_switch2.c:862-869, 1369-1374): base
+    // byte 0x23, OR 0x04 to enable -> 0x27.
+    Uint8 data[4] = { enabled ? (Uint8)0x27 : (Uint8)0x23, 0x00, 0x00, 0x00 };
+    if (!ctrl) {
+        return SDL_SetError("No BLE controller for joystick");
+    }
+    ctrl->sensors_enabled = enabled;
+    BLE_SendCommand(ctrl, 0x0c, 0x04, data, sizeof(data), NULL, 0);
+    return true;
 }
 
 static void BLE_JoystickUpdate(SDL_Joystick *joystick)
