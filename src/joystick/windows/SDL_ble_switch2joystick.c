@@ -80,6 +80,7 @@ typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDevi
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult                 GattCharsResult;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic                        GattChar;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattValueChangedEventArgs                 GattValueArgs;
+typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CGattCommunicationStatus                    GattCommStatus;
 typedef __x_ABI_CWindows_CStorage_CStreams_CIBuffer                                 Buffer;
 typedef __x_ABI_CWindows_CStorage_CStreams_CIDataWriter                             DataWriter;
 
@@ -903,7 +904,11 @@ static GattChar *BLE_FindCharacteristic(GattService3 *service3, const GUID *uuid
     GattCharsResult *result = NULL;
     GattChar *found = NULL;
 
-    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_GetCharacteristicsForUuidAsync(service3, *uuid, (void *)&op)) || !op) {
+    // Uncached, so the read goes to the device rather than a stale OS cache, and
+    // only trust the result when GattCommunicationStatus_Success (joycon2cpp checks
+    // cr.Status() before reading characteristics, testapp.cpp:854). The link is up
+    // by now (service discovery already succeeded), so a single attempt suffices.
+    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_GetCharacteristicsForUuidWithCacheModeAsync(service3, *uuid, BluetoothCacheMode_Uncached, (void *)&op)) || !op) {
         return NULL;
     }
     if (BLE_Await(op)) {
@@ -913,8 +918,11 @@ static GattChar *BLE_FindCharacteristic(GattService3 *service3, const GUID *uuid
         ((GetResults_t)(*vt)[8])(op, &result);
     }
     if (result) {
+        GattCommStatus status = GattCommunicationStatus_Unreachable;
         __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCharacteristic *chars = NULL;
-        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult_get_Characteristics(result, &chars)) && chars) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult_get_Status(result, &status);
+        if (status == GattCommunicationStatus_Success &&
+            SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult_get_Characteristics(result, &chars)) && chars) {
             unsigned size = 0;
             __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCharacteristic_get_Size(chars, &size);
             if (size > 0) {
@@ -955,64 +963,90 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     }
     ((BleDevice *)op)->lpVtbl->Release((BleDevice *)op);
     __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_Release(statics);
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 FromBluetoothAddressAsync addr %012llx: device=%p",
+                 (unsigned long long)bluetooth_address, (void *)device);
     if (!device) {
         return;
     }
 
-    // Best-effort throughput bump (Win10 1809+; ignore failure).
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(device, &IID_BleDevice6, (void **)&device3) /* reuse var below */)) {
-        // device3 currently holds an IBluetoothLEDevice6*; request params then release.
-        BleConnParamStatics *cp_statics = NULL;
-        if (SUCCEEDED(BLE_GetActivationFactory(RuntimeClass_Windows_Devices_Bluetooth_BluetoothLEPreferredConnectionParameters, &IID_BleConnParamStatics, (void **)&cp_statics))) {
-            BleConnParam *params = NULL;
-            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics_get_ThroughputOptimized(cp_statics, &params)) && params) {
-                BleConnParamReq *req = NULL;
-                __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6_RequestPreferredConnectionParameters((BleDevice6 *)device3, params, &req);
-                if (req) {
-                    ((BleConnParamReq *)req)->lpVtbl->Release((BleConnParamReq *)req);
-                }
-                __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParameters_Release(params);
-            }
-            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics_Release(cp_statics);
-        }
-        ((BleDevice6 *)device3)->lpVtbl->Release((BleDevice6 *)device3);
-        device3 = NULL;
-    }
-
-    // Discover the Switch 2 service.
+    // Discover the Switch 2 service. This driver connects bond-free (no SMP, no OS
+    // pairing), so the first GATT query returns before the ACL/GATT link is up and
+    // a Cached read sees an empty table. Query Uncached and retry until the result
+    // is GattCommunicationStatus_Success with the service present, matching the
+    // proven joycon2cpp connect, which loops GetGattServicesAsync(Uncached) up to
+    // 10x at 500 ms checking Success (joycon2cpp/testapp/src/testapp.cpp:841-851).
     if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(device, &IID_BleDevice3, (void **)&device3)) || !device3) {
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
         return;
     }
-    op = NULL;
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_GetGattServicesForUuidAsync(device3, GUID_Switch2Service, (void *)&op)) && op) {
-        if (BLE_Await(op)) {
-            typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, GattServicesResult **out);
-            void ***vt = (void ***)op;
-            ((GetResults_t)(*vt)[8])(op, &services_result);
-        }
-        ((GattServicesResult *)op)->lpVtbl->Release((GattServicesResult *)op);
-    }
-    if (services_result) {
-        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService *list = NULL;
-        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_get_Services(services_result, &list)) && list) {
+    {
+        int attempt;
+        for (attempt = 1; attempt <= 10 && !service; ++attempt) {
+            GattCommStatus status = GattCommunicationStatus_Unreachable;
             unsigned size = 0;
-            __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_get_Size(list, &size);
-            if (size > 0) {
-                __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_GetAt(list, 0, &service);
+            op = NULL;
+            services_result = NULL;
+            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_GetGattServicesForUuidWithCacheModeAsync(device3, GUID_Switch2Service, BluetoothCacheMode_Uncached, (void *)&op)) && op) {
+                if (BLE_Await(op)) {
+                    typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, GattServicesResult **out);
+                    void ***vt = (void ***)op;
+                    ((GetResults_t)(*vt)[8])(op, &services_result);
+                }
+                ((GattServicesResult *)op)->lpVtbl->Release((GattServicesResult *)op);
             }
-            __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_Release(list);
+            if (services_result) {
+                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_get_Status(services_result, &status);
+                if (status == GattCommunicationStatus_Success) {
+                    __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService *list = NULL;
+                    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_get_Services(services_result, &list)) && list) {
+                        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_get_Size(list, &size);
+                        if (size > 0) {
+                            __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_GetAt(list, 0, &service);
+                        }
+                        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_Release(list);
+                    }
+                }
+                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_Release(services_result);
+                services_result = NULL;
+            }
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 GATT discovery attempt %d/10: status=%d services=%u",
+                         attempt, (int)status, size);
+            if (!service && attempt < 10) {
+                SDL_Delay(500); // ride out the bond-free link-up window
+            }
         }
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_Release(services_result);
     }
     if (service) {
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService_QueryInterface(service, &IID_GattService3, (void **)&service3);
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService_Release(service);
     }
     if (!service3) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 GATT service discovery failed after 10 attempts");
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_Release(device3);
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
         return;
+    }
+
+    // Best-effort throughput bump, now that the link is up. joycon2cpp requests it
+    // after discovery (testapp.cpp:891). Win10 1809+; ignore failure.
+    {
+        BleDevice6 *device6 = NULL;
+        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(device, &IID_BleDevice6, (void **)&device6))) {
+            BleConnParamStatics *cp_statics = NULL;
+            if (SUCCEEDED(BLE_GetActivationFactory(RuntimeClass_Windows_Devices_Bluetooth_BluetoothLEPreferredConnectionParameters, &IID_BleConnParamStatics, (void **)&cp_statics))) {
+                BleConnParam *params = NULL;
+                if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics_get_ThroughputOptimized(cp_statics, &params)) && params) {
+                    BleConnParamReq *req = NULL;
+                    __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6_RequestPreferredConnectionParameters(device6, params, &req);
+                    if (req) {
+                        ((BleConnParamReq *)req)->lpVtbl->Release((BleConnParamReq *)req);
+                    }
+                    __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParameters_Release(params);
+                }
+                __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics_Release(cp_statics);
+            }
+            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6_Release(device6);
+        }
     }
 
     // Build the controller record.
