@@ -1257,6 +1257,25 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     // Read stick calibration over the command channel (best-effort).
     BLE_ReadCalibration(ctrl);
 
+    // Joy-Con 2 input-mode write (Format 3 / 0x30) before input notifications start.
+    // Without it the default report leaks the high status byte and the Left's
+    // bit-23 into the button field as phantom ZL/ZR. windows10-gyro sends this raw
+    // 11-byte buffer to the command characteristic for the Joy-Cons (controller.py
+    // :758-766). Joy-Cons stay on the unified Report 0x05 layout that
+    // BLE_DecodeJoyConLeft/Right read (controller.py:276-289 parses Joy-Cons there
+    // even with Format 3 set), so this only cleans the phantom bits. The GameCube is
+    // deliberately excluded: Format 3 switches it to the native Report 0x0A layout
+    // (controller.py:173-270, buttons at data[2:5], triggers data[12:13], IMU
+    // data[34:46]), which this driver's GameCube decoder does not parse. Sending it
+    // to a GameCube would break that decode, so GC stays on the unified layout and
+    // its Format-3 + native-decoder rework is a separate, hardware-gated task.
+    if (ctrl->command_char &&
+        (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
+         ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT)) {
+        static const Uint8 set_input_mode[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30 };
+        BLE_WriteCharacteristic(ctrl->command_char, set_input_mode, (int)sizeof(set_input_mode), false);
+    }
+
     if (ctrl->input_char) {
         input_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*input_handler));
         if (input_handler) {
