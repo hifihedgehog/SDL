@@ -973,15 +973,32 @@ typedef struct {
 static hm_cache_entry hm_cache[HM_CACHE_CAP];
 static int hm_cache_size = 0;
 static CRITICAL_SECTION hm_cache_cs;
+static INIT_ONCE hm_cache_once = INIT_ONCE_STATIC_INIT;
 static int hm_cache_cs_init = 0;
+
+static BOOL CALLBACK hm_cache_init_cb(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+	(void)once;
+	(void)param;
+	(void)ctx;
+	InitializeCriticalSection(&hm_cache_cs);
+	hm_cache_cs_init = 1;
+	return TRUE;
+}
+
+/* Initialize hm_cache_cs exactly once. The HIDMaestro filter is reached from
+   several backends (HIDAPI enumerate, rawinput, dinput); a flag-guarded lazy
+   init would race on the first concurrent call and double-init the section.
+   InitOnceExecuteOnce serializes the init independent of thread or call order. */
+static void hm_cache_ensure_init(void)
+{
+	InitOnceExecuteOnce(&hm_cache_once, hm_cache_init_cb, NULL, NULL);
+}
 
 static int hm_cache_lookup(const wchar_t *path, int max_depth, int *out_is_hm)
 {
 	int i;
-	if (!hm_cache_cs_init) {
-		InitializeCriticalSection(&hm_cache_cs);
-		hm_cache_cs_init = 1;
-	}
+	hm_cache_ensure_init();
 	EnterCriticalSection(&hm_cache_cs);
 	for (i = 0; i < hm_cache_size; ++i) {
 		if (wcscmp(hm_cache[i].path, path) == 0) {
