@@ -1345,17 +1345,20 @@ static void HIDAPI_DriverSwitch2_FreeDevice(SDL_HIDAPI_Device *device)
             ctx->interface_claimed = false;
         }
         if (ctx->own_libusb_device) {
-            // Windows: we opened the device and context ourselves, so close them.
-            // (On other platforms hidapi owns the handle, so leave it alone.)
+            // Windows: we opened this device handle, so close it. (Non-Windows: the
+            // handle is hidapi's, so leave it alone.)
             if (ctx->device_handle) {
                 ctx->libusb->close(ctx->device_handle);
                 ctx->device_handle = NULL;
             }
-            if (ctx->own_ctx) {
-                ctx->libusb->exit(ctx->own_ctx);
-                ctx->own_ctx = NULL;
-            }
             ctx->own_libusb_device = false;
+        }
+        if (ctx->own_ctx) {
+            // libusb_init must be paired with libusb_exit (libusb.h:1212), including
+            // the InitUSB error path where the context was created but no device was
+            // opened (own_libusb_device stays false). Exit it whenever it exists.
+            ctx->libusb->exit(ctx->own_ctx);
+            ctx->own_ctx = NULL;
         }
         if (ctx->libusb) {
             SDL_QuitLibUSB();
