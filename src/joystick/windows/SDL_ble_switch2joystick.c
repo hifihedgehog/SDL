@@ -1665,9 +1665,13 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
 
     // Advertise the rumble capability so apps that gate on it (PadForge's FFB
     // passthrough reads SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN into HasRumble) will
-    // drive it. Gate on the vibration characteristic that BLE_JoystickRumble
-    // requires, mirroring SDL_hidapijoystick.c:860.
-    if (ctrl->vibration_char) {
+    // drive it, mirroring SDL_hidapijoystick.c:860. The cap must track actual
+    // delivery, so exclude the GameCube: BLE_WriteRumble no-ops it (its 4-byte
+    // format is a TODO), and advertising the cap there reads as "rumble broken"
+    // rather than "not implemented yet". When GC rumble lands, drop the product
+    // clause in the same commit that makes BLE_WriteRumble deliver for it.
+    if (ctrl->vibration_char &&
+        ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER) {
         SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick),
                                SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
     }
