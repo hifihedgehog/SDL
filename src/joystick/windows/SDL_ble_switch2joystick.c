@@ -129,6 +129,11 @@ DEFINE_GUID(GUID_Switch2VibeGC,   0x3f8fb670, 0xab25, 0x45bf, 0xb5, 0x40, 0x38, 
 
 #define NINTENDO_BLE_COMPANY_ID 0x0553
 
+// Keep-alive cadence for the continuous-drive rumble pump (about 100 Hz). The
+// reference paces its ESP32 bridge at 7.5 ms; on a direct BLE link 10 ms sustains
+// the effect without flooding the shared connection.
+#define BLE_RUMBLE_INTERVAL_MS 10
+
 // ---------------------------------------------------------------------------
 // IBufferByteAccess: classic COM interface to reach an IBuffer's raw bytes.
 // robuffer.h is C++-only, so declare the C-callable form here.
@@ -209,8 +214,12 @@ typedef struct BLE_Controller
     bool calibrated;
     bool sensors_enabled; // IMU streams only after the enable command is sent
 
-    // Rumble state.
+    // Rumble state. The actuator does not latch, so a sustained effect needs a
+    // continuous packet stream. rumble_low/high are the last commanded amplitudes
+    // (0/0 = idle), pumped from BLE_JoystickUpdate and rate-gated by rumble_last_ms.
     Uint32 rumble_seq;
+    Uint16 rumble_low, rumble_high;
+    Uint64 rumble_last_ms;
     int player_index;
 } BLE_Controller;
 
@@ -1675,6 +1684,15 @@ static bool BLE_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumb
     if (!ctrl || !ctrl->vibration_char) {
         return SDL_Unsupported();
     }
+    // Store the commanded amplitudes for the keep-alive pump (BLE_JoystickUpdate),
+    // and write once now to keep the initial latency low. SDL only resends rumble
+    // every SDL_RUMBLE_RESEND_MS (2 s), which the non-latching actuator reads as a
+    // single pulse, so the pump is what sustains a continuous effect.
+    SDL_LockMutex(ctrl->report_lock);
+    ctrl->rumble_low = low_frequency_rumble;
+    ctrl->rumble_high = high_frequency_rumble;
+    ctrl->rumble_last_ms = SDL_GetTicks();
+    SDL_UnlockMutex(ctrl->report_lock);
     return BLE_WriteRumble(ctrl, low_frequency_rumble, high_frequency_rumble);
 }
 
@@ -1745,6 +1763,26 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
             BLE_LogBytes("first input report", data, size); // confirms the byte offsets
         }
         BLE_DecodeReport(ctrl, joystick, data, size);
+    }
+
+    // Rumble keep-alive: re-send the last commanded amplitudes, rate-gated, so a
+    // single SDL_RumbleJoystick call sustains on the non-latching actuator. The
+    // write is done outside report_lock since it can block briefly.
+    {
+        bool pump = false;
+        Uint16 rlow = 0, rhigh = 0;
+        Uint64 now = SDL_GetTicks();
+        SDL_LockMutex(ctrl->report_lock);
+        if ((ctrl->rumble_low || ctrl->rumble_high) && (now - ctrl->rumble_last_ms >= BLE_RUMBLE_INTERVAL_MS)) {
+            rlow = ctrl->rumble_low;
+            rhigh = ctrl->rumble_high;
+            ctrl->rumble_last_ms = now;
+            pump = true;
+        }
+        SDL_UnlockMutex(ctrl->report_lock);
+        if (pump) {
+            BLE_WriteRumble(ctrl, rlow, rhigh);
+        }
     }
 }
 
