@@ -1654,6 +1654,15 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
     SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 250.0f);
     SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 250.0f);
 
+    // Advertise the rumble capability so apps that gate on it (PadForge's FFB
+    // passthrough reads SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN into HasRumble) will
+    // drive it. Gate on the vibration characteristic that BLE_JoystickRumble
+    // requires, mirroring SDL_hidapijoystick.c:860.
+    if (ctrl->vibration_char) {
+        SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick),
+                               SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+    }
+
     // Light the player LED for this slot.
     ctrl->player_index = SDL_GetJoystickPlayerIndex(joystick);
     BLE_SetPlayerLED(ctrl, ctrl->player_index);
