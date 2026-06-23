@@ -142,6 +142,8 @@ struct IBufferByteAccess
 typedef HRESULT(WINAPI *CoIncrementMTAUsage_t)(HANDLE *pCookie);
 typedef HRESULT(WINAPI *RoGetActivationFactory_t)(HSTRING activatableClassId, REFIID iid, void **factory);
 typedef HRESULT(WINAPI *RoActivateInstance_t)(HSTRING activatableClassId, IInspectable **instance);
+typedef HRESULT(WINAPI *RoInitialize_t)(RO_INIT_TYPE initType);
+typedef void(WINAPI *RoUninitialize_t)(void);
 typedef HRESULT(WINAPI *WindowsCreateStringReference_t)(PCWSTR sourceString, UINT32 length, HSTRING_HEADER *header, HSTRING *string);
 typedef HRESULT(WINAPI *WindowsDeleteString_t)(HSTRING string);
 
@@ -235,6 +237,8 @@ static struct
     CoIncrementMTAUsage_t CoIncrementMTAUsage;
     RoGetActivationFactory_t RoGetActivationFactory;
     RoActivateInstance_t RoActivateInstance;
+    RoInitialize_t RoInitialize;
+    RoUninitialize_t RoUninitialize;
     WindowsCreateStringReference_t WindowsCreateStringReference;
     WindowsDeleteString_t WindowsDeleteString;
 
@@ -272,8 +276,22 @@ typedef struct
 static int SDLCALL BLE_ConnectThread(void *data)
 {
     BLE_ConnectRequest *req = (BLE_ConnectRequest *)data;
+    bool ro_inited = false;
+
+    // Join the MTA explicitly. This is a fresh SDL thread, not a system thread-pool
+    // thread, so it has no apartment of its own. RoGetActivationFactory can return
+    // RO_E_UNINITIALIZED on an uninitialized thread even with the process-wide
+    // implicit MTA from CoIncrementMTAUsage, so initialize it as MULTITHREADED
+    // (not WIN_RoInitialize, which is STA-first and would risk a marshal-back
+    // deadlock against the agile completion handlers this thread blocks on).
+    if (ble.RoInitialize) {
+        ro_inited = SUCCEEDED(ble.RoInitialize(RO_INIT_MULTITHREADED));
+    }
     BLE_ConnectAndSubscribe(req->address, req->vendor, req->product, NULL);
     BLE_ReleaseConnect(req->address); // address reserved by the caller before spawn
+    if (ro_inited && ble.RoUninitialize) {
+        ble.RoUninitialize();
+    }
     SDL_free(req);
     return 0;
 }
@@ -1467,6 +1485,8 @@ static bool BLE_JoystickInit(void)
     RESOLVE(CoIncrementMTAUsage);
     RESOLVE(RoGetActivationFactory);
     RESOLVE(RoActivateInstance);
+    RESOLVE(RoInitialize);
+    RESOLVE(RoUninitialize);
     RESOLVE(WindowsCreateStringReference);
     RESOLVE(WindowsDeleteString);
 #undef RESOLVE
