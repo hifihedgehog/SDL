@@ -65,9 +65,12 @@
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher            BleWatcher;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher2           BleWatcher2;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs  BleRecvArgs;
+typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs2 BleRecvArgs2;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisement                   BleAdvertisement;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEManufacturerData                BleMfgData;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics                    BleDeviceStatics;
+typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics2                   BleDeviceStatics2;
+typedef __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothAddressType                         BleAddressType;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice                           BleDevice;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3                          BleDevice3;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6                          BleDevice6;
@@ -92,9 +95,11 @@ DEFINE_GUID(IID_BleWatcher,       0xa6ac336f, 0xf3d3, 0x4297, 0x8d, 0x6c, 0xc8, 
 DEFINE_GUID(IID_BleWatcher2,      0x01bf26bc, 0xb164, 0x5805, 0x90, 0xa3, 0xe8, 0xa7, 0x99, 0x7f, 0xf2, 0x25);
 DEFINE_GUID(IID_BleRecvHandler,   0x90eb4eca, 0xd465, 0x5ea0, 0xa6, 0x1c, 0x03, 0x3c, 0x8c, 0x5e, 0xce, 0xf2);
 DEFINE_GUID(IID_BleRecvArgs,      0x27987ddf, 0xe596, 0x41be, 0x8d, 0x43, 0x9e, 0x67, 0x31, 0xd4, 0xa9, 0x13);
+DEFINE_GUID(IID_BleRecvArgs2,     0x9936a4db, 0xdc99, 0x55c3, 0x9e, 0x9b, 0xbf, 0x48, 0x54, 0xbd, 0x9e, 0xab);
 DEFINE_GUID(IID_BleAdvertisement, 0x066fb2b7, 0x33d1, 0x4e7d, 0x83, 0x67, 0xcf, 0x81, 0xd0, 0xf7, 0x96, 0x53);
 DEFINE_GUID(IID_BleMfgData,       0x912dba18, 0x6963, 0x4533, 0xb0, 0x61, 0x46, 0x94, 0xda, 0xfb, 0x34, 0xe5);
 DEFINE_GUID(IID_BleDeviceStatics, 0xc8cf1a19, 0xf0b6, 0x4bf0, 0x86, 0x89, 0x41, 0x30, 0x3d, 0xe2, 0xd9, 0xf4);
+DEFINE_GUID(IID_BleDeviceStatics2, 0xa90661e2, 0x372e, 0x5d1e, 0xbb, 0xbb, 0xb8, 0xa2, 0xce, 0x0e, 0x7c, 0x4d);
 DEFINE_GUID(IID_BleDevice,        0xb5ee2f7b, 0x4ad8, 0x4642, 0xac, 0x48, 0x80, 0xa0, 0xb5, 0x00, 0xe8, 0x87);
 DEFINE_GUID(IID_BleDevice3,       0xaee9e493, 0x44ac, 0x40dc, 0xaf, 0x33, 0xb2, 0xc1, 0x3c, 0x01, 0xca, 0x46);
 DEFINE_GUID(IID_BleDevice6,       0xca7190ef, 0x0cae, 0x573c, 0xa1, 0xca, 0xe1, 0xfc, 0x5b, 0xfc, 0x39, 0xe2);
@@ -251,7 +256,7 @@ static struct
 } ble;
 
 // Forward declarations.
-static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name);
+static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, int address_type, Uint16 vendor_id, Uint16 product_id, char *name);
 static void BLE_FreeController(BLE_Controller *ctrl);
 static BLE_Controller *BLE_GetControllerByAddress(Uint64 address);
 
@@ -833,6 +838,7 @@ static ULONG STDMETHODCALLTYPE Received_Release(void *This) { (void)This; return
 static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRecvArgs *args)
 {
     UINT64 address = 0;
+    int address_type = BluetoothAddressType_Public;
     BleAdvertisement *advertisement = NULL;
     __FIVector_1_Windows__CDevices__CBluetooth__CAdvertisement__CBluetoothLEManufacturerData *mfg_list = NULL;
     (void)This;
@@ -842,6 +848,19 @@ static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRe
         return S_OK;
     }
     __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs_get_BluetoothAddress(args, &address);
+    // Read the advertised address type. Switch 2 controllers advertise a Random
+    // address; opening it as Public (the single-arg default) returns null, so the
+    // type has to be carried to the open (hifihedgehog/SDL#5 second hardware trace).
+    {
+        BleRecvArgs2 *args2 = NULL;
+        if (SUCCEEDED(args->lpVtbl->QueryInterface(args, &IID_BleRecvArgs2, (void **)&args2)) && args2) {
+            BleAddressType t = BluetoothAddressType_Public;
+            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs2_get_BluetoothAddressType(args2, &t))) {
+                address_type = (int)t;
+            }
+            __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs2_Release(args2);
+        }
+    }
     if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs_get_Advertisement(args, &advertisement)) || !advertisement) {
         return S_OK;
     }
@@ -871,8 +890,8 @@ static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRe
                         // Reserve the address so repeated advertisements during the
                         // multi-second connect don't start duplicate connects.
                         if (supported && BLE_TryReserveConnect((Uint64)address)) {
-                            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx", vendor, product, (unsigned long long)address);
-                            BLE_ConnectAndSubscribe((Uint64)address, vendor, product, NULL);
+                            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx type=%d", vendor, product, (unsigned long long)address, address_type);
+                            BLE_ConnectAndSubscribe((Uint64)address, address_type, vendor, product, NULL);
                             BLE_ReleaseConnect((Uint64)address);
                         }
                     }
@@ -936,7 +955,24 @@ static GattChar *BLE_FindCharacteristic(GattService3 *service3, const GUID *uuid
     return found;
 }
 
-static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name)
+// Await an IAsyncOperation<BluetoothLEDevice>, return the device (NULL on
+// timeout/failure), and release the operation. GetResults is vtbl slot 8.
+static BleDevice *BLE_AwaitDevice(void *op)
+{
+    BleDevice *device = NULL;
+    if (!op) {
+        return NULL;
+    }
+    if (BLE_Await(op)) {
+        typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, BleDevice **out);
+        void ***vt = (void ***)op;
+        ((GetResults_t)(*vt)[8])(op, &device);
+    }
+    ((BleDevice *)op)->lpVtbl->Release((BleDevice *)op);
+    return device;
+}
+
+static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, int address_type, Uint16 vendor_id, Uint16 product_id, char *name)
 {
     BleDeviceStatics *statics = NULL;
     void *op = NULL;
@@ -952,19 +988,38 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     if (FAILED(BLE_GetActivationFactory(RuntimeClass_Windows_Devices_Bluetooth_BluetoothLEDevice, &IID_BleDeviceStatics, (void **)&statics))) {
         return;
     }
-    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_FromBluetoothAddressAsync(statics, bluetooth_address, (void *)&op)) || !op) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_Release(statics);
-        return;
+    // Open the device by its advertised address type. The single-arg
+    // FromBluetoothAddressAsync assumes a Public address and returns null for the
+    // Switch 2's Random address (hifihedgehog/SDL#5 second hardware trace, 326/326
+    // null opens). Use the type-aware IBluetoothLEDeviceStatics2 open. If the
+    // advertisement reported Unspecified, prefer Random (the observed case), and
+    // fall back to a Public open on null as cheap insurance.
+    {
+        BleDeviceStatics2 *statics2 = NULL;
+        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_QueryInterface(statics, &IID_BleDeviceStatics2, (void **)&statics2)) && statics2) {
+            int try_type = (address_type == BluetoothAddressType_Unspecified) ? BluetoothAddressType_Random : address_type;
+            op = NULL;
+            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics2_FromBluetoothAddressWithBluetoothAddressTypeAsync(statics2, bluetooth_address, (BleAddressType)try_type, (void *)&op))) {
+                device = BLE_AwaitDevice(op);
+            }
+            if (!device && try_type != BluetoothAddressType_Public) {
+                op = NULL;
+                if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics2_FromBluetoothAddressWithBluetoothAddressTypeAsync(statics2, bluetooth_address, (BleAddressType)BluetoothAddressType_Public, (void *)&op))) {
+                    device = BLE_AwaitDevice(op);
+                }
+            }
+            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics2_Release(statics2);
+        } else {
+            // No IBluetoothLEDeviceStatics2 (pre-1709): single-arg Public open.
+            op = NULL;
+            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_FromBluetoothAddressAsync(statics, bluetooth_address, (void *)&op))) {
+                device = BLE_AwaitDevice(op);
+            }
+        }
     }
-    if (BLE_Await(op)) {
-        typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, BleDevice **out);
-        void ***vt = (void ***)op;
-        ((GetResults_t)(*vt)[8])(op, &device);
-    }
-    ((BleDevice *)op)->lpVtbl->Release((BleDevice *)op);
     __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_Release(statics);
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 FromBluetoothAddressAsync addr %012llx: device=%p",
-                 (unsigned long long)bluetooth_address, (void *)device);
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 open addr %012llx type=%d: device=%p",
+                 (unsigned long long)bluetooth_address, address_type, (void *)device);
     if (!device) {
         return;
     }
