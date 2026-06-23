@@ -458,6 +458,11 @@ static bool BLE_AwaitTimeout(void *async_op, Sint32 timeout_ms)
     } else {
         completed = false;
     }
+    // Diagnostic (hifihedgehog/SDL#5): pin candidate (b). A put_Completed failure,
+    // or a completed=0 that returns far sooner than timeout_ms, means the await is
+    // not actually waiting on the async op.
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE await: put_Completed hr=0x%08lX wait(%dms) completed=%d",
+                 (unsigned long)hr, (int)timeout_ms, (int)completed);
     Awaiter_Release(awaiter); // drop our reference; WinRT frees it when it is done
     return completed;
 }
@@ -1015,7 +1020,11 @@ static BleDevice *BLE_AwaitDevice(void *op)
     if (BLE_AwaitTimeout(op, 20000)) {
         typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, BleDevice **out);
         void ***vt = (void ***)op;
-        ((GetResults_t)(*vt)[8])(op, &device);
+        HRESULT gr = ((GetResults_t)(*vt)[8])(op, &device);
+        // Diagnostic (hifihedgehog/SDL#5): pin candidate (c). A returning-fast wait
+        // with GetResults S_OK but device NULL means a synchronous null completion.
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE device open: GetResults hr=0x%08lX device=%p",
+                     (unsigned long)gr, (void *)device);
     }
     ((BleDevice *)op)->lpVtbl->Release((BleDevice *)op);
     return device;
@@ -1044,8 +1053,15 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     // Received_Invoke), so blocking the 20 s await here does not starve the WinRT
     // thread pool that has to deliver the completion.
     op = NULL;
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_FromBluetoothAddressAsync(statics, bluetooth_address, (void *)&op))) {
-        device = BLE_AwaitDevice(op);
+    {
+        // Diagnostic (hifihedgehog/SDL#5): pin candidate (a). A failed HRESULT here
+        // skips the await entirely, so device stays NULL with no wait.
+        HRESULT open_hr = __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_FromBluetoothAddressAsync(statics, bluetooth_address, (void *)&op);
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE device open: FromBluetoothAddressAsync hr=0x%08lX op=%p",
+                     (unsigned long)open_hr, (void *)op);
+        if (SUCCEEDED(open_hr)) {
+            device = BLE_AwaitDevice(op);
+        }
     }
     __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_Release(statics);
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 open addr %012llx: device=%p",
