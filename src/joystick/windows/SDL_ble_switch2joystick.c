@@ -271,6 +271,19 @@ static struct
     // the (multi-second) connect don't start a storm of duplicate connects.
     Uint64 connecting[16];
     int connecting_count;
+
+    // Per-address backoff after a full GATT-discovery failure. A Switch 2 busy on
+    // USB still advertises BLE but its GATT stays Unreachable, and the always-on
+    // watcher's repeated 16 s connect attempts destabilize the wired link
+    // (hifihedgehog/SDL#5). A full discovery failure (all 10 attempts Unreachable)
+    // is the reliable "stop trying this address" signal, distinct from a real
+    // wireless connect that flips to Success within a few attempts.
+    struct {
+        Uint64 address;
+        Uint64 until_ms;   // skip connects to this address until this tick
+        int fail_count;    // escalates the backoff
+    } cooldowns[16];
+    int cooldown_count;
 } ble;
 
 // Forward declarations.
@@ -325,9 +338,17 @@ static bool BLE_TryReserveConnect(Uint64 address)
     SDL_LockJoysticks();
     if (!BLE_GetControllerByAddress(address)) {
         bool pending = false;
+        Uint64 now = SDL_GetTicks();
         for (i = 0; i < ble.connecting_count; ++i) {
             if (ble.connecting[i] == address) {
                 pending = true;
+                break;
+            }
+        }
+        // Honor an active backoff from a prior full GATT-discovery failure.
+        for (i = 0; i < ble.cooldown_count; ++i) {
+            if (ble.cooldowns[i].address == address && now < ble.cooldowns[i].until_ms) {
+                pending = true; // not really pending, but same effect: do not connect now
                 break;
             }
         }
@@ -338,6 +359,41 @@ static bool BLE_TryReserveConnect(Uint64 address)
     }
     SDL_UnlockJoysticks();
     return reserved;
+}
+
+// Record a full GATT-discovery failure for an address and arm an escalating
+// backoff (15 s, 30 s, 60 s, ... capped at 5 min), so the watcher stops hammering
+// a controller that is busy on USB. Cleared on a successful connect.
+static void BLE_NoteConnectFailure(Uint64 address)
+{
+    int i;
+    Uint64 now = SDL_GetTicks();
+
+    SDL_LockJoysticks();
+    for (i = 0; i < ble.cooldown_count; ++i) {
+        if (ble.cooldowns[i].address == address) {
+            break;
+        }
+    }
+    if (i == ble.cooldown_count && ble.cooldown_count < (int)SDL_arraysize(ble.cooldowns)) {
+        ble.cooldowns[i].address = address;
+        ble.cooldowns[i].fail_count = 0;
+        ble.cooldown_count++;
+    }
+    if (i < ble.cooldown_count) {
+        int shift = ble.cooldowns[i].fail_count;
+        Uint64 secs;
+        if (shift > 5) {
+            shift = 5;
+        }
+        secs = (Uint64)15 << shift; // 15, 30, 60, 120, 240, 480
+        if (secs > 300) {
+            secs = 300; // cap at 5 minutes
+        }
+        ble.cooldowns[i].fail_count++;
+        ble.cooldowns[i].until_ms = now + secs * 1000;
+    }
+    SDL_UnlockJoysticks();
 }
 
 static void BLE_ReleaseConnect(Uint64 address)
@@ -1155,6 +1211,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     }
     if (!service3) {
         SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 GATT service discovery failed after 10 attempts");
+        BLE_NoteConnectFailure(bluetooth_address); // back off; likely busy on USB
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_Release(device3);
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
         return;
@@ -1305,9 +1362,18 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         if (grown) {
             ble.controllers = grown;
             if (!BLE_GetControllerByAddress(bluetooth_address)) {
+                int c;
                 ble.controllers[ble.controller_count++] = ctrl;
                 SDL_PrivateJoystickAdded(ctrl->instance_id);
                 ctrl = NULL; // owned by the array now
+                // Genuine connect: clear any backoff so a later wireless reconnect
+                // is immediate. (Already under SDL_LockJoysticks here.)
+                for (c = 0; c < ble.cooldown_count; ++c) {
+                    if (ble.cooldowns[c].address == bluetooth_address) {
+                        ble.cooldowns[c] = ble.cooldowns[--ble.cooldown_count];
+                        break;
+                    }
+                }
             }
         }
     }
