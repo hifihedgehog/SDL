@@ -105,6 +105,13 @@ DEFINE_GUID(IID_GattValueHandler, 0xc1f420f6, 0x6292, 0x5760, 0xa2, 0xc9, 0x9d, 
 DEFINE_GUID(IID_GattValueArgs,    0xd21bdb54, 0x06e3, 0x4ed8, 0xa2, 0x63, 0xac, 0xfa, 0xc8, 0xba, 0x73, 0x13);
 DEFINE_GUID(IID_DataWriter,       0x64b89265, 0xd341, 0x4922, 0xb3, 0x8a, 0xdd, 0x4a, 0xf8, 0x80, 0x8c, 0x4e);
 DEFINE_GUID(IID_IBufferByteAccess, 0x905a0fef, 0xbc53, 0x11df, 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda);
+// Parameterized IAsyncOperationCompletedHandler<T> IIDs (PIIDs). The shared
+// awaiter must QI-accept exactly the handler IID for the op it is registered on,
+// like the WGI driver's per-delegate QI (SDL_windows_gaming_input.c:340-342).
+DEFINE_GUID(IID_AsyncDeviceHandler,   0x375f9d67, 0x74a2, 0x5f91, 0xa1, 0x1d, 0x16, 0x90, 0x93, 0x71, 0x8d, 0x41); // <BluetoothLEDevice>
+DEFINE_GUID(IID_AsyncServicesHandler, 0xe7c667f6, 0xe874, 0x500f, 0x86, 0xff, 0x76, 0x0c, 0xa6, 0xf0, 0x7a, 0x58); // <GattDeviceServicesResult>
+DEFINE_GUID(IID_AsyncCharsHandler,    0x0972194a, 0xac1c, 0x5536, 0x98, 0x86, 0x27, 0xe5, 0x8a, 0x18, 0xf2, 0x73); // <GattCharacteristicsResult>
+DEFINE_GUID(IID_AsyncStatusHandler,   0x3ff69516, 0x1bfb, 0x52e9, 0x9e, 0xe6, 0xe5, 0xcd, 0xb7, 0x8e, 0x16, 0x83); // <GattCommunicationStatus>
 
 // The custom Switch 2 GATT service and its characteristics (all controllers).
 DEFINE_GUID(GUID_Switch2Service,    0xab7de9be, 0x89fe, 0x49ad, 0x82, 0x8f, 0x11, 0x8f, 0x09, 0xdf, 0x7f, 0xd0);
@@ -375,21 +382,33 @@ typedef struct BLE_Awaiter
     void *lpVtbl;
     SDL_AtomicInt refcount;
     SDL_Semaphore *sem;
+    const GUID *handler_iid; // PIID of the IAsyncOperationCompletedHandler<T> we are
 } BLE_Awaiter;
 
+static ULONG STDMETHODCALLTYPE Awaiter_AddRef(void *This);
+
+// Strict QI, matching the WGI handler (SDL_windows_gaming_input.c:340-342): accept
+// only IUnknown, IAgileObject, and this awaiter's specific completed-handler IID,
+// AddRef on success, E_NOINTERFACE for everything else. The previous permissive
+// version handed back self (and skipped AddRef) for every IID except IMarshal,
+// including IInspectable, which a delegate is not. WinRT rejected that handler at
+// put_Completed with CO_E_NOTSUPPORTED (0x80004021), so the open never waited
+// (hifihedgehog/SDL#5).
 static HRESULT STDMETHODCALLTYPE Awaiter_QueryInterface(void *This, REFIID riid, void **ppv)
 {
+    BLE_Awaiter *self = (BLE_Awaiter *)This;
     if (!ppv) {
         return E_INVALIDARG;
     }
-    if (WIN_IsEqualIID(riid, &IID_IMarshal)) {
-        *ppv = NULL;
-        return E_NOINTERFACE;
+    if (WIN_IsEqualIID(riid, &IID_IUnknown) ||
+        WIN_IsEqualIID(riid, &IID_IAgileObject) ||
+        (self->handler_iid && WIN_IsEqualIID(riid, self->handler_iid))) {
+        *ppv = This;
+        Awaiter_AddRef(This);
+        return S_OK;
     }
-    // Permissive: hand back self for IUnknown, IAgileObject, and the (unnamed)
-    // parameterized completed-handler IID. We never marshal across apartments.
-    *ppv = This;
-    return S_OK;
+    *ppv = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG STDMETHODCALLTYPE Awaiter_AddRef(void *This)
 {
@@ -426,7 +445,7 @@ static const struct
 // heap-allocated and refcounted: WinRT holds a reference until it finishes, so a
 // timeout here cannot free the handler out from under a later completion. Returns
 // false on arm failure or timeout.
-static bool BLE_AwaitTimeout(void *async_op, Sint32 timeout_ms)
+static bool BLE_AwaitTimeout(void *async_op, Sint32 timeout_ms, const GUID *handler_iid)
 {
     typedef HRESULT(STDMETHODCALLTYPE * put_Completed_t)(void *This, void *handler);
     void ***vtbl;
@@ -443,6 +462,7 @@ static bool BLE_AwaitTimeout(void *async_op, Sint32 timeout_ms)
         return false;
     }
     awaiter->lpVtbl = (void *)&g_awaiter_vtbl;
+    awaiter->handler_iid = handler_iid;
     awaiter->sem = SDL_CreateSemaphore(0);
     if (!awaiter->sem) {
         SDL_free(awaiter);
@@ -469,9 +489,9 @@ static bool BLE_AwaitTimeout(void *async_op, Sint32 timeout_ms)
 
 // Default await for post-link per-op reads and writes (link already up, so a
 // short ceiling is fine and surfaces a wedged op quickly).
-static bool BLE_Await(void *async_op)
+static bool BLE_Await(void *async_op, const GUID *handler_iid)
 {
-    return BLE_AwaitTimeout(async_op, 3000);
+    return BLE_AwaitTimeout(async_op, 3000, handler_iid);
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +581,7 @@ static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes
         return false;
     }
     if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteValueWithOptionAsync(characteristic, buffer, option, (void *)&op)) && op) {
-        result = BLE_Await(op);
+        result = BLE_Await(op, &IID_AsyncStatusHandler);
         ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
     }
     __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(buffer);
@@ -575,7 +595,7 @@ static bool BLE_EnableNotifications(GattChar *characteristic)
     bool result = false;
 
     if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteClientCharacteristicConfigurationDescriptorAsync(characteristic, GattClientCharacteristicConfigurationDescriptorValue_Notify, (void *)&op)) && op) {
-        result = BLE_Await(op);
+        result = BLE_Await(op, &IID_AsyncStatusHandler);
         ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
     }
     return result;
@@ -981,7 +1001,7 @@ static GattChar *BLE_FindCharacteristic(GattService3 *service3, const GUID *uuid
     if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_GetCharacteristicsForUuidWithCacheModeAsync(service3, *uuid, BluetoothCacheMode_Uncached, (void *)&op)) || !op) {
         return NULL;
     }
-    if (BLE_Await(op)) {
+    if (BLE_Await(op, &IID_AsyncCharsHandler)) {
         // GetResults is vtbl slot 8 on every IAsyncOperation<T>.
         typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, GattCharsResult **out);
         void ***vt = (void ***)op;
@@ -1017,7 +1037,7 @@ static BleDevice *BLE_AwaitDevice(void *op)
     if (!op) {
         return NULL;
     }
-    if (BLE_AwaitTimeout(op, 20000)) {
+    if (BLE_AwaitTimeout(op, 20000, &IID_AsyncDeviceHandler)) {
         typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, BleDevice **out);
         void ***vt = (void ***)op;
         HRESULT gr = ((GetResults_t)(*vt)[8])(op, &device);
@@ -1088,7 +1108,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
             op = NULL;
             services_result = NULL;
             if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_GetGattServicesForUuidWithCacheModeAsync(device3, GUID_Switch2Service, BluetoothCacheMode_Uncached, (void *)&op)) && op) {
-                if (BLE_Await(op)) {
+                if (BLE_Await(op, &IID_AsyncServicesHandler)) {
                     typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, GattServicesResult **out);
                     void ***vt = (void ***)op;
                     ((GetResults_t)(*vt)[8])(op, &services_result);
