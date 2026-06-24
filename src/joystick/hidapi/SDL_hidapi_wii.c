@@ -413,6 +413,7 @@ static void EnableIR(SDL_DriverWii_Context *ctx)
     static const Uint8 sensitivity2[2] = { 0x40, 0x00 };
     Uint8 data[2];
     Uint8 value;
+    bool ok = true;
 
     // 1. IR camera enable (report 0x13), 2. IR logic enable (report 0x1a)
     data[0] = k_eWiiOutputReportIDs_IRCameraEnable;
@@ -425,19 +426,23 @@ static void EnableIR(SDL_DriverWii_Context *ctx)
 
     // 3. control register <- 0x08
     value = 0x08;
-    WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true);
+    ok = WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true) && ok;
 
     // 4. sensitivity blocks
-    WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), true);
-    WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), true);
+    ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), true) && ok;
+    ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), true) && ok;
 
     // 5. data mode <- Extended, 6. control register <- 0x08 again
     value = WII_IR_MODE_EXTENDED;
-    WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), true);
+    ok = WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), true) && ok;
     value = 0x08;
-    WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true);
+    ok = WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true) && ok;
 
-    ctx->m_bIRActive = true;
+    /* Only claim IR is active if every configuration write landed. If a sync write
+       timed out, the camera is half-configured, so leaving m_bIRActive false keeps
+       GetButtonPacketType from selecting report 0x33 against it; the next sensor
+       toggle (or reopen) retries the full sequence. */
+    ctx->m_bIRActive = ok;
 }
 
 static void DisableIR(SDL_DriverWii_Context *ctx)
@@ -459,20 +464,30 @@ static void DisableIR(SDL_DriverWii_Context *ctx)
    big-endian) from register 0x04a40024 (WiimoteLib-Trihy Wiimote.cs:65,531-547).
    ReadRegister waits on one ReadMemory packet of <= 16 bytes, so the 24 bytes are
    read in two passes (16 + 8). Stored raw; PadForge does its own kg interpolation. */
+static bool ReadCalibrationBlock(SDL_DriverWii_Context *ctx, Uint32 address, int size, Uint8 *dest)
+{
+    if (!ReadRegister(ctx, address, size, true)) {
+        return false;
+    }
+    /* Accept only a clean ReadMemory reply: type 0x21, the low nibble of byte 3
+       (the error code) clear, and the echoed address (bytes 4-5) matching the low
+       16 bits of the request. This rejects ReadMemory error packets and a stale
+       reply from an earlier request, which ReadInputSync would otherwise hand back
+       (it matches on report id only), so garbage is never published as calibration. */
+    if (ctx->m_rgucReadBuffer[0] != k_eWiiInputReportIDs_ReadMemory ||
+        (ctx->m_rgucReadBuffer[3] & 0x0F) != 0 ||
+        (Uint16)((ctx->m_rgucReadBuffer[4] << 8) | ctx->m_rgucReadBuffer[5]) != (Uint16)(address & 0xFFFF)) {
+        return false;
+    }
+    SDL_memcpy(dest, ctx->m_rgucReadBuffer + 6, size);
+    return true;
+}
+
 static void ReadBalanceBoardCalibration(SDL_DriverWii_Context *ctx)
 {
-    ctx->m_bBalanceBoardCalibrationValid = false;
-
-    if (ReadRegister(ctx, WII_BALANCE_CALIBRATION_ADDR, 16, true) &&
-        ctx->m_rgucReadBuffer[0] == k_eWiiInputReportIDs_ReadMemory) {
-        SDL_memcpy(ctx->m_rgucBalanceBoardCalibration, ctx->m_rgucReadBuffer + 6, 16);
-
-        if (ReadRegister(ctx, WII_BALANCE_CALIBRATION_ADDR + 16, 8, true) &&
-            ctx->m_rgucReadBuffer[0] == k_eWiiInputReportIDs_ReadMemory) {
-            SDL_memcpy(ctx->m_rgucBalanceBoardCalibration + 16, ctx->m_rgucReadBuffer + 6, 8);
-            ctx->m_bBalanceBoardCalibrationValid = true;
-        }
-    }
+    ctx->m_bBalanceBoardCalibrationValid =
+        ReadCalibrationBlock(ctx, WII_BALANCE_CALIBRATION_ADDR, 16, ctx->m_rgucBalanceBoardCalibration) &&
+        ReadCalibrationBlock(ctx, WII_BALANCE_CALIBRATION_ADDR + 16, 8, ctx->m_rgucBalanceBoardCalibration + 16);
 }
 
 static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint8 *mode)
@@ -894,19 +909,22 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
 
     InitializeExtension(ctx);
 
-    /* If sensors were left enabled on a bare remote across an extension hot-plug
-       (which clears m_bIRActive), re-power the IR camera and reselect report 0x33
-       so the pointer resumes without the app having to toggle sensors again. */
-    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
-        ctx->m_bReportSensors && !ctx->m_bIRActive) {
-        EnableIR(ctx);
-        ResetButtonPacketType(ctx);
-    }
-
     GetMotionPlusState(ctx, &ctx->m_bMotionPlusPresent, &ctx->m_ucMotionPlusMode);
 
     if (NeedsPeriodicMotionPlusCheck(ctx, false)) {
         SchedulePeriodicMotionPlusCheck(ctx);
+    }
+
+    /* If sensors were left enabled on a bare remote across an extension hot-plug
+       that cleared m_bIRActive, re-power the IR camera and reselect report 0x33 so
+       the pointer resumes without the app re-toggling sensors. Gated on no Motion
+       Plus: with Motion Plus the gyro owns the report span, so IR stays off (see
+       SetJoystickSensorsEnabled). Placed after GetMotionPlusState so the flag is
+       current. */
+    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+        !ctx->m_bMotionPlusPresent && ctx->m_bReportSensors && !ctx->m_bIRActive) {
+        EnableIR(ctx);
+        ResetButtonPacketType(ctx);
     }
 
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
@@ -949,6 +967,9 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     // Initialize the joystick capabilities
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_WiiUPro) {
         joystick->nbuttons = 15;
+    } else if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_BalanceBoard) {
+        // The board has no buttons; HandleBalanceBoardData only posts the four axes.
+        joystick->nbuttons = 0;
     } else {
         // Maximum is Classic Controller + Wiimote
         joystick->nbuttons = k_eWiiButtons_Max;
@@ -1012,11 +1033,16 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
             }
         }
 
-        /* On a bare Wii Remote, enabling sensors also powers the IR camera and
-           switches to report 0x33 (core + accel + IR). The camera stays off until
-           the app opts in this way, so default behavior is unchanged. An extension
-           occupies the report span IR would use, so IR is bare-remote only. */
-        if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None) {
+        /* On a bare Wii Remote with no Motion Plus, enabling sensors also powers the
+           IR camera and switches to report 0x33 (core + accel + IR). The camera
+           stays off until the app opts in this way, so default behavior is
+           unchanged. IR is bare-remote only because an extension occupies the report
+           span IR would use. Motion Plus takes precedence over IR for the same
+           reason: its gyro data also rides the extension span, and report 0x33 has
+           none, so enabling IR alongside an active Motion Plus would silently drop
+           the gyro. When Motion Plus is present the gyro wins and IR is left off. */
+        if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+            !ctx->m_bMotionPlusPresent) {
             if (enabled) {
                 EnableIR(ctx);
             } else {
