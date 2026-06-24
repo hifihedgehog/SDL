@@ -44,6 +44,7 @@
 #define WII_EXTENSION_NUNCHUK         0x0000
 #define WII_EXTENSION_GAMEPAD         0x0101
 #define WII_EXTENSION_WIIUPRO         0x0120
+#define WII_EXTENSION_BALANCEBOARD    0x0402
 #define WII_EXTENSION_MOTIONPLUS_MASK 0xF0FF
 #define WII_EXTENSION_MOTIONPLUS_ID   0x0005
 
@@ -51,6 +52,19 @@
 #define WII_MOTIONPLUS_MODE_STANDARD 0x04
 #define WII_MOTIONPLUS_MODE_NUNCHUK  0x05
 #define WII_MOTIONPLUS_MODE_GAMEPAD  0x07
+
+/* IR camera registers (WiimoteLib-Trihy Wiimote.cs:57-60). The 0x04 register-space
+   selector is carried in output-report byte1, so the low 24 bits are passed to
+   WriteRegister. */
+#define WII_IR_REGISTER_CONTROL      0xB00030 // 0x04b00030
+#define WII_IR_REGISTER_SENSITIVITY1 0xB00000 // 0x04b00000
+#define WII_IR_REGISTER_SENSITIVITY2 0xB0001A // 0x04b0001a
+#define WII_IR_REGISTER_MODE         0xB00033 // 0x04b00033
+#define WII_IR_MODE_EXTENDED         0x03     // 4 dots, 3 bytes/dot (12 IR bytes, report 0x33)
+
+/* Balance Board calibration register (WiimoteLib-Trihy Wiimote.cs:65, 0x04a40020).
+   The Kg0/Kg17/Kg34 rows start 4 bytes in, at 0x04a40024. */
+#define WII_BALANCE_CALIBRATION_ADDR 0xA40024
 
 typedef enum
 {
@@ -149,6 +163,9 @@ typedef struct
     bool m_bMotionPlusPresent;
     Uint8 m_ucMotionPlusMode;
     bool m_bReportSensors;
+    bool m_bIRActive;                          // IR camera enabled (bare Wii Remote, sensors on)
+    bool m_bBalanceBoardCalibrationValid;
+    Uint8 m_rgucBalanceBoardCalibration[24];   // Kg0/Kg17/Kg34 x 4 corners x int16, big-endian
     Uint8 m_rgucReadBuffer[k_unWiiPacketDataLength];
     Uint64 m_ulLastInput;
     Uint64 m_ulLastStatus;
@@ -362,6 +379,8 @@ static EWiiExtensionControllerType GetExtensionType(Uint16 extension_id)
         return k_eWiiExtensionControllerType_Gamepad;
     case WII_EXTENSION_WIIUPRO:
         return k_eWiiExtensionControllerType_WiiUPro;
+    case WII_EXTENSION_BALANCEBOARD:
+        return k_eWiiExtensionControllerType_BalanceBoard;
     default:
         return k_eWiiExtensionControllerType_Unknown;
     }
@@ -380,6 +399,80 @@ static bool SendExtensionReset(SDL_DriverWii_Context *ctx, bool sync)
         (void)WriteRegister(ctx, 0xA400FB, &data, sizeof(data), sync);
     }
     return result;
+}
+
+/* Enable the IR camera for a bare Wii Remote, transcribed from WiimoteLib-Trihy
+   EnableIR (Wiimote.cs, registers at :57-60). The sequence powers the camera
+   (reports 0x13/0x1a), writes max-sensitivity blocks, and selects Extended mode
+   (4 dots, 3 bytes each). Output-report byte1 must echo the rumble bit, which the
+   driver also drives. Report mode 0x33 is selected afterward via
+   ResetButtonPacketType once m_bIRActive is set. */
+static void EnableIR(SDL_DriverWii_Context *ctx)
+{
+    static const Uint8 sensitivity1[9] = { 0x02, 0x00, 0x00, 0x71, 0x01, 0x00, 0x90, 0x00, 0x41 };
+    static const Uint8 sensitivity2[2] = { 0x40, 0x00 };
+    Uint8 data[2];
+    Uint8 value;
+
+    // 1. IR camera enable (report 0x13), 2. IR logic enable (report 0x1a)
+    data[0] = k_eWiiOutputReportIDs_IRCameraEnable;
+    data[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
+    WriteOutput(ctx, data, sizeof(data), false);
+
+    data[0] = k_eWiiOutputReportIDs_IRCameraEnable2;
+    data[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
+    WriteOutput(ctx, data, sizeof(data), false);
+
+    // 3. control register <- 0x08
+    value = 0x08;
+    WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true);
+
+    // 4. sensitivity blocks
+    WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), true);
+    WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), true);
+
+    // 5. data mode <- Extended, 6. control register <- 0x08 again
+    value = WII_IR_MODE_EXTENDED;
+    WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), true);
+    value = 0x08;
+    WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true);
+
+    ctx->m_bIRActive = true;
+}
+
+static void DisableIR(SDL_DriverWii_Context *ctx)
+{
+    Uint8 data[2];
+
+    data[0] = k_eWiiOutputReportIDs_IRCameraEnable;
+    data[1] = (Uint8)(0x00 | (Uint8)ctx->m_bRumbleActive);
+    WriteOutput(ctx, data, sizeof(data), false);
+
+    data[0] = k_eWiiOutputReportIDs_IRCameraEnable2;
+    data[1] = (Uint8)(0x00 | (Uint8)ctx->m_bRumbleActive);
+    WriteOutput(ctx, data, sizeof(data), false);
+
+    ctx->m_bIRActive = false;
+}
+
+/* Read the 24-byte Balance Board calibration (Kg0/Kg17/Kg34 x 4 corners x int16
+   big-endian) from register 0x04a40024 (WiimoteLib-Trihy Wiimote.cs:65,531-547).
+   ReadRegister waits on one ReadMemory packet of <= 16 bytes, so the 24 bytes are
+   read in two passes (16 + 8). Stored raw; PadForge does its own kg interpolation. */
+static void ReadBalanceBoardCalibration(SDL_DriverWii_Context *ctx)
+{
+    ctx->m_bBalanceBoardCalibrationValid = false;
+
+    if (ReadRegister(ctx, WII_BALANCE_CALIBRATION_ADDR, 16, true) &&
+        ctx->m_rgucReadBuffer[0] == k_eWiiInputReportIDs_ReadMemory) {
+        SDL_memcpy(ctx->m_rgucBalanceBoardCalibration, ctx->m_rgucReadBuffer + 6, 16);
+
+        if (ReadRegister(ctx, WII_BALANCE_CALIBRATION_ADDR + 16, 8, true) &&
+            ctx->m_rgucReadBuffer[0] == k_eWiiInputReportIDs_ReadMemory) {
+            SDL_memcpy(ctx->m_rgucBalanceBoardCalibration + 16, ctx->m_rgucReadBuffer + 6, 8);
+            ctx->m_bBalanceBoardCalibrationValid = true;
+        }
+    }
 }
 
 static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint8 *mode)
@@ -554,6 +647,9 @@ static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
     switch (ctx->m_eExtensionControllerType) {
     case k_eWiiExtensionControllerType_WiiUPro:
         return k_eWiiInputReportIDs_ButtonDataD;
+    case k_eWiiExtensionControllerType_BalanceBoard:
+        // 34 BB BB EE*19: core + the four weight sensors in the extension span.
+        return k_eWiiInputReportIDs_ButtonData4;
     case k_eWiiExtensionControllerType_Nunchuk:
     case k_eWiiExtensionControllerType_Gamepad:
         if (ctx->m_bReportSensors) {
@@ -562,7 +658,10 @@ static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
             return k_eWiiInputReportIDs_ButtonData2;
         }
     default:
-        if (ctx->m_bReportSensors) {
+        if (ctx->m_bIRActive) {
+            // 33 BB BB AA AA AA II*12: core + accel + extended IR (no extension).
+            return k_eWiiInputReportIDs_ButtonData3;
+        } else if (ctx->m_bReportSensors) {
             return k_eWiiInputReportIDs_ButtonData5;
         } else {
             return k_eWiiInputReportIDs_ButtonData0;
@@ -728,6 +827,9 @@ static void UpdateDeviceIdentity(SDL_HIDAPI_Device *device)
     case k_eWiiExtensionControllerType_WiiUPro:
         HIDAPI_SetDeviceName(device, "Nintendo Wii U Pro Controller");
         break;
+    case k_eWiiExtensionControllerType_BalanceBoard:
+        HIDAPI_SetDeviceName(device, "Nintendo Wii Balance Board");
+        break;
     default:
         HIDAPI_SetDeviceName(device, "Nintendo Wii Remote with Unknown Extension");
         break;
@@ -792,6 +894,15 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
 
     InitializeExtension(ctx);
 
+    /* If sensors were left enabled on a bare remote across an extension hot-plug
+       (which clears m_bIRActive), re-power the IR camera and reselect report 0x33
+       so the pointer resumes without the app having to toggle sensors again. */
+    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+        ctx->m_bReportSensors && !ctx->m_bIRActive) {
+        EnableIR(ctx);
+        ResetButtonPacketType(ctx);
+    }
+
     GetMotionPlusState(ctx, &ctx->m_bMotionPlusPresent, &ctx->m_ucMotionPlusMode);
 
     if (NeedsPeriodicMotionPlusCheck(ctx, false)) {
@@ -807,6 +918,23 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
 
         if (ctx->m_bMotionPlusPresent) {
             SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 100.0f);
+        }
+    }
+
+    /* Read the Balance Board's per-unit load-cell calibration and expose it as a
+       hex-string property. The live corner sensors come through as axes; PadForge
+       reads this calibration to convert the raw corners into kilograms itself,
+       which it cannot read directly while SDL owns the device. */
+    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_BalanceBoard) {
+        ReadBalanceBoardCalibration(ctx);
+        if (ctx->m_bBalanceBoardCalibrationValid) {
+            char hex[sizeof(ctx->m_rgucBalanceBoardCalibration) * 2 + 1];
+            int i;
+            for (i = 0; i < (int)sizeof(ctx->m_rgucBalanceBoardCalibration); ++i) {
+                (void)SDL_snprintf(hex + (i * 2), 3, "%02x", ctx->m_rgucBalanceBoardCalibration[i]);
+            }
+            SDL_SetStringProperty(SDL_GetJoystickProperties(joystick),
+                                  "SDL.joystick.wii.balance_board_calibration", hex);
         }
     }
 
@@ -881,6 +1009,18 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
                 ActivateMotionPlus(ctx);
             } else {
                 DeactivateMotionPlus(ctx);
+            }
+        }
+
+        /* On a bare Wii Remote, enabling sensors also powers the IR camera and
+           switches to report 0x33 (core + accel + IR). The camera stays off until
+           the app opts in this way, so default behavior is unchanged. An extension
+           occupies the report span IR would use, so IR is bare-remote only. */
+        if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None) {
+            if (enabled) {
+                EnableIR(ctx);
+            } else {
+                DisableIR(ctx);
             }
         }
 
@@ -1275,8 +1415,55 @@ static void HandleWiiRemoteAccelData(SDL_DriverWii_Context *ctx, SDL_Joystick *j
     SDL_SendJoystickSensor(ctx->timestamp, joystick, SDL_SENSOR_ACCEL, ctx->timestamp, values, 3);
 }
 
+static void HandleIRData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const Uint8 *buff)
+{
+    /* Extended IR (report 0x33): up to 4 dots at buff[6..17], 3 bytes per dot
+       (WiimoteLib-Trihy ParseIR, Wiimote.cs:633-649). Surface the first two dots
+       as raw coordinates (X 0..1023, Y 0..767) on the otherwise-unused stick axes,
+       with -1 meaning "dot not detected". PadForge runs its own homography and
+       cursor mapping on the raw points, so no normalization is done here. */
+    int dot0_x = buff[6] | (((buff[8] >> 4) & 0x03) << 8);
+    int dot0_y = buff[7] | (((buff[8] >> 6) & 0x03) << 8);
+    int dot1_x = buff[9] | (((buff[11] >> 4) & 0x03) << 8);
+    int dot1_y = buff[10] | (((buff[11] >> 6) & 0x03) << 8);
+    bool dot0_found = !(buff[6] == 0xFF && buff[7] == 0xFF && buff[8] == 0xFF);
+    bool dot1_found = !(buff[9] == 0xFF && buff[10] == 0xFF && buff[11] == 0xFF);
+
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTX, dot0_found ? (Sint16)dot0_x : (Sint16)-1);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTY, dot0_found ? (Sint16)dot0_y : (Sint16)-1);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTX, dot1_found ? (Sint16)dot1_x : (Sint16)-1);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTY, dot1_found ? (Sint16)dot1_y : (Sint16)-1);
+}
+
+static void HandleBalanceBoardData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const WiiButtonData *data)
+{
+    Sint16 top_right, bottom_right, top_left, bottom_left;
+
+    if (data->ucNExtensionBytes < 8) {
+        return;
+    }
+    /* Four corner load cells, raw int16 big-endian at the start of the extension
+       span (WiimoteLib-Trihy ParseBalanceBoard, Wiimote.cs:898-902). Surfaced raw
+       on the four stick axes; PadForge derives weight and center-of-gravity with
+       its own kg interpolation from these and the exposed calibration. */
+    top_right    = (Sint16)((data->rgucExtension[0] << 8) | data->rgucExtension[1]);
+    bottom_right = (Sint16)((data->rgucExtension[2] << 8) | data->rgucExtension[3]);
+    top_left     = (Sint16)((data->rgucExtension[4] << 8) | data->rgucExtension[5]);
+    bottom_left  = (Sint16)((data->rgucExtension[6] << 8) | data->rgucExtension[7]);
+
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTX, top_left);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTY, bottom_left);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTX, top_right);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTY, bottom_right);
+}
+
 static void HandleButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, WiiButtonData *data)
 {
+    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_BalanceBoard) {
+        HandleBalanceBoardData(ctx, joystick, data);
+        return;
+    }
+
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_WiiUPro) {
         HandleWiiUProButtonData(ctx, joystick, data);
         return;
@@ -1459,16 +1646,20 @@ static void HandleButtonPacket(SDL_DriverWii_Context *ctx, SDL_Joystick *joystic
         RequestButtonPacketType(ctx, eExpectedReport);
     }
 
-    // IR camera data is not supported
     SDL_zero(data);
     switch (ctx->m_rgucReadBuffer[0]) {
     case k_eWiiInputReportIDs_ButtonData0: // 30 BB BB
         GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
         break;
     case k_eWiiInputReportIDs_ButtonData1: // 31 BB BB AA AA AA
+        GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
+        GetAccelerometer(&data, ctx->m_rgucReadBuffer + 3);
+        break;
     case k_eWiiInputReportIDs_ButtonData3: // 33 BB BB AA AA AA II II II II II II II II II II II II
         GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
         GetAccelerometer(&data, ctx->m_rgucReadBuffer + 3);
+        // The 12 IR bytes at offset 6 are the extended-mode camera dots.
+        HandleIRData(ctx, joystick, ctx->m_rgucReadBuffer);
         break;
     case k_eWiiInputReportIDs_ButtonData2: // 32 BB BB EE EE EE EE EE EE EE EE
         GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
@@ -1595,6 +1786,9 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
         ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
         UpdateDeviceIdentity(device);
         ctx->m_bDisconnected = false;
+        /* The extension churn reset the IR camera, so the active flag is now stale.
+         * Clear it; OpenJoystick re-powers IR on reopen if sensors stay enabled. */
+        ctx->m_bIRActive = false;
         /* Re-seed the idle clock after the blocking identify (see the InitDevice
          * seed for issue #3). ReadExtensionControllerType can block across several
          * read attempts, and the no-input timeout check above is not gated on an
