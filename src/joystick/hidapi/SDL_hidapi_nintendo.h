@@ -46,4 +46,5 @@ typedef enum
     k_eWiiExtensionControllerType_Nunchuk = 129,
     k_eWiiExtensionControllerType_Gamepad = 130,
     k_eWiiExtensionControllerType_WiiUPro = 131,
+    k_eWiiExtensionControllerType_BalanceBoard = 132,
 } EWiiExtensionControllerType;
