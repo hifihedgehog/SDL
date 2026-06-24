@@ -220,6 +220,12 @@ typedef struct BLE_Controller
     Uint32 rumble_seq;
     Uint16 rumble_low, rumble_high;
     Uint64 rumble_last_ms;
+    // The GameCube motor is on/off only, so the pump runs a software PWM over the
+    // command channel (command 0x0A/0x02) to fake variable strength. These are
+    // touched only on the update thread (BLE_PumpGameCubeRumble), never off-thread.
+    Uint8 gc_pwm_phase;
+    bool gc_motor_on;
+    bool gc_motor_known;
     int player_index;
 } BLE_Controller;
 
@@ -900,6 +906,69 @@ static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
 // at bits 0-8, en_lf at 9, lf_amp at 10-19, hf_freq at 20-28, en_hf at 29, hf_amp
 // at 30-39. The BLE reference (virtual_controller.py:29-31) scales amplitude as
 // 800*motor/256 (so ~0..800 of the 10-bit field) and leaves the en_tone bits 0.
+// Fire-and-forget command write (no reply wait). The GameCube rumble PWM toggles
+// faster than a request/response round-trip allows, so it cannot use BLE_SendCommand
+// (which blocks on the response). Same frame layout. Mirrors the gyro reference's
+// write_gatt_char(..., response=False) (switch2-controllers-windows10-gyro
+// controller.py _gc_pwm_loop).
+static bool BLE_WriteCommandNoReply(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len)
+{
+    Uint8 frame[64];
+
+    if (!ctrl->command_char || data_len < 0 || data_len + 8 > (int)sizeof(frame)) {
+        return false;
+    }
+    frame[0] = cmd;
+    frame[1] = 0x91;
+    frame[2] = 0x01; // Bluetooth transport
+    frame[3] = subcmd;
+    frame[4] = 0x00;
+    frame[5] = (Uint8)data_len;
+    frame[6] = 0x00;
+    frame[7] = 0x00;
+    if (data_len > 0) {
+        SDL_memcpy(&frame[8], data, data_len);
+    }
+    return BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, false);
+}
+
+// GameCube motor on/off, via command 0x0A subcommand 0x02. Motor on = data byte
+// 0x01, off = 0x00 (switch2-controllers-windows10-gyro controller.py _gc_pwm_loop:
+// payload 0A 91 01 02 00 04 00 00 [01|00] 00 00 00).
+static void BLE_SetGameCubeMotor(BLE_Controller *ctrl, bool on)
+{
+    Uint8 data[4] = { (Uint8)(on ? 0x01 : 0x00), 0x00, 0x00, 0x00 };
+    BLE_WriteCommandNoReply(ctrl, 0x0A, 0x02, data, sizeof(data));
+}
+
+// The GameCube controller's motor only supports on/off natively, so the gyro
+// reference simulates variable strength with a ~25 Hz software PWM over the command
+// channel (controller.py _gc_pwm_loop: "it only supports ON/OFF natively"). Run the
+// same PWM from the keep-alive pump: each ~10 ms tick is one of 4 slots in a 40 ms
+// period, the motor is on for round(amp * 4) of them. GC amplitude scales lf*0.5,
+// hf*0.1 (controller.py gc_lf_scale / gc_hf_scale). Only writes on a state change,
+// like the reference's last_is_on, so it does not flood the command channel.
+static void BLE_PumpGameCubeRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
+{
+    float amp = SDL_max((float)low * 0.5f, (float)high * 0.1f) / 65535.0f;
+    bool desired;
+
+    if (amp <= 0.02f) {
+        desired = false;
+    } else if (amp >= 0.98f) {
+        desired = true;
+    } else {
+        int on_slots = (int)(amp * 4.0f + 0.5f);
+        desired = ((int)ctrl->gc_pwm_phase < on_slots);
+    }
+    ctrl->gc_pwm_phase = (Uint8)((ctrl->gc_pwm_phase + 1) & 0x03);
+    if (!ctrl->gc_motor_known || desired != ctrl->gc_motor_on) {
+        BLE_SetGameCubeMotor(ctrl, desired);
+        ctrl->gc_motor_on = desired;
+        ctrl->gc_motor_known = true;
+    }
+}
+
 static void BLE_EncodeVibration(Uint16 low, Uint16 high, Uint8 out[5])
 {
     Uint32 lf_amp = (Uint32)((int)low * 800 / 65535) & 0x3FF;
@@ -927,13 +996,15 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
     Uint8 vib[5], zero[5];
     int len;
 
-    if (!ctrl->vibration_char) {
-        return false;
-    }
-    // The NSO GameCube controller uses a different 4-byte packed rumble format
-    // (hid_reports.md:250-255), not the VibrationData motor group. Skip it rather
-    // than send a malformed packet; GC rumble is a separate TODO.
+    // The NSO GameCube controller does not take the VibrationData motor group. Its
+    // motor is on/off only, driven over the command channel with a software PWM for
+    // strength (see BLE_PumpGameCubeRumble), so route it there before the
+    // vibration-characteristic check (which the GC path does not use).
     if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER) {
+        BLE_PumpGameCubeRumble(ctrl, low, high);
+        return true;
+    }
+    if (!ctrl->vibration_char) {
         return false;
     }
     BLE_EncodeVibration(low, high, vib);
@@ -1751,14 +1822,16 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
     // Advertise the rumble capability so apps that gate on it (PadForge's FFB
     // passthrough reads SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN into HasRumble) will
     // drive it, mirroring SDL_hidapijoystick.c:860. The cap must track actual
-    // delivery, so exclude the GameCube: BLE_WriteRumble no-ops it (its 4-byte
-    // format is a TODO), and advertising the cap there reads as "rumble broken"
-    // rather than "not implemented yet". When GC rumble lands, drop the product
-    // clause in the same commit that makes BLE_WriteRumble deliver for it.
-    if (ctrl->vibration_char &&
-        ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER) {
-        SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick),
-                               SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+    // delivery: the GameCube rumbles over the command channel (BLE_PumpGameCubeRumble),
+    // every other type over the vibration characteristic.
+    {
+        bool can_rumble = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER)
+            ? (ctrl->command_char != NULL)
+            : (ctrl->vibration_char != NULL);
+        if (can_rumble) {
+            SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick),
+                                   SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+        }
     }
 
     // Light the player LED for this slot.
@@ -1770,7 +1843,12 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
 static bool BLE_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
-    if (!ctrl || !ctrl->vibration_char) {
+    bool is_gc;
+    if (!ctrl) {
+        return SDL_Unsupported();
+    }
+    is_gc = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER);
+    if (is_gc ? !ctrl->command_char : !ctrl->vibration_char) {
         return SDL_Unsupported();
     }
     // Store the commanded amplitudes for the keep-alive pump (BLE_JoystickUpdate),
@@ -1782,6 +1860,11 @@ static bool BLE_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumb
     ctrl->rumble_high = high_frequency_rumble;
     ctrl->rumble_last_ms = SDL_GetTicks();
     SDL_UnlockMutex(ctrl->report_lock);
+    // The GameCube PWM state is owned by the update thread, so do not write inline
+    // here (a different thread); the pump picks up the stored amplitudes next tick.
+    if (is_gc) {
+        return true;
+    }
     return BLE_WriteRumble(ctrl, low_frequency_rumble, high_frequency_rumble);
 }
 
@@ -1861,8 +1944,11 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
         bool pump = false;
         Uint16 rlow = 0, rhigh = 0;
         Uint64 now = SDL_GetTicks();
+        // The GameCube keeps ticking one extra cycle after the amplitudes hit zero so
+        // the PWM can send the final motor-off; gc_motor_on is update-thread only.
+        bool gc_active = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER) && ctrl->gc_motor_on;
         SDL_LockMutex(ctrl->report_lock);
-        if ((ctrl->rumble_low || ctrl->rumble_high) && (now - ctrl->rumble_last_ms >= BLE_RUMBLE_INTERVAL_MS)) {
+        if ((ctrl->rumble_low || ctrl->rumble_high || gc_active) && (now - ctrl->rumble_last_ms >= BLE_RUMBLE_INTERVAL_MS)) {
             rlow = ctrl->rumble_low;
             rhigh = ctrl->rumble_high;
             ctrl->rumble_last_ms = now;
