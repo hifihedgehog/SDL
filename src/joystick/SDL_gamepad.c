@@ -1165,6 +1165,7 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
                 guid.data[15] == k_eSwitchDeviceInfoControllerType_SEGA_Genesis ||
                 guid.data[15] == k_eWiiExtensionControllerType_None ||
                 guid.data[15] == k_eWiiExtensionControllerType_Nunchuk ||
+                guid.data[15] == k_eWiiExtensionControllerType_BalanceBoard ||
                 guid.data[15] == k_eSwitchDeviceInfoControllerType_JoyConLeft ||
                 guid.data[15] == k_eSwitchDeviceInfoControllerType_JoyConRight)) {
         switch (guid.data[15]) {
@@ -1189,6 +1190,11 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
             break;
         case k_eWiiExtensionControllerType_None:
             SDL_strlcat(mapping_string, "a:b0,b:b1,back:b4,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b5,start:b6,x:b2,y:b3,", sizeof(mapping_string));
+            break;
+        case k_eWiiExtensionControllerType_BalanceBoard:
+            // No buttons; the four corner load cells are surfaced as the stick axes
+            // (leftx=TopLeft, lefty=BottomLeft, rightx=TopRight, righty=BottomRight).
+            SDL_strlcat(mapping_string, "leftx:a0,lefty:a1,rightx:a2,righty:a3,", sizeof(mapping_string));
             break;
         case k_eWiiExtensionControllerType_Nunchuk:
         {
