@@ -35,6 +35,7 @@ typedef struct SDL_LibUSBContext
     ssize_t (LIBUSB_CALL *get_device_list)(libusb_context *ctx, libusb_device ***list);
     void (LIBUSB_CALL *free_device_list)(libusb_device **list, int unref_devices);
     int (LIBUSB_CALL *get_device_descriptor)(libusb_device *dev, struct libusb_device_descriptor *desc);
+    int (LIBUSB_CALL *get_string_descriptor_ascii)(libusb_device_handle *dev_handle, uint8_t desc_index, unsigned char *data, int length);
     int (LIBUSB_CALL *get_active_config_descriptor)(libusb_device *dev,    struct libusb_config_descriptor **config);
     int (LIBUSB_CALL *get_config_descriptor)(
         libusb_device *dev,

@@ -392,20 +392,52 @@ static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
     {
         libusb_device **list = NULL;
         ssize_t count, i;
+        libusb_device_handle *fallback = NULL;
         if (ctx->libusb->init(&ctx->own_ctx) < 0) {
             return SDL_SetError("Couldn't create libusb context");
         }
         count = ctx->libusb->get_device_list(ctx->own_ctx, &list);
         for (i = 0; i < count; ++i) {
             struct libusb_device_descriptor desc;
-            if (ctx->libusb->get_device_descriptor(list[i], &desc) == 0 &&
-                desc.idVendor == USB_VENDOR_NINTENDO &&
-                desc.idProduct == device->product_id) {
-                if (ctx->libusb->open(list[i], &ctx->device_handle) == 0) {
-                    ctx->own_libusb_device = true;
+            libusb_device_handle *handle = NULL;
+            if (ctx->libusb->get_device_descriptor(list[i], &desc) != 0 ||
+                desc.idVendor != USB_VENDOR_NINTENDO ||
+                desc.idProduct != device->product_id) {
+                continue;
+            }
+            if (ctx->libusb->open(list[i], &handle) != 0) {
+                continue;
+            }
+            // Two identical wired controllers share VID+product_id, so opening
+            // the first match would attach both SDL devices to the same physical
+            // unit. The HID backend already recorded this unit's serial in
+            // device->serial (read from the same iSerialNumber string descriptor),
+            // so matching the libusb device's serial pins us to the exact HID
+            // device SDL enumerated.
+            if (device->serial && desc.iSerialNumber) {
+                unsigned char serial[64];
+                int len = ctx->libusb->get_string_descriptor_ascii(handle, desc.iSerialNumber, serial, sizeof(serial));
+                if (len > 0 && SDL_strcmp((const char *)serial, device->serial) == 0) {
+                    ctx->device_handle = handle;
                     break;
                 }
             }
+            // Not our target (or no serial to compare). Keep the first such device
+            // as a fallback for the single-controller path, close any extras.
+            if (!fallback) {
+                fallback = handle;
+            } else {
+                ctx->libusb->close(handle);
+            }
+        }
+        if (!ctx->device_handle && fallback) {
+            ctx->device_handle = fallback;
+            fallback = NULL;
+        } else if (fallback) {
+            ctx->libusb->close(fallback);
+        }
+        if (ctx->device_handle) {
+            ctx->own_libusb_device = true;
         }
         if (count >= 0) {
             ctx->libusb->free_device_list(list, 1);
