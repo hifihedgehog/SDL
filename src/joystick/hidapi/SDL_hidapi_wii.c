@@ -60,7 +60,17 @@
 #define WII_IR_REGISTER_SENSITIVITY1 0xB00000 // 0x04b00000
 #define WII_IR_REGISTER_SENSITIVITY2 0xB0001A // 0x04b0001a
 #define WII_IR_REGISTER_MODE         0xB00033 // 0x04b00033
-#define WII_IR_MODE_EXTENDED         0x03     // 4 dots, 3 bytes/dot (12 IR bytes, report 0x33)
+#define WII_IR_MODE_EXTENDED         0x03     // 4 dots, 3 bytes/dot (12 IR bytes, report 0x33, bare remote)
+#define WII_IR_MODE_BASIC            0x01     // 4 dots in two 5-byte groups (10 IR bytes, report 0x37, + extension)
+
+/* The two IR dots are surfaced on dedicated joystick axes beyond the six standard
+   gamepad axes, so the pointer never collides with an extension's stick axes (0-3)
+   and the consumer reads IR from one stable location on every Wii Remote. */
+#define WII_IR_AXIS_DOT0_X           (SDL_GAMEPAD_AXIS_COUNT + 0)
+#define WII_IR_AXIS_DOT0_Y           (SDL_GAMEPAD_AXIS_COUNT + 1)
+#define WII_IR_AXIS_DOT1_X           (SDL_GAMEPAD_AXIS_COUNT + 2)
+#define WII_IR_AXIS_DOT1_Y           (SDL_GAMEPAD_AXIS_COUNT + 3)
+#define WII_IR_AXIS_COUNT            4
 
 /* Balance Board calibration register (WiimoteLib-Trihy Wiimote.cs:65, 0x04a40020).
    The Kg0/Kg17/Kg34 rows start 4 bytes in, at 0x04a40024. */
@@ -401,12 +411,14 @@ static bool SendExtensionReset(SDL_DriverWii_Context *ctx, bool sync)
     return result;
 }
 
-/* Enable the IR camera for a bare Wii Remote, transcribed from WiimoteLib-Trihy
-   EnableIR (Wiimote.cs, registers at :57-60). The sequence powers the camera
-   (reports 0x13/0x1a), writes max-sensitivity blocks, and selects Extended mode
-   (4 dots, 3 bytes each). Output-report byte1 must echo the rumble bit, which the
-   driver also drives. Report mode 0x33 is selected afterward via
-   ResetButtonPacketType once m_bIRActive is set. */
+/* Enable the IR camera, transcribed from WiimoteLib-Trihy EnableIR (Wiimote.cs,
+   registers at :57-60). The sequence powers the camera (reports 0x13/0x1a), writes
+   max-sensitivity blocks, and selects the data mode. A bare remote uses Extended
+   mode (report 0x33); a remote with an extension uses Basic mode (report 0x37,
+   which carries IR and the extension together, WiimoteLib IRExtensionAccel +
+   EnableIR(Basic), Wiimote.cs:386-390/1034). Output-report byte1 must echo the
+   rumble bit, which the driver also drives. The matching report mode is selected
+   afterward via ResetButtonPacketType once m_bIRActive is set. */
 static void EnableIR(SDL_DriverWii_Context *ctx)
 {
     static const Uint8 sensitivity1[9] = { 0x02, 0x00, 0x00, 0x71, 0x01, 0x00, 0x90, 0x00, 0x41 };
@@ -432,8 +444,8 @@ static void EnableIR(SDL_DriverWii_Context *ctx)
     ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), true) && ok;
     ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), true) && ok;
 
-    // 5. data mode <- Extended, 6. control register <- 0x08 again
-    value = WII_IR_MODE_EXTENDED;
+    // 5. data mode <- Extended (bare) or Basic (with an extension), 6. control <- 0x08
+    value = (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None) ? WII_IR_MODE_EXTENDED : WII_IR_MODE_BASIC;
     ok = WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), true) && ok;
     value = 0x08;
     ok = WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true) && ok;
@@ -657,6 +669,18 @@ static void UpdatePowerLevelWiiU(SDL_Joystick *joystick, Uint8 extensionBatteryB
     SDL_SendJoystickPowerInfo(joystick, state, percent);
 }
 
+/* The IR camera lives on the Wii Remote itself, so it is available whenever the
+   device is a Wii Remote: bare, or with a Nunchuk or Classic Controller. The Wii U
+   Pro Controller and the Balance Board are not remotes and have no camera. (Motion
+   Plus is handled separately: it owns the report span, so IR stays off while it is
+   active even on a remote that otherwise has the camera.) */
+static bool WiiRemoteHasIRCamera(EWiiExtensionControllerType type)
+{
+    return type == k_eWiiExtensionControllerType_None ||
+           type == k_eWiiExtensionControllerType_Nunchuk ||
+           type == k_eWiiExtensionControllerType_Gamepad;
+}
+
 static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
 {
     switch (ctx->m_eExtensionControllerType) {
@@ -667,7 +691,11 @@ static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
         return k_eWiiInputReportIDs_ButtonData4;
     case k_eWiiExtensionControllerType_Nunchuk:
     case k_eWiiExtensionControllerType_Gamepad:
-        if (ctx->m_bReportSensors) {
+        if (ctx->m_bIRActive) {
+            // 37 BB BB AA AA AA II*10 EE*6: core + accel + basic IR + the extension.
+            // The Nunchuk and Classic are 6-byte extensions, so they fit the span.
+            return k_eWiiInputReportIDs_ButtonData7;
+        } else if (ctx->m_bReportSensors) {
             return k_eWiiInputReportIDs_ButtonData5;
         } else {
             return k_eWiiInputReportIDs_ButtonData2;
@@ -915,13 +943,13 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
         SchedulePeriodicMotionPlusCheck(ctx);
     }
 
-    /* If sensors were left enabled on a bare remote across an extension hot-plug
-       that cleared m_bIRActive, re-power the IR camera and reselect report 0x33 so
-       the pointer resumes without the app re-toggling sensors. Gated on no Motion
-       Plus: with Motion Plus the gyro owns the report span, so IR stays off (see
+    /* If sensors were left enabled across an extension hot-plug that cleared
+       m_bIRActive, re-power the IR camera and reselect the IR report so the pointer
+       resumes without the app re-toggling sensors. Gated on no Motion Plus: with
+       Motion Plus the gyro owns the report span, so IR stays off (see
        SetJoystickSensorsEnabled). Placed after GetMotionPlusState so the flag is
        current. */
-    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+    if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
         !ctx->m_bMotionPlusPresent && ctx->m_bReportSensors && !ctx->m_bIRActive) {
         EnableIR(ctx);
         ResetButtonPacketType(ctx);
@@ -974,7 +1002,15 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
         // Maximum is Classic Controller + Wiimote
         joystick->nbuttons = k_eWiiButtons_Max;
     }
-    joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
+    /* Every Wii Remote (bare or with an extension) exposes four extra axes beyond
+       the six gamepad axes for the two IR dots, so the pointer is read from one
+       stable location and never collides with an extension's stick axes. Devices
+       with no camera (Wii U Pro, Balance Board) keep just the gamepad axes. */
+    if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType)) {
+        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT + WII_IR_AXIS_COUNT;
+    } else {
+        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
+    }
 
     ctx->m_ulLastInput = SDL_GetTicks();
 
@@ -1033,15 +1069,14 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
             }
         }
 
-        /* On a bare Wii Remote with no Motion Plus, enabling sensors also powers the
-           IR camera and switches to report 0x33 (core + accel + IR). The camera
-           stays off until the app opts in this way, so default behavior is
-           unchanged. IR is bare-remote only because an extension occupies the report
-           span IR would use. Motion Plus takes precedence over IR for the same
-           reason: its gyro data also rides the extension span, and report 0x33 has
-           none, so enabling IR alongside an active Motion Plus would silently drop
-           the gyro. When Motion Plus is present the gyro wins and IR is left off. */
-        if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+        /* On any Wii Remote (bare, or with a Nunchuk or Classic Controller),
+           enabling sensors also powers the IR camera and switches to the IR report:
+           0x33 (core + accel + IR) bare, or 0x37 (core + accel + IR + the 6-byte
+           extension) with an extension. The camera stays off until the app opts in
+           this way, so default behavior is unchanged. Motion Plus takes precedence:
+           its gyro data rides the extension span and the IR reports do not carry it,
+           so while Motion Plus is active the gyro wins and IR is left off. */
+        if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
             !ctx->m_bMotionPlusPresent) {
             if (enabled) {
                 EnableIR(ctx);
@@ -1441,24 +1476,38 @@ static void HandleWiiRemoteAccelData(SDL_DriverWii_Context *ctx, SDL_Joystick *j
     SDL_SendJoystickSensor(ctx->timestamp, joystick, SDL_SENSOR_ACCEL, ctx->timestamp, values, 3);
 }
 
-static void HandleIRData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const Uint8 *buff)
+static void HandleIRData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const Uint8 *buff, bool basic)
 {
-    /* Extended IR (report 0x33): up to 4 dots at buff[6..17], 3 bytes per dot
-       (WiimoteLib-Trihy ParseIR, Wiimote.cs:633-649). Surface the first two dots
-       as raw coordinates (X 0..1023, Y 0..767) on the otherwise-unused stick axes,
-       with -1 meaning "dot not detected". PadForge runs its own homography and
-       cursor mapping on the raw points, so no normalization is done here. */
+    /* The IR span starts at buff[6]. The first two dots are the two sensor-bar LEDs,
+       all a pointer needs (WiimoteLib-Trihy ParseIR, Wiimote.cs:608-649). Surface
+       their raw coordinates (X 0..1023, Y 0..767) on dedicated joystick axes (beyond
+       the gamepad sticks), with -1 meaning "dot not detected". PadForge runs its own
+       homography and cursor mapping on the raw points, so no normalization is done.
+
+       Extended mode (report 0x33, bare remote) gives each dot its own high-bit byte,
+       so dot1's high bits live in buff[11]. Basic mode (report 0x37, with extension)
+       packs both dots into 5 bytes, so dot1's high bits share buff[8]. */
     int dot0_x = buff[6] | (((buff[8] >> 4) & 0x03) << 8);
     int dot0_y = buff[7] | (((buff[8] >> 6) & 0x03) << 8);
-    int dot1_x = buff[9] | (((buff[11] >> 4) & 0x03) << 8);
-    int dot1_y = buff[10] | (((buff[11] >> 6) & 0x03) << 8);
-    bool dot0_found = !(buff[6] == 0xFF && buff[7] == 0xFF && buff[8] == 0xFF);
-    bool dot1_found = !(buff[9] == 0xFF && buff[10] == 0xFF && buff[11] == 0xFF);
+    int dot1_x, dot1_y;
+    bool dot0_found, dot1_found;
 
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTX, dot0_found ? (Sint16)dot0_x : (Sint16)-1);
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTY, dot0_found ? (Sint16)dot0_y : (Sint16)-1);
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTX, dot1_found ? (Sint16)dot1_x : (Sint16)-1);
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTY, dot1_found ? (Sint16)dot1_y : (Sint16)-1);
+    if (basic) {
+        dot1_x = buff[9] | (((buff[8] >> 0) & 0x03) << 8);
+        dot1_y = buff[10] | (((buff[8] >> 2) & 0x03) << 8);
+        dot0_found = !(buff[6] == 0xFF && buff[7] == 0xFF);
+        dot1_found = !(buff[9] == 0xFF && buff[10] == 0xFF);
+    } else {
+        dot1_x = buff[9] | (((buff[11] >> 4) & 0x03) << 8);
+        dot1_y = buff[10] | (((buff[11] >> 6) & 0x03) << 8);
+        dot0_found = !(buff[6] == 0xFF && buff[7] == 0xFF && buff[8] == 0xFF);
+        dot1_found = !(buff[9] == 0xFF && buff[10] == 0xFF && buff[11] == 0xFF);
+    }
+
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT0_X, dot0_found ? (Sint16)dot0_x : (Sint16)-1);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT0_Y, dot0_found ? (Sint16)dot0_y : (Sint16)-1);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT1_X, dot1_found ? (Sint16)dot1_x : (Sint16)-1);
+    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT1_Y, dot1_found ? (Sint16)dot1_y : (Sint16)-1);
 }
 
 static void HandleBalanceBoardData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const WiiButtonData *data)
@@ -1685,7 +1734,7 @@ static void HandleButtonPacket(SDL_DriverWii_Context *ctx, SDL_Joystick *joystic
         GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
         GetAccelerometer(&data, ctx->m_rgucReadBuffer + 3);
         // The 12 IR bytes at offset 6 are the extended-mode camera dots.
-        HandleIRData(ctx, joystick, ctx->m_rgucReadBuffer);
+        HandleIRData(ctx, joystick, ctx->m_rgucReadBuffer, false);
         break;
     case k_eWiiInputReportIDs_ButtonData2: // 32 BB BB EE EE EE EE EE EE EE EE
         GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
@@ -1706,6 +1755,9 @@ static void HandleButtonPacket(SDL_DriverWii_Context *ctx, SDL_Joystick *joystic
         break;
     case k_eWiiInputReportIDs_ButtonData7: // 37 BB BB AA AA AA II II II II II II II II II II EE EE EE EE EE EE
         GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
+        GetAccelerometer(&data, ctx->m_rgucReadBuffer + 3);
+        // 10 basic-mode IR bytes at offset 6, then the 6-byte extension at offset 16.
+        HandleIRData(ctx, joystick, ctx->m_rgucReadBuffer, true);
         GetExtensionData(&data, ctx->m_rgucReadBuffer + 16, 6);
         break;
     case k_eWiiInputReportIDs_ButtonDataD: // 3d EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
