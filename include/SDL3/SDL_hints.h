@@ -2134,6 +2134,25 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2 "SDL_JOYSTICK_BLE_SWITCH2"
 
 /**
+ * A variable controlling whether the right Joy-Con's NIR camera is powered
+ * when app sensors are enabled, exposing its average-intensity scalar as an
+ * extra joystick axis for cover/proximity detection.
+ *
+ * This is a PadForge fork addition. Enabling the camera boots the Joy-Con's
+ * NFC/IR MCU, which costs battery, so it is opt-in.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": IR camera is not used. (default)
+ * - "1": IR camera powers up when sensors are enabled on a right Joy-Con.
+ *
+ * This hint should be set before sensors are enabled on the controller.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR "SDL_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR"
+
+/**
  * A variable controlling whether Nintendo Switch Joy-Con controllers will be
  * in vertical mode when using the HIDAPI driver.
  *

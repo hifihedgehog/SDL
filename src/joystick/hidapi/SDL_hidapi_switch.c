@@ -99,6 +99,7 @@ typedef enum
 {
     k_eSwitchOutputReportIDs_RumbleAndSubcommand = 0x01,
     k_eSwitchOutputReportIDs_Rumble = 0x10,
+    k_eSwitchOutputReportIDs_McuData = 0x11,
     k_eSwitchOutputReportIDs_Proprietary = 0x80,
 } ESwitchOutputReportIDs;
 
@@ -109,6 +110,8 @@ typedef enum
     k_eSwitchSubcommandIDs_SetInputReportMode = 0x03,
     k_eSwitchSubcommandIDs_SetHCIState = 0x06,
     k_eSwitchSubcommandIDs_SPIFlashRead = 0x10,
+    k_eSwitchSubcommandIDs_SetMCUConfig = 0x21,
+    k_eSwitchSubcommandIDs_SetMCUState = 0x22,
     k_eSwitchSubcommandIDs_SetPlayerLights = 0x30,
     k_eSwitchSubcommandIDs_SetHomeLight = 0x38,
     k_eSwitchSubcommandIDs_EnableIMU = 0x40,
@@ -322,6 +325,7 @@ typedef struct
     Uint32 m_unRumblePending;
     bool m_bSensorsSupported;
     bool m_bReportSensors;
+    bool m_bIRSensorActive; // right Joy-Con NIR camera streaming (input report 0x31)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -750,6 +754,334 @@ static bool SetInputMode(SDL_DriverSwitch_Context *ctx, Uint8 input_mode)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Right Joy-Con NIR camera: cover/proximity scalar (PadForge fork addition).
+ *
+ * The camera is behind the NFC/IR MCU. The enable sequence, register values,
+ * packet framing, and CRC are transcribed from jc_toolkit (MIT), the proven
+ * implementation: jctool.cpp ir_sensor() (:1672-2099), get_raw_ir_image()
+ * (:1395-1502), mcu_crc8_calc() (:43-50), and the CRC-8-CCITT table from
+ * ir_sensor.h (:4-21). dekuNukem's bluetooth_hid_subcommands_notes.md (:83)
+ * documents that the 0x31 input report carries all-zero IR data unless an
+ * 0x11 output report with subcmd 0x03 is sent first, so the poll/ACK writes
+ * are mandatory, not optional.
+ *
+ * No image is assembled. The MCU computes an average-intensity statistic into
+ * every IR fragment header (0x31 report byte 53, 0-255, jctool.cpp:1495-1499),
+ * and that scalar is the whole feature: a covered NIR window floods bright,
+ * an uncovered one reads dark. The fragment headers live at bytes 49-58, so
+ * the driver's 64-byte read buffer keeps them even though the full 361-byte
+ * report is truncated by the HID read (hid.c return_data copies
+ * min(length, report)).
+ * ------------------------------------------------------------------------- */
+
+// crc-8-ccitt / polynomial 0x07 look-up table (jc_toolkit ir_sensor.h:4-21)
+static const Uint8 k_rgucMCUCrc8Table[256] = {
+    0x00, 0x07, 0x0E, 0x09, 0x1C, 0x1B, 0x12, 0x15, 0x38, 0x3F, 0x36, 0x31, 0x24, 0x23, 0x2A, 0x2D,
+    0x70, 0x77, 0x7E, 0x79, 0x6C, 0x6B, 0x62, 0x65, 0x48, 0x4F, 0x46, 0x41, 0x54, 0x53, 0x5A, 0x5D,
+    0xE0, 0xE7, 0xEE, 0xE9, 0xFC, 0xFB, 0xF2, 0xF5, 0xD8, 0xDF, 0xD6, 0xD1, 0xC4, 0xC3, 0xCA, 0xCD,
+    0x90, 0x97, 0x9E, 0x99, 0x8C, 0x8B, 0x82, 0x85, 0xA8, 0xAF, 0xA6, 0xA1, 0xB4, 0xB3, 0xBA, 0xBD,
+    0xC7, 0xC0, 0xC9, 0xCE, 0xDB, 0xDC, 0xD5, 0xD2, 0xFF, 0xF8, 0xF1, 0xF6, 0xE3, 0xE4, 0xED, 0xEA,
+    0xB7, 0xB0, 0xB9, 0xBE, 0xAB, 0xAC, 0xA5, 0xA2, 0x8F, 0x88, 0x81, 0x86, 0x93, 0x94, 0x9D, 0x9A,
+    0x27, 0x20, 0x29, 0x2E, 0x3B, 0x3C, 0x35, 0x32, 0x1F, 0x18, 0x11, 0x16, 0x03, 0x04, 0x0D, 0x0A,
+    0x57, 0x50, 0x59, 0x5E, 0x4B, 0x4C, 0x45, 0x42, 0x6F, 0x68, 0x61, 0x66, 0x73, 0x74, 0x7D, 0x7A,
+    0x89, 0x8E, 0x87, 0x80, 0x95, 0x92, 0x9B, 0x9C, 0xB1, 0xB6, 0xBF, 0xB8, 0xAD, 0xAA, 0xA3, 0xA4,
+    0xF9, 0xFE, 0xF7, 0xF0, 0xE5, 0xE2, 0xEB, 0xEC, 0xC1, 0xC6, 0xCF, 0xC8, 0xDD, 0xDA, 0xD3, 0xD4,
+    0x69, 0x6E, 0x67, 0x60, 0x75, 0x72, 0x7B, 0x7C, 0x51, 0x56, 0x5F, 0x58, 0x4D, 0x4A, 0x43, 0x44,
+    0x19, 0x1E, 0x17, 0x10, 0x05, 0x02, 0x0B, 0x0C, 0x21, 0x26, 0x2F, 0x28, 0x3D, 0x3A, 0x33, 0x34,
+    0x4E, 0x49, 0x40, 0x47, 0x52, 0x55, 0x5C, 0x5B, 0x76, 0x71, 0x78, 0x7F, 0x6A, 0x6D, 0x64, 0x63,
+    0x3E, 0x39, 0x30, 0x37, 0x22, 0x25, 0x2C, 0x2B, 0x06, 0x01, 0x08, 0x0F, 0x1A, 0x1D, 0x14, 0x13,
+    0xAE, 0xA9, 0xA0, 0xA7, 0xB2, 0xB5, 0xBC, 0xBB, 0x96, 0x91, 0x98, 0x9F, 0x8A, 0x8D, 0x84, 0x83,
+    0xDE, 0xD9, 0xD0, 0xD7, 0xC2, 0xC5, 0xCC, 0xCB, 0xE6, 0xE1, 0xE8, 0xEF, 0xFA, 0xFD, 0xF4, 0xF3
+};
+
+// jc_toolkit mcu_crc8_calc (jctool.cpp:43-50)
+static Uint8 MCUCrc8(const Uint8 *pBuf, int nLen)
+{
+    Uint8 crc8 = 0;
+    int i;
+
+    for (i = 0; i < nLen; ++i) {
+        crc8 = k_rgucMCUCrc8Table[(Uint8)(crc8 ^ pBuf[i])];
+    }
+    return crc8;
+}
+
+/* Send an 0x11 output report (MCU data request). Framing from jc_toolkit:
+ * byte 0 = 0x11, byte 1 = packet number, bytes 2-9 = current rumble data (the
+ * same common header ConstructSubcommand builds), byte 10 = MCU subcommand.
+ * For subcmd 0x03 (IR data poll / fragment ACK) byte 14 carries the fragment
+ * number being ACKed, byte 47 = crc8 over bytes 11-46, byte 48 = 0xFF
+ * (get_raw_ir_image, jctool.cpp:1425-1433). For subcmd 0x01 (MCU status poll)
+ * no CRC is set (ir_sensor step 2, jctool.cpp:1738-1749). */
+static bool WriteMcuDataRequest(SDL_DriverSwitch_Context *ctx, Uint8 ucMcuSubcommand, Uint8 ucArg1, Uint8 ucFragAck)
+{
+    Uint8 rgucPacket[k_unSwitchOutputPacketDataLength];
+
+    SDL_zeroa(rgucPacket);
+    rgucPacket[0] = k_eSwitchOutputReportIDs_McuData;
+    rgucPacket[1] = ctx->m_nCommandNumber;
+    SDL_memcpy(&rgucPacket[2], ctx->m_RumblePacket.rumbleData, sizeof(ctx->m_RumblePacket.rumbleData));
+    rgucPacket[10] = ucMcuSubcommand;
+    ctx->m_nCommandNumber = (ctx->m_nCommandNumber + 1) & 0xF;
+
+    if (ucMcuSubcommand == 0x03) {
+        rgucPacket[11] = ucArg1;
+        rgucPacket[14] = ucFragAck;
+        rgucPacket[47] = MCUCrc8(&rgucPacket[11], 36);
+        rgucPacket[48] = 0xFF;
+    }
+    return WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
+}
+
+/* Write subcommand 0x21 (set MCU config) with the 38-byte MCU payload:
+ * payload[0] = mcu_cmd, payload[1] = mcu_subcmd, ..., payload[37] = crc8 over
+ * payload[1..36] (jc_toolkit: buf[48] = mcu_crc8_calc(buf + 12, 36), where
+ * buf[11] is mcu_cmd and buf[12] is mcu_subcmd, jctool.cpp:1388). The reply
+ * payload (raw report bytes 15+) comes back as rgucSubcommandData.
+ *
+ * bNudgeIRStatus replicates jc_toolkit's step 7, which sends an 0x11/0x03
+ * arg-0x02 IR status request between the register write and the ack read
+ * (jctool.cpp:1954-1965); without the interleave the ack can arrive in its
+ * alternate 0x23 form, which the callers also accept. */
+static SwitchSubcommandInputPacket_t *WriteMCUConfig(SDL_DriverSwitch_Context *ctx, Uint8 *rgucPayload38, bool bNudgeIRStatus)
+{
+    SwitchSubcommandInputPacket_t *reply = NULL;
+    int nTries;
+
+    rgucPayload38[37] = MCUCrc8(&rgucPayload38[1], 36);
+    for (nTries = 1; !reply && nTries <= ctx->m_nMaxWriteAttempts; ++nTries) {
+        SwitchSubcommandOutputPacket_t commandPacket;
+        ConstructSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload38, 38, &commandPacket);
+
+        if (!WritePacket(ctx, &commandPacket, sizeof(commandPacket))) {
+            continue;
+        }
+        if (bNudgeIRStatus) {
+            WriteMcuDataRequest(ctx, 0x03, 0x02, 0x00);
+        }
+        reply = ReadSubcommandReply(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload38, 38);
+    }
+    return reply;
+}
+
+/* Poll the MCU status (0x11 output, subcmd 0x01) until a 0x31 input report
+ * carries MCU state report byte 49 == 0x01 with the state byte 56 equal to
+ * the expected mode (1 = Standby, 5 = IR; ir_sensor steps 2 and 4,
+ * jctool.cpp:1738-1766/1810-1838). */
+static bool PollMCUStatus(SDL_DriverSwitch_Context *ctx, Uint8 ucExpectedState)
+{
+    int nAttempt, nRead;
+
+    for (nAttempt = 0; nAttempt < 10; ++nAttempt) {
+        Uint64 endTicks;
+
+        if (!WriteMcuDataRequest(ctx, 0x01, 0, 0)) {
+            continue;
+        }
+        endTicks = SDL_GetTicks() + 100;
+        do {
+            nRead = ReadInput(ctx);
+            if (nRead > 56 &&
+                ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState &&
+                ctx->m_rgucReadBuffer[49] == 0x01 &&
+                ctx->m_rgucReadBuffer[56] == ucExpectedState) {
+                return true;
+            }
+            if (nRead <= 0) {
+                SDL_Delay(4);
+            }
+        } while (SDL_GetTicks() < endTicks);
+    }
+    return false;
+}
+
+/* Power the MCU back down (subcmd 0x22 arg 0x00, ir_sensor step 10,
+ * jctool.cpp:2064-2075), so the camera does not drain the battery or leave
+ * the Joy-Con stuck in IR mode. The caller restores the input mode. Safe to
+ * send even if the MCU never resumed, so the failed-enable paths also use it
+ * as a best-effort power-down (jc_toolkit likewise jumps to its disable step
+ * on every enable failure). */
+static void DisableIRSensor(SDL_DriverSwitch_Context *ctx)
+{
+    Uint8 ucState = 0x00;
+
+    WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucState, sizeof(ucState), NULL);
+    ctx->m_bIRSensorActive = false;
+}
+
+/* Boot the NFC/IR MCU into IR image-transfer mode and start the stream.
+ * Transcribed step-for-step from jc_toolkit ir_sensor() (jctool.cpp:1672-2099):
+ * input mode 0x31, resume MCU, poll standby, MCU mode IR, poll IR, IR mode 7
+ * (image transfer) at 30x40 with 4 fragments, the two register-write blocks,
+ * and the initial 0x11/0x03 poll that starts the stream. 30x40 (res register
+ * 0x69, ir_max_frag_no 0x03) is the lowest-bandwidth preset (FormJoy.h:
+ * 6127-6131), all this scalar needs. Every failure after the MCU resume powers
+ * the MCU back down, matching jc_toolkit's goto-step10 rollback. */
+static bool EnableIRSensor(SDL_DriverSwitch_Context *ctx)
+{
+    SwitchSubcommandInputPacket_t *reply = NULL;
+
+    // Step 0: input report mode 0x31 (NFC/IR)
+    if (!SetInputMode(ctx, k_eSwitchInputReportIDs_FullControllerAndMcuState)) {
+        return false;
+    }
+
+    // Step 1: resume the MCU (subcmd 0x22 arg 0x01, jctool.cpp:1706-1734)
+    {
+        Uint8 ucState = 0x01;
+        if (!WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucState, sizeof(ucState), NULL)) {
+            return false;
+        }
+    }
+
+    // Step 2: poll until the MCU reports Standby (state 0x01)
+    if (!PollMCUStatus(ctx, 0x01)) {
+        goto failed;
+    }
+
+    // Step 3: set MCU mode IR (mcu_cmd 0x21, mcu_subcmd 0x00, mode 0x05,
+    // jctool.cpp:1770-1806). The ack reports the pre-switch Standby state
+    // (raw bytes 15 and 22-25: 0x01 and u32 0x01).
+    {
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        rgucPayload[0] = 0x21; // Set MCU mode cmd
+        rgucPayload[1] = 0x00;
+        rgucPayload[2] = 0x05; // MCU mode 5: IR
+        reply = WriteMCUConfig(ctx, rgucPayload, false);
+        if (!reply ||
+            reply->rgucSubcommandData[0] != 0x01 ||
+            reply->rgucSubcommandData[7] != 0x01 ||
+            reply->rgucSubcommandData[8] != 0x00 ||
+            reply->rgucSubcommandData[9] != 0x00 ||
+            reply->rgucSubcommandData[10] != 0x00) {
+            goto failed;
+        }
+    }
+
+    // Step 4: poll until the MCU reports IR mode (state 0x05)
+    if (!PollMCUStatus(ctx, 0x05)) {
+        goto failed;
+    }
+
+    // Step 5: IR mode 7 (image transfer), 30x40 = frag numbers 0-3, require
+    // IR MCU FW 5.18 (jctool.cpp:1841-1882). Ack byte is 0x0b.
+    {
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        rgucPayload[0] = 0x23; // MCU write cmd
+        rgucPayload[1] = 0x01; // Set IR mode subcmd
+        rgucPayload[2] = 0x07; // IR mode 7: image transfer
+        rgucPayload[3] = 0x03; // fragments per blob: 0-3 (30x40)
+        rgucPayload[4] = 0x00; // required major FW 0x0005 (u16 LE 0x0500)
+        rgucPayload[5] = 0x05;
+        rgucPayload[6] = 0x00; // required minor FW 0x0018 (u16 LE 0x1800)
+        rgucPayload[7] = 0x18;
+        reply = WriteMCUConfig(ctx, rgucPayload, false);
+        if (!reply || reply->rgucSubcommandData[0] != 0x0b) {
+            goto failed;
+        }
+    }
+
+    // Step 7: first register block, 9 registers (jctool.cpp:1925-1951):
+    // resolution 0x002e = 0x69 (30x40), exposure 0x0130/0x0131 = 300us
+    // (31200 * 300 / 1000 = 0x2490), manual exposure 0x0132 = 0, both LED
+    // groups 0x0010 = 0, digital gain 0x012e/0x012f = 1, external light
+    // filter 0x00e0 = 0x03, white-pixel threshold 0x0143 = 0xc8.
+    {
+        static const Uint8 rgucRegisters1[] = {
+            0x23, 0x04, 0x09,
+            0x00, 0x2e, 0x69,
+            0x01, 0x30, 0x90,
+            0x01, 0x31, 0x24,
+            0x01, 0x32, 0x00,
+            0x00, 0x10, 0x00,
+            0x01, 0x2e, 0x10,
+            0x01, 0x2f, 0x00,
+            0x00, 0x0e, 0x03,
+            0x01, 0x43, 0xc8
+        };
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        SDL_memcpy(rgucPayload, rgucRegisters1, sizeof(rgucRegisters1));
+        // The nudge and the "registers for mode 7 set" ack (raw byte 15 = 0x13,
+        // u16 at 16 = 0x0700) follow jctool.cpp:1954-1978.
+        reply = WriteMCUConfig(ctx, rgucPayload, true);
+        if (!reply ||
+            reply->rgucSubcommandData[0] != 0x13 ||
+            reply->rgucSubcommandData[1] != 0x00 ||
+            reply->rgucSubcommandData[2] != 0x07) {
+            goto failed;
+        }
+    }
+
+    // Step 8: second register block, 8 registers (jctool.cpp:1986-2024):
+    // LED 1/2 intensity 0x0011 = 0x0f (max), LED 3/4 intensity 0x0012 = 0x10
+    // (max), no flip 0x002d = 0, denoise on 0x0167 = 1 with edge 0x0168 = 0x23
+    // and color 0x0169 = 0x44 defaults, buffer update time 0x0004 = 0x2d (the
+    // 30x40 value), finalize 0x0007 = 0x01 (without it nothing takes effect).
+    {
+        static const Uint8 rgucRegisters2[] = {
+            0x23, 0x04, 0x08,
+            0x00, 0x11, 0x0f,
+            0x00, 0x12, 0x10,
+            0x00, 0x2d, 0x00,
+            0x01, 0x67, 0x01,
+            0x01, 0x68, 0x23,
+            0x01, 0x69, 0x44,
+            0x00, 0x04, 0x2d,
+            0x00, 0x07, 0x01
+        };
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        SDL_memcpy(rgucPayload, rgucRegisters2, sizeof(rgucRegisters2));
+        // Without a second nudge the ack can arrive as mcu-config-write 0x23
+        // instead of 0x13/0x0700; both are accepted (jctool.cpp:2029-2038).
+        reply = WriteMCUConfig(ctx, rgucPayload, false);
+        if (!reply ||
+            !((reply->rgucSubcommandData[0] == 0x13 &&
+               reply->rgucSubcommandData[1] == 0x00 &&
+               reply->rgucSubcommandData[2] == 0x07) ||
+              reply->rgucSubcommandData[0] == 0x23)) {
+            goto failed;
+        }
+    }
+
+    // Step 9: start the stream. The 0x31 report carries all-zero IR data until
+    // an 0x11 output with subcmd 0x03 is sent (dekuNukem notes:83; jc_toolkit's
+    // "first ack", jctool.cpp:1425-1433). Fragment ACKs continue in UpdateDevice.
+    if (!WriteMcuDataRequest(ctx, 0x03, 0x00, 0x00)) {
+        goto failed;
+    }
+
+    ctx->m_bIRSensorActive = true;
+    return true;
+
+failed:
+    // The MCU was resumed but the camera never fully configured; power it back
+    // down so a half-enabled sensor cannot drain the battery.
+    DisableIRSensor(ctx);
+    return false;
+}
+
+/* One 0x31 IR image-data fragment: byte 49 == 0x03 identifies IR image data,
+ * byte 52 is the fragment number, byte 53 is the MCU-computed average
+ * intensity, 0-255 (get_raw_ir_image, jctool.cpp:1440-1443/1495-1499). The
+ * scalar is posted normalized to the dedicated axis, and the fragment is
+ * ACKed (0x11/0x03 with byte 14 = fragment number) so the MCU keeps
+ * streaming, exactly as jc_toolkit ACKs every fragment. Repeats are ACKed
+ * the same way (jctool.cpp:1516-1528), so a dropped ACK self-heals. */
+static void HandleMcuIRReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick)
+{
+    Uint64 timestamp = SDL_GetTicksNS();
+    Sint16 sValue = (Sint16)((ctx->m_rgucReadBuffer[53] * 32767) / 255);
+
+    SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
+
+    WriteMcuDataRequest(ctx, 0x03, 0x00, ctx->m_rgucReadBuffer[52]);
+}
+
 static bool SetHomeLED(SDL_DriverSwitch_Context *ctx, Uint8 brightness)
 {
     Uint8 ucLedIntensity = 0;
@@ -888,7 +1220,11 @@ static void UpdateInputMode(SDL_DriverSwitch_Context *ctx)
 {
     Uint8 input_mode;
 
-    if (ctx->m_bReportSensors) {
+    if (ctx->m_bIRSensorActive) {
+        // The NIR camera streams over the NFC/IR report, which also carries
+        // the full controller state, so buttons/sticks/IMU keep flowing.
+        input_mode = k_eSwitchInputReportIDs_FullControllerAndMcuState;
+    } else if (ctx->m_bReportSensors) {
         input_mode = GetSensorInputMode(ctx);
     } else {
         input_mode = GetDefaultInputMode(ctx);
@@ -1716,7 +2052,15 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     } else {
         joystick->nbuttons = SDL_GAMEPAD_NUM_SWITCH_BUTTONS;
     }
-    joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
+    /* A standalone right Joy-Con exposes one extra axis beyond the gamepad
+       axes for the NIR camera's average-intensity scalar (0 until the camera
+       is enabled via SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR + sensors). */
+    if (ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight &&
+        !device->parent) {
+        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT + 1;
+    } else {
+        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
+    }
     joystick->nhats = 1;
 
     // Set up for input
@@ -1935,6 +2279,23 @@ static bool HIDAPI_DriverSwitch_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *dev
     ctx->m_bReportSensors = enabled;
     ctx->m_unIMUSamples = 0;
     ctx->m_ulIMUSampleTimestampNS = SDL_GetTicksNS();
+
+    /* Opt-in NIR camera on a standalone right Joy-Con: powering the MCU costs
+       battery, so enable rides the sensors toggle only when the app set the
+       hint. Combined pairs are excluded because their shared joystick has no
+       IR axis to deliver to. Enable runs before UpdateInputMode so the
+       IR-active state selects report 0x31, and a failed enable leaves
+       m_bIRSensorActive false with the input mode falling back to the ordinary
+       sensor mode. Disable keys on the active flag alone, not the hint, so
+       clearing the hint mid-session cannot strand a powered camera. */
+    if (enabled && !ctx->m_bIRSensorActive &&
+        ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight &&
+        !device->parent &&
+        SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR, false)) {
+        EnableIRSensor(ctx);
+    } else if (!enabled && ctx->m_bIRSensorActive) {
+        DisableIRSensor(ctx);
+    }
 
     UpdateInputMode(ctx);
     SetIMUEnabled(ctx, enabled);
@@ -2834,6 +3195,16 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
                 UpdateEnhancedModeOnEnhancedReport(ctx);
 
                 HandleFullControllerState(joystick, ctx, (SwitchStatePacket_t *)&ctx->m_rgucReadBuffer[1]);
+
+                /* The NFC/IR report's MCU tail: byte 49 = 0x03 marks an IR
+                   image-data fragment (jctool.cpp:1440). The stats header ends
+                   by byte 58, within the 64-byte read buffer even though the
+                   full 361-byte report is truncated. */
+                if (ctx->m_bIRSensorActive && size >= 54 &&
+                    ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState &&
+                    ctx->m_rgucReadBuffer[49] == 0x03) {
+                    HandleMcuIRReport(ctx, joystick);
+                }
                 break;
             default:
                 break;
@@ -2894,6 +3265,17 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
 
     if (!ctx->m_bInputOnly) {
+        // Power the NFC/IR MCU back down so the camera does not drain the battery
+        if (ctx->m_bIRSensorActive) {
+            DisableIRSensor(ctx);
+            /* If the controller started in full mode, the simple-mode restore
+               below will not run, so restore full mode here rather than leave
+               the controller parked on the NFC/IR report. */
+            if (ctx->m_nInitialInputMode == k_eSwitchInputReportIDs_FullControllerState) {
+                SetInputMode(ctx, k_eSwitchInputReportIDs_FullControllerState);
+            }
+        }
+
         // Restore simple input mode for other applications
         if (!ctx->m_nInitialInputMode ||
             ctx->m_nInitialInputMode == k_eSwitchInputReportIDs_SimpleControllerState) {
