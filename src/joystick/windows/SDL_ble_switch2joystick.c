@@ -1935,6 +1935,19 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
     ctrl = ble.controllers[device_index];
     ctrl->joystick = joystick;
 
+    /* Stable identity across reconnects (SDL#9 follow-up): expose the pad's
+       Bluetooth address as the joystick serial, twelve bare lowercase hex
+       digits, the same shape hidapi reports for Bluetooth pads. Without it
+       every consumer identity falls back to the SDL instance ID, which mints
+       a new identity on every power-cycle and orphans per-device settings.
+       Core owns and frees the string (SDL_joystick.c:2254), matching the
+       hidapi open's SDL_strdup assignment (SDL_hidapijoystick.c:1587). */
+    {
+        char serial[13];
+        (void)SDL_snprintf(serial, sizeof(serial), "%012llx", (unsigned long long)ctrl->bluetooth_address);
+        joystick->serial = SDL_strdup(serial);
+    }
+
     switch (ctrl->product_id) {
     case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
     case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
