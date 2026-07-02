@@ -102,6 +102,9 @@ DEFINE_GUID(IID_BleConnParamStatics, 0x0e3e8edc, 0x2751, 0x55aa, 0xa8, 0x38, 0x8
 DEFINE_GUID(IID_GattService3,     0xb293a950, 0x0c53, 0x437c, 0xa9, 0xb3, 0x5c, 0x32, 0x10, 0xc6, 0xe5, 0x69);
 DEFINE_GUID(IID_GattChar,         0x59cb50c1, 0x5934, 0x4f68, 0xa1, 0x98, 0xeb, 0x86, 0x4f, 0xa4, 0x4e, 0x6b);
 DEFINE_GUID(IID_GattValueHandler, 0xc1f420f6, 0x6292, 0x5760, 0xa2, 0xc9, 0x9d, 0xdf, 0x98, 0x68, 0x3c, 0xfc);
+// ITypedEventHandler<BluetoothLEDevice*, IInspectable*> (ConnectionStatusChanged),
+// declspec(uuid) on the specialization, windows.devices.bluetooth.h:1597.
+DEFINE_GUID(IID_BleStatusHandler, 0xa90661e2, 0x372e, 0x5d1e, 0xbb, 0xbb, 0xb8, 0xa2, 0xce, 0x0e, 0x7c, 0x4d);
 DEFINE_GUID(IID_GattValueArgs,    0xd21bdb54, 0x06e3, 0x4ed8, 0xa2, 0x63, 0xac, 0xfa, 0xc8, 0xba, 0x73, 0x13);
 DEFINE_GUID(IID_DataWriter,       0x64b89265, 0xd341, 0x4922, 0xb3, 0x8a, 0xdd, 0x4a, 0xf8, 0x80, 0x8c, 0x4e);
 DEFINE_GUID(IID_IBufferByteAccess, 0x905a0fef, 0xbc53, 0x11df, 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda);
@@ -188,6 +191,9 @@ typedef struct BLE_Controller
     EventRegistrationToken response_token;
     void *input_handler;    // heap delegate, freed in BLE_FreeController
     void *response_handler; // heap delegate, freed in BLE_FreeController
+    EventRegistrationToken status_token;
+    void *status_handler;   // ConnectionStatusChanged delegate, leaked like the others
+    SDL_AtomicInt link_lost; // set by the status callback (MTA), drained by Detect
 
     SDL_Joystick *joystick; // set in Open, NULL otherwise
 
@@ -755,6 +761,47 @@ static const struct
     void *Release;
     void *Invoke;
 } g_input_vtbl = { (void *)InputHandler_QueryInterface, (void *)InputHandler_AddRef, (void *)InputHandler_Release, (void *)InputHandler_Invoke };
+
+// ---------------------------------------------------------------------------
+// BluetoothLEDevice.ConnectionStatusChanged: link-loss detection (SDL#9
+// follow-up). Fires on a WinRT thread-pool (MTA) thread when the link drops:
+// pad powered off (the SendEffect shutdown), battery died, or out of range.
+// Per the SDL#5 callback-pool rule, no work happens here: set the flag and
+// return. BLE_JoystickDetect drains it on the joystick thread and runs the
+// actual teardown there.
+// ---------------------------------------------------------------------------
+static HRESULT STDMETHODCALLTYPE StatusHandler_QueryInterface(void *This, REFIID riid, void **ppv)
+{
+    if (!ppv) {
+        return E_INVALIDARG;
+    }
+    if (WIN_IsEqualIID(riid, &IID_IUnknown) || WIN_IsEqualIID(riid, &IID_IAgileObject) || WIN_IsEqualIID(riid, &IID_BleStatusHandler)) {
+        *ppv = This;
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE StatusHandler_AddRef(void *This) { (void)This; return 2; }
+static ULONG STDMETHODCALLTYPE StatusHandler_Release(void *This) { (void)This; return 1; }
+static HRESULT STDMETHODCALLTYPE StatusHandler_Invoke(void *This, BleDevice *sender, void *args)
+{
+    BLE_Controller *ctrl = (BLE_Controller *)((void **)This)[1];
+    enum __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothConnectionStatus status = BluetoothConnectionStatus_Connected;
+    (void)args;
+    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_get_ConnectionStatus(sender, &status)) &&
+        status == BluetoothConnectionStatus_Disconnected) {
+        SDL_SetAtomicInt(&ctrl->link_lost, 1);
+    }
+    return S_OK;
+}
+static const struct
+{
+    void *QueryInterface;
+    void *AddRef;
+    void *Release;
+    void *Invoke;
+} g_status_vtbl = { (void *)StatusHandler_QueryInterface, (void *)StatusHandler_AddRef, (void *)StatusHandler_Release, (void *)StatusHandler_Invoke };
 
 // ---------------------------------------------------------------------------
 // Command-response characteristic ValueChanged: stash the reply and signal.
@@ -1432,6 +1479,32 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         }
     }
 
+    // Link-loss detection (SDL#9 follow-up): without it a pad that powers off
+    // (the SendEffect shutdown, a dead battery, out of range) stays registered
+    // forever, and its address stays claimed in ble.controllers so every
+    // reconnection advertisement is dropped by BLE_TryReserveConnect. The
+    // callback only sets link_lost; BLE_JoystickDetect runs the teardown. If
+    // the append below is skipped (duplicate/teardown race), BLE_FreeController
+    // removes this subscription on the cleanup path like the others.
+    {
+        InputHandlerObj *status_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*status_handler));
+        if (status_handler) {
+            enum __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothConnectionStatus status = BluetoothConnectionStatus_Connected;
+            status_handler->vtbl = (void *)&g_status_vtbl;
+            status_handler->ctrl = ctrl;
+            ctrl->status_handler = status_handler;
+            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_add_ConnectionStatusChanged(ctrl->device, (void *)status_handler, &ctrl->status_token);
+            // The event fires only on transitions after registration, never as a
+            // state replay. A pad that died during the multi-second setup above
+            // would be appended already-dead with no event ever coming, so poll
+            // the status once after subscribing to close that window.
+            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_get_ConnectionStatus(ctrl->device, &status)) &&
+                status == BluetoothConnectionStatus_Disconnected) {
+                SDL_SetAtomicInt(&ctrl->link_lost, 1);
+            }
+        }
+    }
+
     SDL_LockJoysticks();
     {
         // Bail if a teardown ran while this connect was in WinRT discovery.
@@ -1763,6 +1836,28 @@ static int BLE_JoystickGetCount(void)
 
 static void BLE_JoystickDetect(void)
 {
+    // Drain link-loss flags set by ConnectionStatusChanged (MTA callback) and
+    // tear the dead controllers down on the joystick thread. Detect runs under
+    // SDL_LockJoysticks (SDL_joystick.c:2867-2869, after the per-joystick update
+    // walk, the documented place to free removed-device data), the same lock the
+    // connect append and Quit hold, so the array walk is safe. Removing the
+    // controller posts the removal to the app (fixes the stale registration) and
+    // makes BLE_GetControllerByAddress return NULL for the address, so
+    // BLE_TryReserveConnect accepts the pad's next advertisement and it can
+    // reconnect (SDL#9 follow-up). BLE_FreeController deliberately leaks the
+    // callback-touched state, so an in-flight callback on the dead controller
+    // stays safe.
+    int i;
+    for (i = 0; i < ble.controller_count; ) {
+        BLE_Controller *ctrl = ble.controllers[i];
+        if (SDL_GetAtomicInt(&ctrl->link_lost)) {
+            SDL_PrivateJoystickRemoved(ctrl->instance_id);
+            ble.controllers[i] = ble.controllers[--ble.controller_count];
+            BLE_FreeController(ctrl);
+        } else {
+            ++i;
+        }
+    }
 }
 
 static bool BLE_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
@@ -2081,6 +2176,9 @@ static void BLE_FreeController(BLE_Controller *ctrl)
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->vibration_char);
     }
     if (ctrl->device) {
+        if (ctrl->status_handler) {
+            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_remove_ConnectionStatusChanged(ctrl->device, ctrl->status_token);
+        }
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(ctrl->device);
     }
 
