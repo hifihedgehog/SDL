@@ -1929,12 +1929,54 @@ static bool BLE_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green, U
     return SDL_Unsupported(); // No RGB; player LED is set from the player index
 }
 
+/* Raw Switch 2 command passthrough (hifihedgehog/SDL#9): bytes[0] = command id,
+   bytes[1] = subcommand id, bytes[2..] = payload. Windows GATT sessions must all
+   share a service for a second opener to reach it, and this driver's session is
+   exclusive, so the driver itself is the only writer that can deliver vendor
+   commands like the shutdown (command 0x06 subcommand 0x02 + 12 zero bytes,
+   commands.md "Shutdown Controller?"). Mirrors the upstream hidapi Switch
+   driver's SendEffect-as-raw-passthrough philosophy.
+
+   The frame layout matches BLE_SendCommand (:794-801). The write is
+   fire-and-forget rather than routed through BLE_SendCommand because that
+   helper always waits up to 500 ms on the response semaphore and returns the
+   reply byte count. A shutdown powers the pad off instead of replying
+   (commands.md documents an empty response), so the helper would stall and
+   then read a successful shutdown as a failure. Success here means the write
+   was delivered. A stale reply from a command that does respond is drained by
+   BLE_SendCommand before its next send (:812-814). */
 static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
 {
-    (void)joystick;
-    (void)data;
-    (void)size;
-    return SDL_Unsupported();
+    BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
+    const Uint8 *bytes = (const Uint8 *)data;
+    Uint8 frame[64];
+    int data_len;
+
+    if (!ctrl || !ctrl->command_char) {
+        return SDL_SetError("No BLE command channel for joystick");
+    }
+    if (size < 2) {
+        return SDL_SetError("Switch 2 effect needs at least [cmd, subcmd]");
+    }
+    data_len = size - 2;
+    if (data_len + 8 > (int)sizeof(frame)) {
+        return SDL_SetError("Switch 2 effect payload too large");
+    }
+    frame[0] = bytes[0];
+    frame[1] = 0x91;
+    frame[2] = 0x01; // Bluetooth transport
+    frame[3] = bytes[1];
+    frame[4] = 0x00;
+    frame[5] = (Uint8)data_len;
+    frame[6] = 0x00;
+    frame[7] = 0x00;
+    if (data_len > 0) {
+        SDL_memcpy(&frame[8], bytes + 2, data_len);
+    }
+    if (!BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
+        return SDL_SetError("Switch 2 command write failed");
+    }
+    return true;
 }
 
 static bool BLE_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
