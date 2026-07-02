@@ -2134,6 +2134,25 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2 "SDL_JOYSTICK_BLE_SWITCH2"
 
 /**
+ * A variable controlling whether the Joy-Con 2's optical mouse sensor is
+ * enabled by the BLE driver, exposing its absolute X/Y counters as two extra
+ * joystick axes.
+ *
+ * This is a PadForge fork addition. The counters are raw accumulating u16
+ * values bit-preserved as Sint16. The consumer derives wraparound deltas.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": mouse sensor is not enabled. (default)
+ * - "1": mouse sensor streams on Joy-Con 2 controllers as axes 6 and 7.
+ *
+ * This hint should be set before the controller connects.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE "SDL_JOYSTICK_BLE_SWITCH2_MOUSE"
+
+/**
  * A variable controlling whether the right Joy-Con's NIR camera is powered
  * when app sensors are enabled, exposing its average-intensity scalar as an
  * extra joystick axis for cover/proximity detection.
