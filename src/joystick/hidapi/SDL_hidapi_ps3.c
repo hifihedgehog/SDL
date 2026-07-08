@@ -1169,6 +1169,17 @@ static bool HIDAPI_DriverPS3SonySixaxis_RumbleJoystick(SDL_HIDAPI_Device *device
     return HIDAPI_DriverPS3_UpdateRumbleSonySixaxis(device);
 }
 
+static Uint32 HIDAPI_DriverPS3SonySixaxis_GetJoystickCapabilities(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
+{
+    /* The driver implements RumbleJoystick above, and the output packet's
+     * bytes line up end-to-end with DsHidMini's SXS raw copy
+     * (HID.Reports.c:276-333 copies reportBuffer[3..] into the raw DS3
+     * output block). Returning 0 here hid the working rumble from every
+     * consumer that gates on SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN. Match
+     * the regular PS3 driver's cap. */
+    return SDL_JOYSTICK_CAP_RUMBLE;
+}
+
 static bool HIDAPI_DriverPS3SonySixaxis_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *effect, int size)
 {
     Uint8 data[49];
@@ -1421,6 +1432,7 @@ SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverPS3SonySixaxis = {
     .UpdateDevice = HIDAPI_DriverPS3SonySixaxis_UpdateDevice,
     .OpenJoystick = HIDAPI_DriverPS3SonySixaxis_OpenJoystick,
     .RumbleJoystick = HIDAPI_DriverPS3SonySixaxis_RumbleJoystick,
+    .GetJoystickCapabilities = HIDAPI_DriverPS3SonySixaxis_GetJoystickCapabilities,
     .SendJoystickEffect = HIDAPI_DriverPS3SonySixaxis_SendJoystickEffect,
     .SetJoystickSensorsEnabled = HIDAPI_DriverPS3SonySixaxis_SetJoystickSensorsEnabled,
     .CloseJoystick = HIDAPI_DriverPS3SonySixaxis_CloseJoystick,
