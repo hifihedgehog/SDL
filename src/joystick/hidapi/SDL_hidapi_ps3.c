@@ -352,6 +352,14 @@ static float HIDAPI_DriverPS3ThirdParty_ScaleAccel(Sint16 value)
     return ((float)(value - 512) / 113.0f) * SDL_STANDARD_GRAVITY;
 }
 
+static float HIDAPI_DriverPS3SonySixaxis_ScaleAccel(Sint16 value)
+{
+    /* DsHidMini's SXS emulation serves the sensor words already byteswapped
+     * to little-endian (DsHidMiniDrv.c:644-647 USB, :872-875 BT), unlike the
+     * raw big-endian sixaxis.sys words the regular scaler swaps. No swap. */
+    return ((float)(value - 512) / 113.0f) * SDL_STANDARD_GRAVITY;
+}
+
 static void HIDAPI_DriverPS3_HandleMiniStatePacket(SDL_Joystick *joystick, SDL_DriverPS3_Context *ctx, Uint8 *data, int size)
 {
     Sint16 axis;
@@ -1220,6 +1228,7 @@ static bool HIDAPI_DriverPS3SonySixaxis_OpenJoystick(SDL_HIDAPI_Device *device, 
     joystick->nhats = 1;
 
     SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 100.0f);
+    SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 100.0f);
 
     return true;
 }
@@ -1367,11 +1376,27 @@ static void HIDAPI_DriverPS3SonySixaxis_HandleStatePacket(SDL_Joystick *joystick
 
     if (ctx->report_sensors) {
         float sensor_data[3];
+        float gyro_data[3];
 
-        sensor_data[0] = HIDAPI_DriverPS3_ScaleAccel(LOAD16(data[41], data[42]));
-        sensor_data[1] = -HIDAPI_DriverPS3_ScaleAccel(LOAD16(data[45], data[46]));
-        sensor_data[2] = -HIDAPI_DriverPS3_ScaleAccel(LOAD16(data[43], data[44]));
+        /* DsHidMini pre-flips X (0x3FF - x, DsHidMiniDrv.c:644) before
+         * serving; negating restores the raw sense so the frame mapping
+         * matches the regular PS3 driver's (X, -Z, -Y into SDL's convention).
+         * schmaldeo DS4Windows, the hardware-proven DsHidMini consumer,
+         * negates all three the same way (DS4Sixaxis.cs:452-454, 512 - x). */
+        sensor_data[0] = -HIDAPI_DriverPS3SonySixaxis_ScaleAccel(LOAD16(data[41], data[42]));
+        sensor_data[1] = -HIDAPI_DriverPS3SonySixaxis_ScaleAccel(LOAD16(data[45], data[46]));
+        sensor_data[2] = -HIDAPI_DriverPS3SonySixaxis_ScaleAccel(LOAD16(data[43], data[44]));
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_ACCEL, timestamp, sensor_data, SDL_arraysize(sensor_data));
+
+        /* The DS3 has a single-axis (yaw) gyro at offsets 47-48 (Ds3Types.h:
+         * AccelX, AccelY, AccelZ, Gyroscope as consecutive words). Scale per
+         * the only hardware-proven DsHidMini reference (schmaldeo DS4Windows,
+         * DS4Sixaxis.cs:450: (raw - 512) * 90 / 123 deg/s), convert to rad/s,
+         * zero-pad pitch/roll so consumers see the standard 3-axis shape. */
+        gyro_data[0] = 0.0f;
+        gyro_data[1] = ((float)(LOAD16(data[47], data[48]) - 512) * 90.0f / 123.0f) * (SDL_PI_F / 180.0f);
+        gyro_data[2] = 0.0f;
+        SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_GYRO, timestamp, gyro_data, SDL_arraysize(gyro_data));
     }
 
     SDL_memcpy(ctx->last_state, data, SDL_min(size, sizeof(ctx->last_state)));
