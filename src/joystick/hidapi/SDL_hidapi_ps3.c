@@ -1250,7 +1250,13 @@ static bool HIDAPI_DriverPS3SonySixaxis_RumbleJoystickTriggers(SDL_HIDAPI_Device
 
 static Uint32 HIDAPI_DriverPS3SonySixaxis_GetJoystickCapabilities(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
 {
-    return 0;
+    /* The driver implements RumbleJoystick above, and the output packet's
+     * bytes line up end-to-end with DsHidMini's SXS raw copy
+     * (HID.Reports.c:276-333 copies reportBuffer[3..] into the raw DS3
+     * output block). Returning 0 here hid the working rumble from every
+     * consumer that gates on SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN. Match
+     * the regular PS3 driver's cap. */
+    return SDL_JOYSTICK_CAP_RUMBLE;
 }
 
 static bool HIDAPI_DriverPS3SonySixaxis_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint8 red, Uint8 green, Uint8 blue)
