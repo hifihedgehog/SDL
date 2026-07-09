@@ -1395,12 +1395,19 @@ static void HIDAPI_DriverPS3SonySixaxis_HandleStatePacket(SDL_Joystick *joystick
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_ACCEL, timestamp, sensor_data, SDL_arraysize(sensor_data));
 
         /* The DS3 has a single-axis (yaw) gyro at offsets 47-48 (Ds3Types.h:
-         * AccelX, AccelY, AccelZ, Gyroscope as consecutive words). Scale per
-         * the only hardware-proven DsHidMini reference (schmaldeo DS4Windows,
-         * DS4Sixaxis.cs:450: (raw - 512) * 90 / 123 deg/s), convert to rad/s,
-         * zero-pad pitch/roll so consumers see the standard 3-axis shape. */
+         * AccelX, AccelY, AccelZ, Gyroscope as consecutive words). Scale
+         * (raw - 512) * 90 / 123 deg/s (schmaldeo DS4Sixaxis.cs:450),
+         * converted to rad/s, pitch/roll zero-padded. Negated: the
+         * genuine-hardware polarity anchor is RPCS3, whose pass-through of
+         * the raw word (ds3_pad_handler.cpp:437) equated against its
+         * DualSense mapping into the same PS3 frame
+         * (dualsense_pad_handler.cpp:616-632, PS3 value = -wire * k + 512)
+         * gives genuine raw - 512 = -wire, and SDL's convention for that
+         * wire word is +wire (SDL_hidapi_ps5.c:1398-1401). Hardware-measured
+         * on a clone unit with a DualSense positive control on the same
+         * stack, both agreeing on the flip. */
         gyro_data[0] = 0.0f;
-        gyro_data[1] = ((float)(LOAD16(data[47], data[48]) - 512) * 90.0f / 123.0f) * (SDL_PI_F / 180.0f);
+        gyro_data[1] = -((float)(LOAD16(data[47], data[48]) - 512) * 90.0f / 123.0f) * (SDL_PI_F / 180.0f);
         gyro_data[2] = 0.0f;
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_GYRO, timestamp, gyro_data, SDL_arraysize(gyro_data));
     }
