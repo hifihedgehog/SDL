@@ -1405,7 +1405,10 @@ static void HIDAPI_DriverPS3SonySixaxis_HandleStatePacket(SDL_Joystick *joystick
          * gives genuine raw - 512 = -wire, and SDL's convention for that
          * wire word is +wire (SDL_hidapi_ps5.c:1398-1401). Hardware-measured
          * on a clone unit with a DualSense positive control on the same
-         * stack, both agreeing on the flip. */
+         * stack, both agreeing on the flip. Do not "fix" this sign back to
+         * match schmaldeo's positive term: its experimental DS3 gyro is the
+         * lone dissenting frame chain, internally inverted relative to the
+         * genuine-anchored RPCS3 derivation above. */
         gyro_data[0] = 0.0f;
         gyro_data[1] = -((float)(LOAD16(data[47], data[48]) - 512) * 90.0f / 123.0f) * (SDL_PI_F / 180.0f);
         gyro_data[2] = 0.0f;
