@@ -444,8 +444,13 @@ static void EnableIR(SDL_DriverWii_Context *ctx)
     ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), true) && ok;
     ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), true) && ok;
 
-    // 5. data mode <- Extended (bare) or Basic (with an extension), 6. control <- 0x08
-    value = (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None) ? WII_IR_MODE_EXTENDED : WII_IR_MODE_BASIC;
+    // 5. data mode: Extended only for a bare remote without Motion Plus (report
+    // 0x33, 12 IR bytes). With an extension OR an active Motion Plus the report
+    // must be 0x37, whose span carries 10-byte Basic IR (Dolphin's real-Wiimote
+    // backend uses Basic for the same reason, WiimoteController.cpp:991: "it's
+    // all that fits"). 6. control <- 0x08
+    value = (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+             !ctx->m_bMotionPlusPresent) ? WII_IR_MODE_EXTENDED : WII_IR_MODE_BASIC;
     ok = WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), true) && ok;
     value = 0x08;
     ok = WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true) && ok;
@@ -671,9 +676,11 @@ static void UpdatePowerLevelWiiU(SDL_Joystick *joystick, Uint8 extensionBatteryB
 
 /* The IR camera lives on the Wii Remote itself, so it is available whenever the
    device is a Wii Remote: bare, or with a Nunchuk or Classic Controller. The Wii U
-   Pro Controller and the Balance Board are not remotes and have no camera. (Motion
-   Plus is handled separately: it owns the report span, so IR stays off while it is
-   active even on a remote that otherwise has the camera.) */
+   Pro Controller and the Balance Board are not remotes and have no camera. Motion
+   Plus coexists with IR: its passthrough frame is 6 bytes and fits report 0x37's
+   extension span beside 10-byte Basic IR, the same simultaneous IR + M+ + Nunchuk
+   arrangement Dolphin's real-Wiimote backend runs (WiimoteController.cpp:382,
+   ReportCoreAccelIR10Ext6) and every WM+ sensor-bar game used. */
 static bool WiiRemoteHasIRCamera(EWiiExtensionControllerType type)
 {
     return type == k_eWiiExtensionControllerType_None ||
@@ -702,8 +709,13 @@ static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
         }
     default:
         if (ctx->m_bIRActive) {
-            // 33 BB BB AA AA AA II*12: core + accel + extended IR (no extension).
-            return k_eWiiInputReportIDs_ButtonData3;
+            /* Bare remote: 33 BB BB AA AA AA II*12 (extended IR, no extension
+               span). With Motion Plus active the gyro needs the extension span,
+               so 0x37 (basic IR + 6-byte M+ interleave) instead; the camera's
+               programmed mode (EnableIR) and this selection must agree or the
+               re-request loop fights itself. */
+            return ctx->m_bMotionPlusPresent ? k_eWiiInputReportIDs_ButtonData7
+                                             : k_eWiiInputReportIDs_ButtonData3;
         } else if (ctx->m_bReportSensors) {
             return k_eWiiInputReportIDs_ButtonData5;
         } else {
@@ -945,12 +957,11 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
 
     /* If sensors were left enabled across an extension hot-plug that cleared
        m_bIRActive, re-power the IR camera and reselect the IR report so the pointer
-       resumes without the app re-toggling sensors. Gated on no Motion Plus: with
-       Motion Plus the gyro owns the report span, so IR stays off (see
-       SetJoystickSensorsEnabled). Placed after GetMotionPlusState so the flag is
-       current. */
+       resumes without the app re-toggling sensors. Motion Plus does not gate this:
+       IR and the M+ interleave share report 0x37 (hifihedgehog/SDL#11). Placed
+       after GetMotionPlusState so EnableIR picks the right camera mode. */
     if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
-        !ctx->m_bMotionPlusPresent && ctx->m_bReportSensors && !ctx->m_bIRActive) {
+        ctx->m_bReportSensors && !ctx->m_bIRActive) {
         EnableIR(ctx);
         ResetButtonPacketType(ctx);
     }
@@ -1071,13 +1082,15 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
 
         /* On any Wii Remote (bare, or with a Nunchuk or Classic Controller),
            enabling sensors also powers the IR camera and switches to the IR report:
-           0x33 (core + accel + IR) bare, or 0x37 (core + accel + IR + the 6-byte
-           extension) with an extension. The camera stays off until the app opts in
-           this way, so default behavior is unchanged. Motion Plus takes precedence:
-           its gyro data rides the extension span and the IR reports do not carry it,
-           so while Motion Plus is active the gyro wins and IR is left off. */
-        if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
-            !ctx->m_bMotionPlusPresent) {
+           0x33 (core + accel + extended IR) on a bare remote without Motion Plus,
+           or 0x37 (core + accel + basic IR + the 6-byte extension span) otherwise.
+           The camera stays off until the app opts in this way, so default behavior
+           is unchanged. Motion Plus coexists rather than gating IR off: its
+           passthrough frame rides 0x37's extension span beside the IR bytes, the
+           arrangement Dolphin's real-Wiimote backend runs and WM+ sensor-bar games
+           used (hifihedgehog/SDL#11). This runs after the Motion Plus activation
+           above so EnableIR sees the current M+ state. */
+        if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType)) {
             if (enabled) {
                 EnableIR(ctx);
             } else {
