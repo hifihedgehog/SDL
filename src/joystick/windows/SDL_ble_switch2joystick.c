@@ -220,6 +220,7 @@ typedef struct BLE_Controller
     bool calibrated;
     bool sensors_enabled; // IMU streams only after the enable command is sent
     bool mouse_enabled;   // Joy-Con 2 optical mouse counters stream (hint opt-in)
+    bool vertical_mode;   // Joy-Con 2 held upright (SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS)
 
     // Rumble state. The actuator does not latch, so a sustained effect needs a
     // continuous packet stream. rumble_low/high are the last commanded amplitudes
@@ -1718,6 +1719,42 @@ static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, U
     if (size < 14) {
         return;
     }
+    if (ctrl->vertical_mode) {
+        /* Upright orientation: mirror the wired driver's
+           HandleCombinedControllerStateL (SDL_hidapi_switch2.c). The BLE
+           report is the wired report shifted down one byte, the same
+           correspondence the mini decode below already uses. */
+        Uint8 hat = 0;
+        Sint16 axis;
+
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_BACK, ((data[5] & 0x01) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, ((data[5] & 0x08) != 0));
+        SDL_SendJoystickButton(ts, joystick, 11 /* JoyCon Share */, ((data[5] & 0x20) != 0));
+
+        if (data[6] & 0x01) {
+            hat |= SDL_HAT_DOWN;
+        }
+        if (data[6] & 0x02) {
+            hat |= SDL_HAT_UP;
+        }
+        if (data[6] & 0x04) {
+            hat |= SDL_HAT_RIGHT;
+        }
+        if (data[6] & 0x08) {
+            hat |= SDL_HAT_LEFT;
+        }
+        SDL_SendJoystickHat(ts, joystick, 0, hat);
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, ((data[6] & 0x40) != 0));
+        SDL_SendJoystickButton(ts, joystick, 14 /* JoyCon left paddle 1 */, ((data[7] & 0x02) != 0));
+
+        axis = (data[6] & 0x80) ? 32767 : -32768;
+        SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, axis);
+
+        SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), false));
+        SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
+        BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
+        return;
+    }
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_START, ((data[5] & 0x01) != 0));
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, ((data[5] & 0x08) != 0));
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_GUIDE, ((data[5] & 0x20) != 0));
@@ -1740,6 +1777,31 @@ static void BLE_DecodeJoyConRight(BLE_Controller *ctrl, SDL_Joystick *joystick, 
 {
     Uint64 ts = SDL_GetTicksNS();
     if (size < 16) {
+        return;
+    }
+    if (ctrl->vertical_mode) {
+        /* Upright orientation: mirror the wired driver's
+           HandleCombinedControllerStateR (SDL_hidapi_switch2.c), report
+           shifted down one byte as in the mini decode below. */
+        Sint16 axis;
+
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[4] & 0x01) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_NORTH, ((data[4] & 0x02) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_SOUTH, ((data[4] & 0x04) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_EAST, ((data[4] & 0x08) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, ((data[4] & 0x40) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_START, ((data[5] & 0x02) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_RIGHT_STICK, ((data[5] & 0x04) != 0));
+        SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_GUIDE, ((data[5] & 0x10) != 0));
+        SDL_SendJoystickButton(ts, joystick, 12 /* JoyCon C */, ((data[5] & 0x40) != 0));
+        SDL_SendJoystickButton(ts, joystick, 13 /* JoyCon right paddle 1 */, ((data[7] & 0x01) != 0));
+
+        axis = (data[4] & 0x80) ? 32767 : -32768;
+        SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, axis);
+
+        SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTX, BLE_MapStickAxis(&ctrl->left_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
+        SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
+        BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
         return;
     }
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[4] & 0x01) != 0));
@@ -1947,6 +2009,11 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
         (void)SDL_snprintf(serial, sizeof(serial), "%012llx", (unsigned long long)ctrl->bluetooth_address);
         joystick->serial = SDL_strdup(serial);
     }
+
+    /* Snapshot the vertical-orientation hint at open, mirroring the wired
+       driver (SDL_hidapi_switch2.c OpenJoystick). The fabricated gamepad
+       mapping keys on the same hint, so the decoder and the mapping agree. */
+    ctrl->vertical_mode = SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, false);
 
     switch (ctrl->product_id) {
     case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
