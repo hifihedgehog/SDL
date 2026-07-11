@@ -1077,6 +1077,9 @@ static void HandleMcuIRReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joyst
     Uint64 timestamp = SDL_GetTicksNS();
     Sint16 sValue = (Sint16)((ctx->m_rgucReadBuffer[53] * 32767) / 255);
 
+    /* Data axis: seed past the analog anti-jitter gate so low intensities at
+       connect are not withheld inside the band (hifihedgehog/SDL#14) */
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
 
     WriteMcuDataRequest(ctx, 0x03, 0x00, ctx->m_rgucReadBuffer[52]);
