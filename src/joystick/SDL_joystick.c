@@ -2551,6 +2551,37 @@ void SDL_PrivateJoystickRemoved(SDL_JoystickID instance_id)
     }
 }
 
+/* Seed a dedicated data axis so the anti-jitter gate below never withholds
+   it. Data channels (camera dot coordinates with a lost-dot sentinel, IR
+   intensity scalars, mouse counters, load cells) carry exact values, not
+   noisy analog positions, so genuine updates near the connect-time latch sit
+   inside the jitter band and would be withheld or, worse, a stale coordinate
+   would swallow the sentinel (hifihedgehog/SDL#14). Drivers call this with
+   the first real value before the first post: the value becomes readable
+   immediately and every subsequent change is delivered. No-op once the axis
+   has sent. The gate stays untouched for real analog axes. */
+void SDL_SeedJoystickDataAxis(SDL_Joystick *joystick, Uint8 axis, Sint16 value)
+{
+    SDL_JoystickAxisInfo *info;
+
+    SDL_AssertJoysticksLocked();
+
+    if (axis >= joystick->naxes) {
+        return;
+    }
+
+    info = &joystick->axes[axis];
+    if (info->sent_initial_value) {
+        return;
+    }
+    info->initial_value = value;
+    info->value = value;
+    info->zero = value;
+    info->has_initial_value = true;
+    info->has_second_value = true;
+    info->sent_initial_value = true;
+}
+
 void SDL_SendJoystickAxis(Uint64 timestamp, SDL_Joystick *joystick, Uint8 axis, Sint16 value)
 {
     SDL_JoystickAxisInfo *info;
