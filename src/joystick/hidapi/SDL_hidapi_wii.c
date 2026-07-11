@@ -1009,8 +1009,16 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     } else if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_BalanceBoard) {
         // The board has no buttons; HandleBalanceBoardData only posts the four axes.
         joystick->nbuttons = 0;
+    } else if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
+               ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
+        /* Every remote input surfaces exactly once through the gamepad layer
+           (positions 0-6 plus the hat), so the raw remote-button block
+           (15-25) is not declared. 11-14 are the retired dead slots. */
+        joystick->nbuttons = 15;
     } else {
-        // Maximum is Classic Controller + Wiimote
+        /* Classic Controller (and unrecognized extensions): the gamepad
+           layer carries the extension's controls, so the raw block (15-25)
+           is the remote's only button surface and stays. */
         joystick->nbuttons = k_eWiiButtons_Max;
     }
     /* Every Wii Remote (bare or with an extension) exposes four extra axes beyond
@@ -1025,10 +1033,10 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     /* Every recognized D-pad-bearing configuration reports its D-pad as a
        hat only, the canonical HIDAPI shape (upstream 70ba3f2830), and the
        auto-mappings bind h0.x. The gamepad-position D-pad button indices
-       (11-14) are retired in place and stay silent so raw-index mappings
-       above them keep their positions. The remote's raw D-pad buttons
-       (k_eWiiButtons_DPad_*) remain the raw layer. The Balance Board has
-       no D-pad. */
+       (11-14) are retired in place and stay silent so the raw remote
+       buttons above them keep their positions in the configurations that
+       still post them (Classic and unrecognized extensions). The Balance
+       Board has no D-pad. */
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
         ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk ||
         ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Gamepad ||
@@ -1590,7 +1598,12 @@ static void HandleButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick,
         }
     }
 
-    HandleWiiRemoteButtonData(ctx, joystick, data);
+    /* Every input surfaces once. In the bare and Nunchuk configurations the
+       remote's buttons reach the gamepad layer through the main-controller
+       handler (positions 0-6 plus the hat), so the raw remote-button block
+       (15-25) is not posted there. With a Classic attached (or an
+       unrecognized extension) the gamepad layer carries the extension's
+       controls, so the raw block is the remote's only button surface. */
     switch (ctx->m_eExtensionControllerType) {
     case k_eWiiExtensionControllerType_Nunchuk:
         HandleNunchuckButtonData(ctx, joystick, data);
@@ -1599,9 +1612,11 @@ static void HandleButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick,
         HandleWiiRemoteButtonDataAsMainController(ctx, joystick, data);
         break;
     case k_eWiiExtensionControllerType_Gamepad:
+        HandleWiiRemoteButtonData(ctx, joystick, data);
         HandleGamepadControllerButtonData(ctx, joystick, data);
         break;
     default:
+        HandleWiiRemoteButtonData(ctx, joystick, data);
         break;
     }
     HandleWiiRemoteAccelData(ctx, joystick, data);
