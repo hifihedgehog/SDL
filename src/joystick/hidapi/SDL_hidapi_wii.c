@@ -1023,10 +1023,12 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
         joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     }
     /* Every recognized D-pad-bearing configuration reports its D-pad as a
-       hat so the h0.x bindings in the auto-mappings resolve, matching how
-       every other HIDAPI gamepad reports it. The button-form D-pad posts
-       stay as deliberate duplicates (the Nunchuk mapping binds those
-       instead). The Balance Board has no D-pad. */
+       hat only, the canonical HIDAPI shape (upstream 70ba3f2830), and the
+       auto-mappings bind h0.x. The gamepad-position D-pad button indices
+       (11-14) are retired in place and stay silent so raw-index mappings
+       above them keep their positions. The remote's raw D-pad buttons
+       (k_eWiiButtons_DPad_*) remain the raw layer. The Balance Board has
+       no D-pad. */
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
         ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk ||
         ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Gamepad ||
@@ -1190,6 +1192,11 @@ static void PostDpadHat(Uint64 timestamp, SDL_Joystick *joystick, bool up, bool 
     SDL_SendJoystickHat(timestamp, joystick, 0, hat);
 }
 
+/* Shared by the Classic Controller (bytes 0-1, at rgucExtension + 4) and the
+   Wii U Pro (bytes 0-2, at rgucExtension + 8). The D-pad bits (byte 0 bits
+   6-7, byte 1 bits 0-1) are reported as the hat, not as buttons, so with the
+   D-pad and Motion Plus interleave bits both unmapped this single table
+   serves the Motion Plus passthrough frames too. */
 static const Uint8 GAMEPAD_BUTTON_DEFS[3][8] = {
     {
         0xFF /* Unused */,
@@ -1198,12 +1205,12 @@ static const Uint8 GAMEPAD_BUTTON_DEFS[3][8] = {
         SDL_GAMEPAD_BUTTON_GUIDE,
         SDL_GAMEPAD_BUTTON_BACK,
         SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,
-        SDL_GAMEPAD_BUTTON_DPAD_DOWN,
-        SDL_GAMEPAD_BUTTON_DPAD_RIGHT,
+        0xFF /* D-pad Down (hat) */,
+        0xFF /* D-pad Right (hat) */,
     },
     {
-        SDL_GAMEPAD_BUTTON_DPAD_UP,
-        SDL_GAMEPAD_BUTTON_DPAD_LEFT,
+        0xFF /* D-pad Up (hat); Motion Plus data in passthrough */,
+        0xFF /* D-pad Left (hat); Motion Plus data in passthrough */,
         0xFF /* ZR */,
         SDL_GAMEPAD_BUTTON_NORTH,
         SDL_GAMEPAD_BUTTON_EAST,
@@ -1220,62 +1227,6 @@ static const Uint8 GAMEPAD_BUTTON_DEFS[3][8] = {
         0xFF /* Unused */,
         0xFF /* Unused */,
         0xFF /* Unused */,
-    }
-};
-
-static const Uint8 MP_GAMEPAD_BUTTON_DEFS[3][8] = {
-    {
-        0xFF /* Unused */,
-        SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
-        SDL_GAMEPAD_BUTTON_START,
-        SDL_GAMEPAD_BUTTON_GUIDE,
-        SDL_GAMEPAD_BUTTON_BACK,
-        SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,
-        SDL_GAMEPAD_BUTTON_DPAD_DOWN,
-        SDL_GAMEPAD_BUTTON_DPAD_RIGHT,
-    },
-    {
-        0xFF /* Motion Plus data */,
-        0xFF /* Motion Plus data */,
-        0xFF /* ZR */,
-        SDL_GAMEPAD_BUTTON_NORTH,
-        SDL_GAMEPAD_BUTTON_EAST,
-        SDL_GAMEPAD_BUTTON_WEST,
-        SDL_GAMEPAD_BUTTON_SOUTH,
-        0xFF /*ZL*/,
-    },
-    {
-        SDL_GAMEPAD_BUTTON_RIGHT_STICK,
-        SDL_GAMEPAD_BUTTON_LEFT_STICK,
-        0xFF /* Charging */,
-        0xFF /* Plugged In */,
-        0xFF /* Unused */,
-        0xFF /* Unused */,
-        0xFF /* Unused */,
-        0xFF /* Unused */,
-    }
-};
-
-static const Uint8 MP_FIXUP_DPAD_BUTTON_DEFS[2][8] = {
-    {
-        SDL_GAMEPAD_BUTTON_DPAD_UP,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-    },
-    {
-        SDL_GAMEPAD_BUTTON_DPAD_LEFT,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
     }
 };
 
@@ -1293,7 +1244,7 @@ static void HandleWiiUProButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *jo
     // Buttons
     PostPackedButtonData(ctx->timestamp, joystick, buttons, data->rgucExtension + 8, 3, false, true);
 
-    // D-pad as a hat, from the same active-low bits the defs table decodes
+    // D-pad as a hat, from the extension's active-low D-pad bits
     PostDpadHat(ctx->timestamp, joystick,
                 !(data->rgucExtension[9] & 0x01),
                 !(data->rgucExtension[8] & 0x40),
@@ -1318,7 +1269,6 @@ static void HandleWiiUProButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *jo
 
 static void HandleGamepadControllerButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const WiiButtonData *data)
 {
-    const Uint8(*buttons)[8] = (ctx->m_ucMotionPlusMode == WII_MOTIONPLUS_MODE_GAMEPAD) ? MP_GAMEPAD_BUTTON_DEFS : GAMEPAD_BUTTON_DEFS;
     Uint8 lx, ly, rx, ry, zl, zr;
 
     if (data->ucNExtensionBytes < 6) {
@@ -1326,14 +1276,11 @@ static void HandleGamepadControllerButtonData(SDL_DriverWii_Context *ctx, SDL_Jo
     }
 
     // Buttons
-    PostPackedButtonData(ctx->timestamp, joystick, buttons, data->rgucExtension + 4, 2, false, true);
-    if (ctx->m_ucMotionPlusMode == WII_MOTIONPLUS_MODE_GAMEPAD) {
-        PostPackedButtonData(ctx->timestamp, joystick, MP_FIXUP_DPAD_BUTTON_DEFS, data->rgucExtension, 2, false, true);
-    }
+    PostPackedButtonData(ctx->timestamp, joystick, GAMEPAD_BUTTON_DEFS, data->rgucExtension + 4, 2, false, true);
 
-    /* D-pad as a hat, from the same active-low bits the defs tables decode.
-       In Motion Plus passthrough the up/left bits relocate to bit 0 of bytes
-       0 and 1 (Dolphin MotionPlus.cpp:669-678, verified on real hardware). */
+    /* D-pad as a hat, from the extension's active-low D-pad bits. In Motion
+       Plus passthrough the up/left bits relocate to bit 0 of bytes 0 and 1
+       (Dolphin MotionPlus.cpp:669-678, verified on real hardware). */
     if (ctx->m_ucMotionPlusMode == WII_MOTIONPLUS_MODE_GAMEPAD) {
         PostDpadHat(ctx->timestamp, joystick,
                     !(data->rgucExtension[0] & 0x01),
@@ -1407,10 +1354,10 @@ static void HandleWiiRemoteButtonDataAsMainController(SDL_DriverWii_Context *ctx
      */
     static const Uint8 buttons[2][8] = {
         {
-            SDL_GAMEPAD_BUTTON_DPAD_LEFT,
-            SDL_GAMEPAD_BUTTON_DPAD_RIGHT,
-            SDL_GAMEPAD_BUTTON_DPAD_DOWN,
-            SDL_GAMEPAD_BUTTON_DPAD_UP,
+            0xFF /* D-pad Left (hat) */,
+            0xFF /* D-pad Right (hat) */,
+            0xFF /* D-pad Down (hat) */,
+            0xFF /* D-pad Up (hat) */,
             SDL_GAMEPAD_BUTTON_START,
             0xFF /* Unused */,
             0xFF /* Unused */,
