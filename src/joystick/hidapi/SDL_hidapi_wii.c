@@ -1022,14 +1022,15 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     } else {
         joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     }
-    /* The remote's D-pad is reported as a hat so the auto-mapping's h0.x
-       bindings resolve, matching how every other HIDAPI gamepad reports it.
-       The raw D-pad buttons stay as deliberate duplicates. Classic Controller
-       and Wii U Pro are deliberately excluded: their handlers post the D-pad
-       as buttons only, and their bits are active-low in the extension bytes,
-       so extending this condition requires inverted hat composition there. */
+    /* Every recognized D-pad-bearing configuration reports its D-pad as a
+       hat so the h0.x bindings in the auto-mappings resolve, matching how
+       every other HIDAPI gamepad reports it. The button-form D-pad posts
+       stay as deliberate duplicates (the Nunchuk mapping binds those
+       instead). The Balance Board has no D-pad. */
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
-        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
+        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk ||
+        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Gamepad ||
+        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_WiiUPro) {
         joystick->nhats = 1;
     }
 
@@ -1170,6 +1171,25 @@ static void PostPackedButtonData(Uint64 timestamp, SDL_Joystick *joystick, const
     }
 }
 
+static void PostDpadHat(Uint64 timestamp, SDL_Joystick *joystick, bool up, bool down, bool left, bool right)
+{
+    Uint8 hat = 0;
+
+    if (up) {
+        hat |= SDL_HAT_UP;
+    }
+    if (down) {
+        hat |= SDL_HAT_DOWN;
+    }
+    if (left) {
+        hat |= SDL_HAT_LEFT;
+    }
+    if (right) {
+        hat |= SDL_HAT_RIGHT;
+    }
+    SDL_SendJoystickHat(timestamp, joystick, 0, hat);
+}
+
 static const Uint8 GAMEPAD_BUTTON_DEFS[3][8] = {
     {
         0xFF /* Unused */,
@@ -1273,6 +1293,13 @@ static void HandleWiiUProButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *jo
     // Buttons
     PostPackedButtonData(ctx->timestamp, joystick, buttons, data->rgucExtension + 8, 3, false, true);
 
+    // D-pad as a hat, from the same active-low bits the defs table decodes
+    PostDpadHat(ctx->timestamp, joystick,
+                !(data->rgucExtension[9] & 0x01),
+                !(data->rgucExtension[8] & 0x40),
+                !(data->rgucExtension[9] & 0x02),
+                !(data->rgucExtension[8] & 0x80));
+
     // Triggers
     zl = data->rgucExtension[9] & 0x80;
     zr = data->rgucExtension[9] & 0x04;
@@ -1302,6 +1329,23 @@ static void HandleGamepadControllerButtonData(SDL_DriverWii_Context *ctx, SDL_Jo
     PostPackedButtonData(ctx->timestamp, joystick, buttons, data->rgucExtension + 4, 2, false, true);
     if (ctx->m_ucMotionPlusMode == WII_MOTIONPLUS_MODE_GAMEPAD) {
         PostPackedButtonData(ctx->timestamp, joystick, MP_FIXUP_DPAD_BUTTON_DEFS, data->rgucExtension, 2, false, true);
+    }
+
+    /* D-pad as a hat, from the same active-low bits the defs tables decode.
+       In Motion Plus passthrough the up/left bits relocate to bit 0 of bytes
+       0 and 1 (Dolphin MotionPlus.cpp:669-678, verified on real hardware). */
+    if (ctx->m_ucMotionPlusMode == WII_MOTIONPLUS_MODE_GAMEPAD) {
+        PostDpadHat(ctx->timestamp, joystick,
+                    !(data->rgucExtension[0] & 0x01),
+                    !(data->rgucExtension[4] & 0x40),
+                    !(data->rgucExtension[1] & 0x01),
+                    !(data->rgucExtension[4] & 0x80));
+    } else {
+        PostDpadHat(ctx->timestamp, joystick,
+                    !(data->rgucExtension[5] & 0x01),
+                    !(data->rgucExtension[4] & 0x40),
+                    !(data->rgucExtension[5] & 0x02),
+                    !(data->rgucExtension[4] & 0x80));
     }
 
     // Triggers
@@ -1384,23 +1428,12 @@ static void HandleWiiRemoteButtonDataAsMainController(SDL_DriverWii_Context *ctx
         }
     };
     if (data->hasBaseButtons) {
-        Uint8 hat = 0;
-
         PostPackedButtonData(ctx->timestamp, joystick, buttons, data->rgucBaseButtons, 2, true, false);
-
-        if (data->rgucBaseButtons[0] & 0x01) {
-            hat |= SDL_HAT_LEFT;
-        }
-        if (data->rgucBaseButtons[0] & 0x02) {
-            hat |= SDL_HAT_RIGHT;
-        }
-        if (data->rgucBaseButtons[0] & 0x04) {
-            hat |= SDL_HAT_DOWN;
-        }
-        if (data->rgucBaseButtons[0] & 0x08) {
-            hat |= SDL_HAT_UP;
-        }
-        SDL_SendJoystickHat(ctx->timestamp, joystick, 0, hat);
+        PostDpadHat(ctx->timestamp, joystick,
+                    (data->rgucBaseButtons[0] & 0x08) != 0,
+                    (data->rgucBaseButtons[0] & 0x04) != 0,
+                    (data->rgucBaseButtons[0] & 0x01) != 0,
+                    (data->rgucBaseButtons[0] & 0x02) != 0);
     }
 }
 
