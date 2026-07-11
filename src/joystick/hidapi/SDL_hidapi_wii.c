@@ -1016,9 +1016,10 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
            (15-25) is not declared. 11-14 are the retired dead slots. */
         joystick->nbuttons = 15;
     } else {
-        /* Classic Controller (and unrecognized extensions): the gamepad
-           layer carries the extension's controls, so the raw block (15-25)
-           is the remote's only button surface and stays. */
+        /* Classic Controller and unrecognized extensions: the gamepad layer
+           carries the Classic's controls, or nothing at all when the
+           extension is unrecognized, so either way the raw block (15-25) is
+           the remote's only button surface and stays. */
         joystick->nbuttons = k_eWiiButtons_Max;
     }
     /* Every Wii Remote (bare or with an extension) exposes four extra axes beyond
@@ -1601,9 +1602,10 @@ static void HandleButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick,
     /* Every input surfaces once. In the bare and Nunchuk configurations the
        remote's buttons reach the gamepad layer through the main-controller
        handler (positions 0-6 plus the hat), so the raw remote-button block
-       (15-25) is not posted there. With a Classic attached (or an
-       unrecognized extension) the gamepad layer carries the extension's
-       controls, so the raw block is the remote's only button surface. */
+       (15-25) is not posted there. With a Classic attached the gamepad
+       layer carries the Classic's controls, and with an unrecognized
+       extension it carries nothing, so in both states the raw block is the
+       remote's only button surface. */
     switch (ctx->m_eExtensionControllerType) {
     case k_eWiiExtensionControllerType_Nunchuk:
         HandleNunchuckButtonData(ctx, joystick, data);
