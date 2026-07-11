@@ -1022,6 +1022,13 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     } else {
         joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     }
+    /* The remote's D-pad is reported as a hat so the auto-mapping's h0.x
+       bindings resolve, matching how every other HIDAPI gamepad reports it.
+       The raw D-pad buttons stay as deliberate duplicates. */
+    if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
+        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
+        joystick->nhats = 1;
+    }
 
     ctx->m_ulLastInput = SDL_GetTicks();
 
@@ -1374,7 +1381,23 @@ static void HandleWiiRemoteButtonDataAsMainController(SDL_DriverWii_Context *ctx
         }
     };
     if (data->hasBaseButtons) {
+        Uint8 hat = 0;
+
         PostPackedButtonData(ctx->timestamp, joystick, buttons, data->rgucBaseButtons, 2, true, false);
+
+        if (data->rgucBaseButtons[0] & 0x01) {
+            hat |= SDL_HAT_LEFT;
+        }
+        if (data->rgucBaseButtons[0] & 0x02) {
+            hat |= SDL_HAT_RIGHT;
+        }
+        if (data->rgucBaseButtons[0] & 0x04) {
+            hat |= SDL_HAT_DOWN;
+        }
+        if (data->rgucBaseButtons[0] & 0x08) {
+            hat |= SDL_HAT_UP;
+        }
+        SDL_SendJoystickHat(ctx->timestamp, joystick, 0, hat);
     }
 }
 
