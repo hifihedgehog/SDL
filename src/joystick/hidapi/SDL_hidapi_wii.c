@@ -1080,13 +1080,12 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
 
     if (SDL_GetTicks() < ctx->m_ulMotionPlusSettleDeadline) {
         /* A Motion Plus mode write is still settling: the port reset would
-           deactivate the M+ again and the presence probe would read the
-           ~20 ms dead window or time out, overwriting good state with "not
-           present" and re-arming the churn loop (hifihedgehog/SDL#13). The
-           mode writes that stamped this deadline recorded
-           m_bMotionPlusPresent and m_ucMotionPlusMode, so keep them and
-           verify once the M+ has settled. Dolphin bars all extension work
-           until the M+ settles (WiimoteController.cpp:1476-1480). */
+           deactivate the M+ again, and a probe inside the ~20 ms dead window
+           would misread error 7 as "not present" and re-arm the churn loop
+           (hifihedgehog/SDL#13). The paths that stamp this deadline leave
+           m_bMotionPlusPresent and m_ucMotionPlusMode recorded, so keep them
+           and verify once the M+ has settled. Dolphin bars all extension
+           work until the M+ settles (WiimoteController.cpp:1476-1480). */
         InitStickCalibrationData(ctx);
         ResetButtonPacketType(ctx);
 
@@ -1131,7 +1130,9 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
        m_bIRActive, re-power the IR camera and reselect the IR report so the pointer
        resumes without the app re-toggling sensors. Motion Plus does not gate this:
        IR and the M+ interleave share report 0x37 (hifihedgehog/SDL#11). Placed
-       after GetMotionPlusState so EnableIR picks the right camera mode. */
+       after the M+ presence state is established (probed on a normal open,
+       preserved by the settle gate on a gated reopen) so EnableIR picks the
+       right camera mode. */
     if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
         ctx->m_bReportSensors && !ctx->m_bIRActive) {
         EnableIR(ctx);
@@ -1910,9 +1911,10 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
                        active M+ always reports its running mode, so a zero
                        high byte here is by construction a mis-attributed
                        dormant-M+ reply (both identify replies echo address
-                       0x00FE). Adopting it would poison the mode while M+
-                       frames stream (hifihedgehog/SDL#13 R3). Leave the
-                       state alone and retry shortly. */
+                       0x00FE), and any other unknown value is garbage.
+                       Neither is adoptable: doing so would poison the mode
+                       while M+ frames stream (hifihedgehog/SDL#13 R3). Leave
+                       the state alone and retry shortly. */
                     ctx->m_ulNextMotionPlusCheck = SDL_max(SDL_GetTicks() + 500, ctx->m_ulMotionPlusSettleDeadline);
                     ctx->m_eCommState = k_eWiiCommunicationState_None;
 
@@ -1944,11 +1946,17 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
                            rather than a parked dead gyro
                            (hifihedgehog/SDL#13 R1). */
                         ActivateMotionPlus(ctx);
-                        /* SDL_max with a future floor, not the bare deadline:
-                           on Linux the activation is a deliberate no-op that
-                           stamps nothing, and arming a stale deadline would
-                           refire the check on every update pass. */
-                        ctx->m_ulNextMotionPlusCheck = SDL_max(SDL_GetTicks() + 500, ctx->m_ulMotionPlusSettleDeadline);
+                        if (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE) {
+                            /* The mode stamp is the evidence the write went
+                               out: verify it at the settle deadline, floored
+                               to the future. Where the activation is a
+                               deliberate no-op (Linux leaves M+ state to the
+                               kernel driver) the mode stays NONE, this arm is
+                               skipped, and the re-arm below restores the 8 s
+                               periodic watch instead of a tight retry
+                               cycle. */
+                            ctx->m_ulNextMotionPlusCheck = SDL_max(SDL_GetTicks() + 500, ctx->m_ulMotionPlusSettleDeadline);
+                        }
                     }
                     ctx->m_eCommState = k_eWiiCommunicationState_None;
                 }
