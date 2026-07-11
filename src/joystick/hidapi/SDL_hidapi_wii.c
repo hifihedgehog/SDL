@@ -1705,10 +1705,26 @@ static void HandleIRData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, con
         dot1_found = !(buff[9] == 0xFF && buff[10] == 0xFF && buff[11] == 0xFF);
     }
 
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT0_X, dot0_found ? (Sint16)dot0_x : (Sint16)-1);
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT0_Y, dot0_found ? (Sint16)dot0_y : (Sint16)-1);
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT1_X, dot1_found ? (Sint16)dot1_x : (Sint16)-1);
-    SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT1_Y, dot1_found ? (Sint16)dot1_y : (Sint16)-1);
+    {
+        /* Data axes bypass the analog anti-jitter gate: seed each with its
+           first real value so a dot appearing in the low camera range, or
+           the -1 lost-dot sentinel, is never withheld inside the connect
+           band (hifihedgehog/SDL#14). No-op after the first post. */
+        const Sint16 v0x = dot0_found ? (Sint16)dot0_x : (Sint16)-1;
+        const Sint16 v0y = dot0_found ? (Sint16)dot0_y : (Sint16)-1;
+        const Sint16 v1x = dot1_found ? (Sint16)dot1_x : (Sint16)-1;
+        const Sint16 v1y = dot1_found ? (Sint16)dot1_y : (Sint16)-1;
+
+        SDL_SeedJoystickDataAxis(joystick, WII_IR_AXIS_DOT0_X, v0x);
+        SDL_SeedJoystickDataAxis(joystick, WII_IR_AXIS_DOT0_Y, v0y);
+        SDL_SeedJoystickDataAxis(joystick, WII_IR_AXIS_DOT1_X, v1x);
+        SDL_SeedJoystickDataAxis(joystick, WII_IR_AXIS_DOT1_Y, v1y);
+
+        SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT0_X, v0x);
+        SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT0_Y, v0y);
+        SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT1_X, v1x);
+        SDL_SendJoystickAxis(ctx->timestamp, joystick, WII_IR_AXIS_DOT1_Y, v1y);
+    }
 }
 
 static void HandleBalanceBoardData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const WiiButtonData *data)
@@ -1726,6 +1742,15 @@ static void HandleBalanceBoardData(SDL_DriverWii_Context *ctx, SDL_Joystick *joy
     bottom_right = (Sint16)((data->rgucExtension[2] << 8) | data->rgucExtension[3]);
     top_left     = (Sint16)((data->rgucExtension[4] << 8) | data->rgucExtension[5]);
     bottom_left  = (Sint16)((data->rgucExtension[6] << 8) | data->rgucExtension[7]);
+
+    /* The corner cells are exact data on the stick-axis numbers, so they get
+       the same anti-jitter bypass as the other data axes: 409 withheld raw
+       counts is on the order of kilograms against a typical unit's 17 kg
+       calibration span (hifihedgehog/SDL#14). */
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, top_left);
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, bottom_left);
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, top_right);
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, bottom_right);
 
     SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTX, top_left);
     SDL_SendJoystickAxis(ctx->timestamp, joystick, SDL_GAMEPAD_AXIS_LEFTY, bottom_left);

@@ -1706,11 +1706,21 @@ static void BLE_DecodeGameCube(BLE_Controller *ctrl, SDL_Joystick *joystick, Uin
    until their semantics are pinned. */
 static void BLE_PostMouseAxes(BLE_Controller *ctrl, SDL_Joystick *joystick, const Uint8 *data, int size, Uint64 ts)
 {
+    Sint16 counter_x, counter_y;
+
     if (!ctrl->mouse_enabled || size < 0x18) {
         return;
     }
-    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_COUNT + 0, (Sint16)(data[0x10] | (data[0x11] << 8)));
-    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_COUNT + 1, (Sint16)(data[0x12] | (data[0x13] << 8)));
+    counter_x = (Sint16)(data[0x10] | (data[0x11] << 8));
+    counter_y = (Sint16)(data[0x12] | (data[0x13] << 8));
+
+    /* Data axes: seed past the analog anti-jitter gate so the first ~409
+       counts of motion per connection are not eaten (hifihedgehog/SDL#14) */
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_COUNT + 0, counter_x);
+    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_COUNT + 1, counter_y);
+
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_COUNT + 0, counter_x);
+    SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_COUNT + 1, counter_y);
 }
 
 static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
