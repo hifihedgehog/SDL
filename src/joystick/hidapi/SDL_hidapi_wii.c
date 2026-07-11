@@ -37,6 +37,12 @@
 
 #define INPUT_WAIT_TIMEOUT_MS      (3 * 1000)
 #define MOTION_PLUS_UPDATE_TIME_MS (8 * 1000)
+/* A Motion Plus takes ~20 ms to activate or deactivate, during which the
+   extension port is completely unresponsive and the detect pin pulses status
+   reports (Dolphin MotionPlus.cpp:355, :367, :216-219). Dolphin's real-Wiimote
+   backend waits 2 s after any M+ mode write before trusting identify results
+   (WiimoteController.cpp:1476-1480). */
+#define WII_MOTIONPLUS_SETTLE_TIME_MS 2000
 #define STATUS_UPDATE_TIME_MS      (15 * 60 * 1000)
 
 #define WII_EXTENSION_NONE            0x2E2E
@@ -172,6 +178,8 @@ typedef struct
     bool m_bRumbleActive;
     bool m_bMotionPlusPresent;
     Uint8 m_ucMotionPlusMode;
+    bool m_bMotionPlusChildConnected;    // live passthrough-connected flag (ext[4] & 0x01) from the M+ data frames
+    Uint64 m_ulMotionPlusSettleDeadline; // ticks until which M+ identify results are unreliable after a mode write
     bool m_bReportSensors;
     bool m_bIRActive;                          // IR camera enabled (bare Wii Remote, sensors on)
     bool m_bBalanceBoardCalibrationValid;
@@ -338,6 +346,33 @@ static bool ReadRegister(SDL_DriverWii_Context *ctx, Uint32 address, int size, b
 static bool SendExtensionIdentify(SDL_DriverWii_Context *ctx, bool sync)
 {
     return ReadRegister(ctx, 0xA400FE, 2, sync);
+}
+
+/* An ACTIVE Motion Plus blocks i2c passthrough entirely (Dolphin
+   MotionPlus.cpp:204-210), so the child behind it is identifiable only from
+   the M+'s stored copy of the child ID: 0xF6 holds ID byte 4, 0xF7 the
+   challenge state, 0xF8 ID byte 0, 0xF9 ID byte 5 (Dolphin MotionPlus.h
+   register map). Dolphin's real-Wiimote backend reads these four bytes at the
+   active address and maps the child from bytes (0xF8, 0xF6, 0xF9)
+   (WiimoteController.cpp:541-564). Our 16-bit extension IDs are full-ID bytes
+   4-5, so the stored pair is (data[0] << 8) | data[3]. */
+static bool ReadStoredChildExtensionID(SDL_DriverWii_Context *ctx, Uint16 *extension)
+{
+    if (!ReadRegister(ctx, 0xA400F6, 4, true)) {
+        return false;
+    }
+    if (ctx->m_rgucReadBuffer[0] != k_eWiiInputReportIDs_ReadMemory) {
+        return false;
+    }
+    if (ctx->m_rgucReadBuffer[4] != 0x00 || ctx->m_rgucReadBuffer[5] != 0xF6) {
+        return false;
+    }
+    if (ctx->m_rgucReadBuffer[3] != 0x30) {
+        // Read error or short read: the register is unreadable right now
+        return false;
+    }
+    *extension = (Uint16)((ctx->m_rgucReadBuffer[6] << 8) | ctx->m_rgucReadBuffer[9]);
+    return true;
 }
 
 static bool ParseExtensionIdentifyResponse(SDL_DriverWii_Context *ctx, Uint16 *extension)
@@ -586,9 +621,23 @@ static void ActivateMotionPlusWithMode(SDL_DriverWii_Context *ctx, Uint8 mode)
      * extension, so don't mess with it here.
      */
 #else
-    WriteRegister(ctx, 0xA600FE, &mode, sizeof(mode), true);
+    /* Already running in the desired mode: rewriting it would only restart
+       the M+'s ~20 ms reset for nothing. Dolphin changes the mode only when
+       current differs from desired (WiimoteController.cpp:533-535). */
+    if (ctx->m_ucMotionPlusMode == mode) {
+        return;
+    }
+
+    /* An ACTIVE M+ answers only at the active address and ignores writes to
+       the inactive one, so a live mode switch must target 0xA4xxxx; Dolphin
+       picks the address by activation state (WiimoteController.cpp:1056-1060).
+       Every mode write starts the M+'s ~20 ms reset, so stamp the settle
+       window during which identify results are unreliable. */
+    Uint32 address = (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE) ? 0xA400FE : 0xA600FE;
+    WriteRegister(ctx, address, &mode, sizeof(mode), true);
 
     ctx->m_ucMotionPlusMode = mode;
+    ctx->m_ulMotionPlusSettleDeadline = SDL_GetTicks() + WII_MOTIONPLUS_SETTLE_TIME_MS;
 #endif // LINUX
 }
 
@@ -614,6 +663,7 @@ static void DeactivateMotionPlus(SDL_DriverWii_Context *ctx)
     ReadInputSync(ctx, k_eWiiInputReportIDs_Status, NULL);
 
     ctx->m_ucMotionPlusMode = WII_MOTIONPLUS_MODE_NONE;
+    ctx->m_ulMotionPlusSettleDeadline = SDL_GetTicks() + WII_MOTIONPLUS_SETTLE_TIME_MS;
 }
 
 static void UpdatePowerLevelWii(SDL_Joystick *joystick, Uint8 batteryLevelByte)
@@ -780,7 +830,13 @@ static void InitStickCalibrationData(SDL_DriverWii_Context *ctx)
 
 static void InitializeExtension(SDL_DriverWii_Context *ctx)
 {
-    SendExtensionReset(ctx, true);
+    /* Resetting the port with an ACTIVE Motion Plus would deactivate it (a
+       write of any value to 0xf0 is the deactivation signal, Dolphin
+       MotionPlus.cpp:262-268) and open its ~20 ms dead window. The child
+       behind an active M+ is unreachable for a reset anyway. */
+    if (ctx->m_ucMotionPlusMode == WII_MOTIONPLUS_MODE_NONE) {
+        SendExtensionReset(ctx, true);
+    }
     InitStickCalibrationData(ctx);
     ResetButtonPacketType(ctx);
 }
@@ -846,7 +902,59 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
             if ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID) {
                 motion_plus_mode = (Uint8)(extension >> 8);
             }
-            if (motion_plus_mode || extension == WII_EXTENSION_UNINITIALIZED) {
+
+            if (motion_plus_mode) {
+                /* The port answered with an ACTIVE Motion Plus. Deactivating
+                   it to identify the child opens its ~20 ms dead window,
+                   where identify reads return error 7 and parse as "no
+                   extension" (the misread behind hifihedgehog/SDL#12), so
+                   identify the child from the M+'s stored ID registers and
+                   leave the M+ running, as Dolphin's real-Wiimote backend
+                   does (WiimoteController.cpp:541-564). The stored registers
+                   are stale when no child is attached, so gate on the live
+                   passthrough-connected flag from the M+ data frames. */
+                Uint16 stored;
+                if (ctx->m_bMotionPlusChildConnected &&
+                    ReadStoredChildExtensionID(ctx, &stored)) {
+                    eExtensionControllerType = GetExtensionType(stored);
+                    ctx->m_ucMotionPlusMode = motion_plus_mode;
+                    break;
+                }
+
+                /* Fallback (no live child flag, or the stored read failed):
+                   deactivate the M+, consuming its status pulse so the dead
+                   window passes, re-init the now-visible port, and identify
+                   with retries while it settles. Error 7 here means
+                   "settling", not "removed", for at least 50 ms. */
+                DeactivateMotionPlus(ctx);
+                SendExtensionReset(ctx, true);
+                {
+                    const Uint64 retry_deadline = SDL_GetTicks() + 50;
+                    for (;;) {
+                        extension = WII_EXTENSION_NONE;
+                        if (SendExtensionIdentify(ctx, true) &&
+                            ParseExtensionIdentifyResponse(ctx, &extension) &&
+                            extension != WII_EXTENSION_NONE) {
+                            break;
+                        }
+                        if (SDL_GetTicks() >= retry_deadline) {
+                            break;
+                        }
+                        SDL_Delay(5);
+                    }
+                }
+                eExtensionControllerType = GetExtensionType(extension);
+
+                // Restore the Motion Plus to the mode it was running
+                ActivateMotionPlusWithMode(ctx, motion_plus_mode);
+                break;
+            }
+
+            if (extension == WII_EXTENSION_UNINITIALIZED) {
+                /* Uninitialized child with the M+ inactive: the 0xf0 reset
+                   write passes through as plain child init (Dolphin
+                   MotionPlus.cpp:227-244, "The M+ deactivation signal is
+                   cleverly the same as EXT initialization"). */
                 SendExtensionReset(ctx, true);
                 if (SendExtensionIdentify(ctx, true)) {
                     ParseExtensionIdentifyResponse(ctx, &extension);
@@ -854,11 +962,6 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
             }
 
             eExtensionControllerType = GetExtensionType(extension);
-
-            // Reset the Motion Plus controller if needed
-            if (motion_plus_mode) {
-                ActivateMotionPlusWithMode(ctx, motion_plus_mode);
-            }
             break;
         }
     }
@@ -950,6 +1053,16 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     InitializeExtension(ctx);
 
     GetMotionPlusState(ctx, &ctx->m_bMotionPlusPresent, &ctx->m_ucMotionPlusMode);
+
+    /* If sensors stayed enabled across an extension hot-plug, resync the M+
+       passthrough mode to the (possibly new) extension type: after a child is
+       identified behind an ACTIVE M+ from its stored ID, the M+ is still
+       running the old mode and would never carry the child's data. The
+       equal-mode guard in ActivateMotionPlusWithMode makes this free when
+       the mode already matches. */
+    if (ctx->m_bReportSensors && ctx->m_bMotionPlusPresent) {
+        ActivateMotionPlus(ctx);
+    }
 
     if (NeedsPeriodicMotionPlusCheck(ctx, false)) {
         SchedulePeriodicMotionPlusCheck(ctx);
@@ -1579,6 +1692,11 @@ static void HandleButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick,
             return;
         }
 
+        /* Record the live passthrough-connected flag: it gates the stored
+           child-ID identify when the extension type is re-read behind an
+           ACTIVE Motion Plus (the stored registers are stale without it). */
+        ctx->m_bMotionPlusChildConnected = ((data->rgucExtension[4] & 0x01) != 0);
+
         if (data->rgucExtension[4] & 0x01) {
             if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None) {
                 // Something was plugged into the extension port, reinitialize to get new state
@@ -1685,7 +1803,13 @@ static void HandleStatus(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
          * Motion Plus packets.
          */
         if (NeedsPeriodicMotionPlusCheck(ctx, true)) {
-            ctx->m_ulNextMotionPlusCheck = SDL_GetTicks();
+            /* Not NOW: this status is usually the M+'s own activation or
+               deactivation pulse, and probing inside the ~20 ms dead window
+               reads error 7, which parses as "no extension" and tears the
+               device down (hifihedgehog/SDL#12). Check once the mode write
+               has settled. */
+            Uint64 now = SDL_GetTicks();
+            ctx->m_ulNextMotionPlusCheck = SDL_max(now, ctx->m_ulMotionPlusSettleDeadline);
         }
 
     } else if (hadExtension != hasExtension) {
@@ -1727,6 +1851,14 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
                 ReadRegister(ctx, 0xA600FE, 2, false);
 
                 ctx->m_eCommState = k_eWiiCommunicationState_CheckMotionPlusStage2;
+
+            } else if (SDL_GetTicks() < ctx->m_ulMotionPlusSettleDeadline) {
+                /* Non-response while a mode write settles means the M+ is
+                   mid-reset, not removed. Dolphin maps non-response to wait
+                   and retry, never to a state change (WiimoteController.cpp:
+                   660-668). Check again after the window. */
+                ctx->m_ulNextMotionPlusCheck = ctx->m_ulMotionPlusSettleDeadline;
+                ctx->m_eCommState = k_eWiiCommunicationState_None;
 
             } else {
                 // Motion Plus is not present
