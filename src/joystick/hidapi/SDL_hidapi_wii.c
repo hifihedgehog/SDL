@@ -546,15 +546,14 @@ static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint
 {
     Uint16 extension;
 
-    if (connected) {
-        *connected = false;
-    }
-    if (mode) {
-        *mode = 0;
-    }
-
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_WiiUPro) {
         // The Wii U Pro controller never has the Motion Plus extension
+        if (connected) {
+            *connected = false;
+        }
+        if (mode) {
+            *mode = 0;
+        }
         return true;
     }
 
@@ -566,7 +565,7 @@ static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint
                 *connected = true;
             }
             if (mode) {
-                *mode = (extension >> 8);
+                *mode = (Uint8)(extension >> 8);
             }
             return true;
         }
@@ -574,16 +573,19 @@ static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint
 
     if (ReadRegister(ctx, 0xA600FE, 2, true) &&
         ParseExtensionIdentifyResponse(ctx, &extension)) {
-        if ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID) {
-            // Motion Plus is currently connected
-            if (connected) {
-                *connected = true;
-            }
+        // Determined: connected exactly when the inactive M+ answered its ID
+        if (connected) {
+            *connected = ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID);
+        }
+        if (mode) {
+            *mode = 0;
         }
         return true;
     }
 
-    // Failed to read the register or parse the response
+    /* Total read failure: leave the outputs untouched so a caller that
+       stores them unconditionally keeps its last known-good state instead
+       of a zeroed one (hifihedgehog/SDL#13). */
     return false;
 }
 
@@ -918,6 +920,9 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                     ReadStoredChildExtensionID(ctx, &stored)) {
                     eExtensionControllerType = GetExtensionType(stored);
                     ctx->m_ucMotionPlusMode = motion_plus_mode;
+                    /* The port just answered with an active M+, the strongest
+                       presence evidence there is */
+                    ctx->m_bMotionPlusPresent = true;
                     break;
                 }
 
@@ -947,6 +952,7 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
 
                 // Restore the Motion Plus to the mode it was running
                 ActivateMotionPlusWithMode(ctx, motion_plus_mode);
+                ctx->m_bMotionPlusPresent = true;
                 break;
             }
 
@@ -1050,22 +1056,36 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
 
     ctx->joystick = joystick;
 
-    InitializeExtension(ctx);
+    if (SDL_GetTicks() < ctx->m_ulMotionPlusSettleDeadline) {
+        /* A Motion Plus mode write is still settling: the port reset would
+           deactivate the M+ again and the presence probe would read the
+           ~20 ms dead window or time out, overwriting good state with "not
+           present" and re-arming the churn loop (hifihedgehog/SDL#13). The
+           mode writes that stamped this deadline recorded
+           m_bMotionPlusPresent and m_ucMotionPlusMode, so keep them and
+           verify once the M+ has settled. Dolphin bars all extension work
+           until the M+ settles (WiimoteController.cpp:1476-1480). */
+        InitStickCalibrationData(ctx);
+        ResetButtonPacketType(ctx);
+        ctx->m_ulNextMotionPlusCheck = ctx->m_ulMotionPlusSettleDeadline;
+    } else {
+        InitializeExtension(ctx);
 
-    GetMotionPlusState(ctx, &ctx->m_bMotionPlusPresent, &ctx->m_ucMotionPlusMode);
+        GetMotionPlusState(ctx, &ctx->m_bMotionPlusPresent, &ctx->m_ucMotionPlusMode);
 
-    /* If sensors stayed enabled across an extension hot-plug, resync the M+
-       passthrough mode to the (possibly new) extension type: after a child is
-       identified behind an ACTIVE M+ from its stored ID, the M+ is still
-       running the old mode and would never carry the child's data. The
-       equal-mode guard in ActivateMotionPlusWithMode makes this free when
-       the mode already matches. */
-    if (ctx->m_bReportSensors && ctx->m_bMotionPlusPresent) {
-        ActivateMotionPlus(ctx);
-    }
+        /* If sensors stayed enabled across an extension hot-plug, resync the M+
+           passthrough mode to the (possibly new) extension type: after a child is
+           identified behind an ACTIVE M+ from its stored ID, the M+ is still
+           running the old mode and would never carry the child's data. The
+           equal-mode guard in ActivateMotionPlusWithMode makes this free when
+           the mode already matches. */
+        if (ctx->m_bReportSensors && ctx->m_bMotionPlusPresent) {
+            ActivateMotionPlus(ctx);
+        }
 
-    if (NeedsPeriodicMotionPlusCheck(ctx, false)) {
-        SchedulePeriodicMotionPlusCheck(ctx);
+        if (NeedsPeriodicMotionPlusCheck(ctx, false)) {
+            SchedulePeriodicMotionPlusCheck(ctx);
+        }
     }
 
     /* If sensors were left enabled across an extension hot-plug that cleared
@@ -1840,10 +1860,22 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
                 // Motion Plus is currently active
                 SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Motion Plus CONNECTED (stage %d)", ctx->m_eCommState == k_eWiiCommunicationState_CheckMotionPlusStage1 ? 1 : 2);
 
+                /* A successful M+ ID read is the state source, never a
+                   disconnect (Dolphin WiimoteController.cpp:452-456). Adopt
+                   the presence and the running mode from the reply (the ID's
+                   high byte carries it, 0 when inactive) instead of leaving
+                   ctx desynced, which turned every CONNECTED conclusion into
+                   a teardown and sustained an ~8 s churn loop
+                   (hifihedgehog/SDL#13). The teardown stays only for the
+                   genuine capability change: an M+ that newly appeared, so
+                   the sensor set needs rebuilding, after which the corrected
+                   state prevents any repeat. */
                 if (!ctx->m_bMotionPlusPresent) {
                     // Reinitialize to get new sensor availability
                     ctx->m_bDisconnected = true;
                 }
+                ctx->m_bMotionPlusPresent = true;
+                ctx->m_ucMotionPlusMode = (Uint8)(extension >> 8);
                 ctx->m_eCommState = k_eWiiCommunicationState_None;
 
             } else if (ctx->m_eCommState == k_eWiiCommunicationState_CheckMotionPlusStage1) {
