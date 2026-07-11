@@ -1024,7 +1024,10 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     }
     /* The remote's D-pad is reported as a hat so the auto-mapping's h0.x
        bindings resolve, matching how every other HIDAPI gamepad reports it.
-       The raw D-pad buttons stay as deliberate duplicates. */
+       The raw D-pad buttons stay as deliberate duplicates. Classic Controller
+       and Wii U Pro are deliberately excluded: their handlers post the D-pad
+       as buttons only, and their bits are active-low in the extension bytes,
+       so extending this condition requires inverted hat composition there. */
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
         ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
         joystick->nhats = 1;
