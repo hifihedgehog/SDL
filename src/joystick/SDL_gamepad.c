@@ -4006,6 +4006,29 @@ bool SDL_GetGamepadCapSense(SDL_Gamepad *gamepad, SDL_GamepadCapSenseType type)
     return result;
 }
 
+bool SDL_GetGamepadNfcTagUid(SDL_Gamepad *gamepad, char *uid, int len)
+{
+    bool result = false;
+
+    if (uid && len > 0) {
+        *uid = '\0';
+    }
+
+    SDL_LockJoysticks();
+    {
+        SDL_Joystick *joystick = SDL_GetGamepadJoystick(gamepad);
+        if (joystick) {
+            if (uid && len > 0) {
+                SDL_strlcpy(uid, joystick->nfc_tag_uid, len);
+            }
+            result = (joystick->nfc_tag_uid[0] != '\0');
+        }
+    }
+    SDL_UnlockJoysticks();
+
+    return result;
+}
+
 SDL_JoystickID SDL_GetGamepadID(SDL_Gamepad *gamepad)
 {
     SDL_Joystick *joystick = SDL_GetGamepadJoystick(gamepad);

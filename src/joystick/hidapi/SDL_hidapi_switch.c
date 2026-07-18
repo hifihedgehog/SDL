@@ -131,6 +131,11 @@ typedef enum
 
 #define k_unSwitchOutputPacketDataLength 49
 #define k_unSwitchMaxOutputPacketLength  64
+/* The Bluetooth NFC/IR input report 0x31 is 362 bytes (dekuNukem
+   bluetooth_hid_notes.md); the read buffer must hold it so the NFC tag
+   payload (UID through roughly byte 75) is not truncated at the old 64-byte
+   size. jc_toolkit reads NFC replies into a 0x170-byte buffer. */
+#define k_unSwitchMaxInputPacketLength   368
 #define k_unSwitchBluetoothPacketLength  k_unSwitchOutputPacketDataLength
 #define k_unSwitchUSBPacketLength        k_unSwitchMaxOutputPacketLength
 
@@ -317,7 +322,7 @@ typedef struct
     bool m_bEnhancedMode;
     bool m_bEnhancedModeAvailable;
     SwitchCommonOutputPacket_t m_RumblePacket;
-    Uint8 m_rgucReadBuffer[k_unSwitchMaxOutputPacketLength];
+    Uint8 m_rgucReadBuffer[k_unSwitchMaxInputPacketLength];
     bool m_bRumbleActive;
     Uint64 m_ulRumbleSent;
     bool m_bRumblePending;
@@ -326,6 +331,14 @@ typedef struct
     bool m_bSensorsSupported;
     bool m_bReportSensors;
     bool m_bIRSensorActive; // right Joy-Con NIR camera streaming (input report 0x31)
+    // NFC tag reading (fork issue #15): MCU-driven, async off the update loop
+    bool m_bNfcActive;          // machine running: input mode 0x31 held, MCU coming up or polling
+    Uint8 m_ucNfcState;         // ESwitchNfcState
+    Uint8 m_ucNfcRounds;        // command re-send rounds in the current state
+    bool m_bNfcTagPresent;      // a tag UID is currently published
+    Uint64 m_ulNfcActionTicks;  // last state-machine send (retry / cooldown / pacing)
+    Uint64 m_ulNfcLastMcuTicks; // last NFC-shaped MCU packet seen (stream watchdog)
+    Uint64 m_ulNfcLastTagTicks; // last tag-present packet (removal debounce)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -1223,9 +1236,10 @@ static void UpdateInputMode(SDL_DriverSwitch_Context *ctx)
 {
     Uint8 input_mode;
 
-    if (ctx->m_bIRSensorActive) {
-        // The NIR camera streams over the NFC/IR report, which also carries
-        // the full controller state, so buttons/sticks/IMU keep flowing.
+    if (ctx->m_bIRSensorActive || ctx->m_bNfcActive) {
+        // The NIR camera and the NFC reader stream over the NFC/IR report,
+        // which also carries the full controller state, so buttons/sticks/IMU
+        // keep flowing.
         input_mode = k_eSwitchInputReportIDs_FullControllerAndMcuState;
     } else if (ctx->m_bReportSensors) {
         input_mode = GetSensorInputMode(ctx);
@@ -1233,6 +1247,417 @@ static void UpdateInputMode(SDL_DriverSwitch_Context *ctx)
         input_mode = GetDefaultInputMode(ctx);
     }
     SetInputMode(ctx, input_mode);
+}
+
+/* ---------------------------------------------------------------------------
+ * NFC tag reading (PadForge fork addition, hifihedgehog/SDL#15).
+ *
+ * The right Joy-Con and Pro Controller read NFC tags through the same NFC/IR
+ * MCU the NIR camera uses. The flow is transcribed from jc_toolkit
+ * nfc_tag_info() (jctool.cpp:2241 on, credited to bettse), grounded in
+ * dekuNukem bluetooth_hid_subcommands_notes.md (subcommands 0x21/0x22 and
+ * the 0x11 output's active-polling role) and bluetooth_hid_notes.md (report
+ * 0x31: standard input in the head, MCU payload from byte 49).
+ *
+ * Unlike the synchronous NIR bring-up above, this machine runs one step per
+ * UpdateDevice tick and never blocks: each state sends its command through
+ * the normal write path, and the ack gates run on the reports the update
+ * loop reads anyway (subcommand acks on 0x21, MCU payloads on 0x31). Retry
+ * pacing mirrors jc_toolkit: a resend window worth ~8 report reads and 7
+ * command rounds before giving up (nfc_tag_info retry/error_reading limits).
+ * The standard input head of every 0x31 report keeps flowing through
+ * HandleFullControllerState, so gamepad input never degrades while NFC mode
+ * is active. */
+
+typedef enum
+{
+    k_eSwitchNfcState_Idle,
+    k_eSwitchNfcState_SetInputMode, // subcmd 0x03 arg 0x31; ack bytes 13/14 == 0x80/0x03 (jctool.cpp:2264-2290)
+    k_eSwitchNfcState_EnableMCU,    // subcmd 0x22 arg 0x01; ack 0x80/0x22 (jctool.cpp:2292-2320)
+    k_eSwitchNfcState_AwaitStandby, // 0x11/0x01 poll until bytes 49/56 == 0x01/0x01 (jctool.cpp:2322-2354)
+    k_eSwitchNfcState_SetModeNFC,   // subcmd 0x21, MCU cmd 0x21/0x00 mode 0x04; ack bytes 15/22 == 0x01/0x01 (jctool.cpp:2356-2396)
+    k_eSwitchNfcState_AwaitNFC,     // 0x11/0x01 poll until byte 56 == 0x04 (jctool.cpp:2398-2424)
+    k_eSwitchNfcState_WaitReceive,  // 0x11 NFC cmd 0x04; reply 0x2a/0x0500/0x31 state 0x00 (jctool.cpp:2426-2465)
+    k_eSwitchNfcState_Polling,      // 0x11 NFC cmd 0x01 sent; steady tag polling (jctool.cpp:2467-2540)
+    k_eSwitchNfcState_Failed        // gave up; retried after a cooldown while the hint stays on
+} ESwitchNfcState;
+
+#define SWITCH_NFC_RESEND_MS         600  // ~8 reads at the report cadence (jc_toolkit retries > 8 at 64 ms)
+#define SWITCH_NFC_MAX_ROUNDS        7    // jc_toolkit error_reading > 7
+#define SWITCH_NFC_TAG_GONE_MS       2000 // removal debounce: outlasts one watchdog re-poll cycle so a held tag re-detects first
+#define SWITCH_NFC_POLL_PACE_MS      100  // minimum spacing between StartPolling re-issues
+#define SWITCH_NFC_RETRY_COOLDOWN_MS 5000 // wait after a failed bring-up before trying again
+
+static bool IsNfcSupported(SDL_DriverSwitch_Context *ctx)
+{
+    // The NFC reader is in the right Joy-Con and the Pro Controller
+    if (ctx->m_bInputOnly || ctx->device->parent) {
+        return false;
+    }
+    return ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight ||
+           ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_ProController;
+}
+
+/* Send a subcommand without waiting for the reply: the async machine reads
+ * its acks from the update loop instead. The framing is WriteSubcommand's
+ * send half. */
+static bool SendSubcommandAsync(SDL_DriverSwitch_Context *ctx, ESwitchSubcommandIDs ucCommandID, const Uint8 *pBuf, Uint8 ucLen)
+{
+    SwitchSubcommandOutputPacket_t commandPacket;
+
+    ConstructSubcommand(ctx, ucCommandID, pBuf, ucLen, &commandPacket);
+    return WritePacket(ctx, &commandPacket, sizeof(commandPacket));
+}
+
+/* Send an 0x11 output carrying an MCU NFC command (MCU subcommand 0x02).
+ * Framing from jc_toolkit steps 5-6 (jctool.cpp:2432-2447, 2478-2494):
+ * byte 10 = 0x02, byte 11 = NFC command (0x04 StartWaitingReceive, 0x01
+ * StartPolling, 0x02 StopPolling, 0x00 CancelAll), byte 14 = 0x08 (last
+ * packet of the command), byte 15 = payload length, payload from byte 16,
+ * crc8 over bytes 11-46 at byte 47. */
+static bool WriteNfcCommand(SDL_DriverSwitch_Context *ctx, Uint8 ucNfcCommand, const Uint8 *pPayload, Uint8 ucPayloadLen)
+{
+    Uint8 rgucPacket[k_unSwitchOutputPacketDataLength];
+
+    SDL_zeroa(rgucPacket);
+    rgucPacket[0] = k_eSwitchOutputReportIDs_McuData;
+    rgucPacket[1] = ctx->m_nCommandNumber;
+    SDL_memcpy(&rgucPacket[2], ctx->m_RumblePacket.rumbleData, sizeof(ctx->m_RumblePacket.rumbleData));
+    ctx->m_nCommandNumber = (ctx->m_nCommandNumber + 1) & 0xF;
+
+    rgucPacket[10] = 0x02;
+    rgucPacket[11] = ucNfcCommand;
+    rgucPacket[12] = 0x00; // packet number in a multi-packet command
+    rgucPacket[13] = 0x00;
+    rgucPacket[14] = 0x08; // last command packet
+    rgucPacket[15] = ucPayloadLen;
+    if (pPayload && ucPayloadLen > 0) {
+        SDL_memcpy(&rgucPacket[16], pPayload, ucPayloadLen);
+    }
+    rgucPacket[47] = MCUCrc8(&rgucPacket[11], 36);
+    return WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
+}
+
+static bool SendNfcStartPolling(SDL_DriverSwitch_Context *ctx)
+{
+    /* jc_toolkit step 6 payload (jctool.cpp:2484-2489): enable Mifare
+       support, two unknown zeros, 0x2c (some other values fail), and a
+       trailing 0x01 the Switch itself sends. */
+    static const Uint8 rgucPayload[] = { 0x01, 0x00, 0x00, 0x2c, 0x01 };
+
+    return WriteNfcCommand(ctx, 0x01, rgucPayload, sizeof(rgucPayload));
+}
+
+static void SetNfcTagUid(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, const char *pchUid)
+{
+    if (joystick) {
+        SDL_SendJoystickNfcTagUid(joystick, pchUid);
+    }
+    ctx->m_bNfcTagPresent = (pchUid && *pchUid);
+}
+
+/* Enter a state and send its command. Also used to re-send the current
+ * state's command on a retry round. */
+static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 now)
+{
+    ctx->m_ucNfcState = ucState;
+    ctx->m_ulNfcActionTicks = now;
+    ctx->m_bNfcActive = true;
+
+    switch (ucState) {
+    case k_eSwitchNfcState_SetInputMode:
+    {
+        Uint8 ucMode = k_eSwitchInputReportIDs_FullControllerAndMcuState;
+        // Keep the mode bookkeeping in agreement so nothing reverts it
+        ctx->m_nCurrentInputMode = ucMode;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
+        break;
+    }
+    case k_eSwitchNfcState_EnableMCU:
+    {
+        Uint8 ucOn = 0x01;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOn, sizeof(ucOn));
+        break;
+    }
+    case k_eSwitchNfcState_AwaitStandby:
+    case k_eSwitchNfcState_AwaitNFC:
+        WriteMcuDataRequest(ctx, 0x01, 0, 0); // MCU status poll
+        break;
+    case k_eSwitchNfcState_SetModeNFC:
+    {
+        /* Subcommand 0x21 with the 38-byte MCU payload: mcu_cmd 0x21,
+           mcu_subcmd 0x00, mode 0x04 (NFC), crc8 over payload[1..36] at
+           payload[37], the same layout WriteMCUConfig builds for the
+           camera (jctool.cpp:2363-2374). Sent async; the ack gate runs in
+           HandleNfcSubcommandReply. */
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        rgucPayload[0] = 0x21;
+        rgucPayload[1] = 0x00;
+        rgucPayload[2] = 0x04; // MCU mode 4: NFC
+        rgucPayload[37] = MCUCrc8(&rgucPayload[1], 36);
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload, sizeof(rgucPayload));
+        break;
+    }
+    case k_eSwitchNfcState_WaitReceive:
+        WriteNfcCommand(ctx, 0x04, NULL, 0); // StartWaitingReceive
+        break;
+    case k_eSwitchNfcState_Polling:
+        SendNfcStartPolling(ctx);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Drop the machine without touching the bus: used when the IR path takes
+ * MCU ownership (suspending the MCU here would kill the camera it just
+ * configured). */
+static void AbandonNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick)
+{
+    SetNfcTagUid(ctx, joystick, NULL);
+    ctx->m_bNfcActive = false;
+    ctx->m_ucNfcState = k_eSwitchNfcState_Idle;
+    ctx->m_ucNfcRounds = 0;
+}
+
+/* Power the MCU back down and (optionally) restore the input report mode,
+ * mirroring jc_toolkit's teardown (step 10, jctool.cpp:2048-2095). The
+ * suspend is sent unconditionally when the machine was up: suspending an
+ * MCU that never resumed is harmless, and inferring power from the state
+ * enum is how a watchdog re-init would leak a running MCU. From the update
+ * loop this is fire-and-forget (a lost suspend costs battery, not
+ * correctness, and the hint machinery re-arms cleanly); the close path uses
+ * a synchronous variant below since no later tick is guaranteed. */
+static void TeardownNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, bool bRestoreInputMode)
+{
+    bool bWasUp = (ctx->m_ucNfcState != k_eSwitchNfcState_Idle &&
+                   ctx->m_ucNfcState != k_eSwitchNfcState_Failed);
+
+    if (bWasUp) {
+        Uint8 ucOff = 0x00;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff));
+    }
+    if (bWasUp && bRestoreInputMode && !ctx->m_bIRSensorActive) {
+        Uint8 ucMode = ctx->m_bReportSensors ? GetSensorInputMode(ctx) : GetDefaultInputMode(ctx);
+        ctx->m_nCurrentInputMode = ucMode;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
+    }
+    AbandonNfc(ctx, joystick);
+}
+
+static void FailNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now)
+{
+    TeardownNfc(ctx, joystick, true);
+    ctx->m_ucNfcState = k_eSwitchNfcState_Failed;
+    ctx->m_ulNfcActionTicks = now;
+}
+
+/* Ack gates for the subcommand-reply steps, on the raw 0x21 report bytes
+ * jc_toolkit checks: byte 13 = ack, byte 14 = replied subcommand, and for
+ * the MCU-config reply the standby state echo at bytes 15 and 22. */
+static void HandleNfcSubcommandReply(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now, int size)
+{
+    const Uint8 *buf = ctx->m_rgucReadBuffer;
+
+    (void)joystick;
+    /* Byte 13's MSB is the ACK/NACK discriminator (dekuNukem
+       bluetooth_hid_notes.md); a truncated report or a NACK must not
+       advance the machine on stale payload bytes. */
+    if (size < 23 || !(buf[13] & 0x80)) {
+        return;
+    }
+    switch (ctx->m_ucNfcState) {
+    case k_eSwitchNfcState_SetInputMode:
+        if (buf[13] == 0x80 && buf[14] == 0x03) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_EnableMCU, now);
+        }
+        break;
+    case k_eSwitchNfcState_EnableMCU:
+        if (buf[13] == 0x80 && buf[14] == 0x22) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_AwaitStandby, now);
+        }
+        break;
+    case k_eSwitchNfcState_SetModeNFC:
+        if (buf[14] == 0x21 && buf[15] == 0x01 && buf[22] == 0x01) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_AwaitNFC, now);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* MCU payload gates on 0x31 reports: status polls during bring-up, NFC
+ * responses and tag packets while polling. Byte layout per jc_toolkit:
+ * 49 = MCU report type (0x01 status, 0x2a NFC), 50-51 = 0x0500 for NFC,
+ * 56 = state, and for a detected tag IC at 62, type at 63, UID length at
+ * 64, UID bytes from 65 (jctool.cpp:2503-2527). */
+static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now, int size)
+{
+    const Uint8 *buf = ctx->m_rgucReadBuffer;
+
+    if (size < 57) {
+        return;
+    }
+    /* Heartbeat only on NFC-shaped payloads: report 0x31 streams at 60 Hz
+       with an all-zero MCU tail when no MCU activity is pending, and letting
+       those refresh the watchdog would let a lost polling command livelock
+       forever. */
+    if (buf[49] == 0x01 || buf[49] == 0x2a) {
+        ctx->m_ulNfcLastMcuTicks = now;
+    } else {
+        return;
+    }
+
+    switch (ctx->m_ucNfcState) {
+    case k_eSwitchNfcState_AwaitStandby:
+        if (buf[49] == 0x01 && buf[56] == 0x01) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_SetModeNFC, now);
+        }
+        break;
+    case k_eSwitchNfcState_AwaitNFC:
+        if (buf[49] == 0x01 && buf[56] == 0x04) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
+        }
+        break;
+    case k_eSwitchNfcState_WaitReceive:
+        if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05 && buf[55] == 0x31) {
+            if (buf[56] == 0x00) {
+                ctx->m_ucNfcRounds = 0;
+                ctx->m_ulNfcLastTagTicks = 0;
+                EnterNfcState(ctx, k_eSwitchNfcState_Polling, now);
+            } else if (buf[56] == 0x0b &&
+                       now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+                /* Busy: reissue promptly, matching jc_toolkit's re-send-on-
+                   busy loop rather than waiting out the full resend window */
+                ctx->m_ulNfcActionTicks = now;
+                WriteNfcCommand(ctx, 0x04, NULL, 0);
+            }
+        }
+        break;
+    case k_eSwitchNfcState_Polling:
+        if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05) {
+            if (buf[56] == 0x09) {
+                // Tag detected
+                int nUidLen = buf[64];
+                if (nUidLen > 10) {
+                    nUidLen = 10;
+                }
+                if (nUidLen > 0 && size >= 65 + nUidLen) {
+                    char rgchUid[21];
+                    int i;
+                    for (i = 0; i < nUidLen; ++i) {
+                        (void)SDL_snprintf(&rgchUid[i * 2], 3, "%02x", buf[65 + i]);
+                    }
+                    rgchUid[nUidLen * 2] = '\0';
+                    SetNfcTagUid(ctx, joystick, rgchUid);
+                    ctx->m_ulNfcLastTagTicks = now;
+                }
+            } else {
+                /* Any other NFC response (awaiting-command 0x00, polled-with-
+                   no-tag 0x01, or a state we do not decode) means this poll
+                   round produced no tag: keep scanning, exactly jc_toolkit's
+                   loop, which re-sends StartPolling after every non-tag 0x2a
+                   response. The pace guard keeps this to at most one command
+                   per SWITCH_NFC_POLL_PACE_MS. */
+                if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+                    ctx->m_ulNfcActionTicks = now;
+                    SendNfcStartPolling(ctx);
+                }
+                ctx->m_ucNfcRounds = 0;
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* One machine step per update tick: start, retry, watchdog, debounce,
+ * teardown. Never blocks. */
+static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now)
+{
+    if (!IsNfcSupported(ctx)) {
+        return;
+    }
+
+    /* The NIR camera owns the MCU while it streams (it programs MCU mode 5,
+       NFC needs mode 4). Abandon without touching the bus: a teardown's MCU
+       suspend would kill the camera the IR path just configured. The machine
+       re-arms automatically when the camera stops. */
+    if (ctx->m_bIRSensorActive) {
+        if (ctx->m_ucNfcState != k_eSwitchNfcState_Idle &&
+            ctx->m_ucNfcState != k_eSwitchNfcState_Failed) {
+            AbandonNfc(ctx, joystick);
+        }
+        return;
+    }
+
+    /* The hint is read here, on the update loop, because SDL's hint storage
+       is thread-safe and a callback-written flag would be a cross-thread
+       data race (the callback runs on whichever thread changes the hint). */
+    if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC, false)) {
+        if (ctx->m_ucNfcState == k_eSwitchNfcState_Failed) {
+            ctx->m_ucNfcState = k_eSwitchNfcState_Idle;
+        } else if (ctx->m_ucNfcState != k_eSwitchNfcState_Idle) {
+            TeardownNfc(ctx, joystick, true);
+        }
+        return;
+    }
+
+    switch (ctx->m_ucNfcState) {
+    case k_eSwitchNfcState_Idle:
+        ctx->m_ucNfcRounds = 0;
+        EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
+        break;
+    case k_eSwitchNfcState_Failed:
+        if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RETRY_COOLDOWN_MS) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
+        }
+        break;
+    case k_eSwitchNfcState_Polling:
+        // Removal debounce
+        if (ctx->m_bNfcTagPresent && now >= ctx->m_ulNfcLastTagTicks + SWITCH_NFC_TAG_GONE_MS) {
+            SetNfcTagUid(ctx, joystick, NULL);
+        }
+        // Stream watchdog: no NFC-shaped packet for a while, nudge or re-init
+        if (now >= ctx->m_ulNfcLastMcuTicks + (2 * SWITCH_NFC_RESEND_MS) &&
+            now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS) {
+            ctx->m_ucNfcRounds++;
+            if (ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
+                /* Full re-init. Suspend the MCU first: it is known powered
+                   here, and the bring-up expects to resume from suspended
+                   into Standby. */
+                Uint8 ucOff = 0x00;
+                SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff));
+                ctx->m_ucNfcRounds = 0;
+                SetNfcTagUid(ctx, joystick, NULL);
+                EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
+            } else {
+                ctx->m_ulNfcActionTicks = now;
+                SendNfcStartPolling(ctx);
+            }
+        }
+        break;
+    default:
+        // Bring-up states: re-send on timeout, give up after the round limit
+        if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS) {
+            ctx->m_ucNfcRounds++;
+            if (ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
+                FailNfc(ctx, joystick, now);
+            } else {
+                EnterNfcState(ctx, ctx->m_ucNfcState, now);
+            }
+        }
+        break;
+    }
 }
 
 static void SetEnhancedModeAvailable(SDL_DriverSwitch_Context *ctx)
@@ -2046,6 +2471,14 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
 
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED,
                         SDL_PlayerLEDHintChanged, ctx);
+
+    // NFC machine: fresh per open (full re-init on reconnect). The hint is
+    // polled on the update loop, so there is no callback to register and no
+    // callback lifetime to manage across device recombination.
+    ctx->m_ucNfcState = k_eSwitchNfcState_Idle;
+    ctx->m_bNfcActive = false;
+    ctx->m_bNfcTagPresent = false;
+    ctx->m_ucNfcRounds = 0;
 
     // Initialize the joystick capabilities
     if (ctx->m_bSwitch2) {
@@ -3183,6 +3616,9 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             HandleInputOnlyControllerState(joystick, ctx, (SwitchInputOnlyControllerStatePacket_t *)&ctx->m_rgucReadBuffer[0]);
         } else {
             if (ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_SubcommandReply) {
+                if (ctx->m_bNfcActive) {
+                    HandleNfcSubcommandReply(ctx, joystick, now, size);
+                }
                 continue;
             }
 
@@ -3207,6 +3643,10 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
                     ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState &&
                     ctx->m_rgucReadBuffer[49] == 0x03) {
                     HandleMcuIRReport(ctx, joystick);
+                }
+                if (ctx->m_bNfcActive &&
+                    ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState) {
+                    HandleNfcMcuReport(ctx, joystick, now, size);
                 }
                 break;
             default:
@@ -3237,6 +3677,8 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
                 }
             }
         }
+
+        UpdateNfc(ctx, joystick, now);
 
         if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
@@ -3300,6 +3742,17 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
 
     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED,
                         SDL_PlayerLEDHintChanged, ctx);
+
+    if (ctx->m_ucNfcState != k_eSwitchNfcState_Idle &&
+        ctx->m_ucNfcState != k_eSwitchNfcState_Failed) {
+        /* Synchronous MCU suspend, like DisableIRSensor: no later update
+           tick is guaranteed after close. The input report mode is NOT
+           restored here; close's own mode restoration owns the final mode
+           and runs before this point. */
+        Uint8 ucOff = 0x00;
+        WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff), NULL);
+    }
+    AbandonNfc(ctx, joystick);
 
     ctx->joystick = NULL;
 

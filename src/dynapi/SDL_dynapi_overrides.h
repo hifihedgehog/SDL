@@ -1329,3 +1329,4 @@
 #define SDL_GetDeviceFormFactorName SDL_GetDeviceFormFactorName_REAL
 #define SDL_IsUbuntuTouch SDL_IsUbuntuTouch_REAL
 #define SDL_GetNumProperties SDL_GetNumProperties_REAL
+#define SDL_GetGamepadNfcTagUid SDL_GetGamepadNfcTagUid_REAL

@@ -2172,6 +2172,24 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR "SDL_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR"
 
 /**
+ * A variable controlling whether a right Joy-Con or Pro Controller drives its
+ * NFC/IR MCU to read NFC tags, surfacing the current tag UID through
+ * SDL_GetGamepadNfcTagUid().
+ *
+ * This is a PadForge fork addition. The MCU costs battery and NFC mode
+ * changes the input report cadence, so it is opt-in. The hint can be toggled
+ * at runtime: turning it off powers the MCU back down.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": NFC reading is not used. (default)
+ * - "1": the NFC MCU is driven and tag UIDs are surfaced.
+ *
+ * \since This hint is available since SDL 3.6.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC "SDL_JOYSTICK_HIDAPI_SWITCH_NFC"
+
+/**
  * A variable controlling whether Nintendo Switch Joy-Con controllers will be
  * in vertical mode when using the HIDAPI driver.
  *

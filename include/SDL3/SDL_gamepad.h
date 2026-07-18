@@ -1560,6 +1560,28 @@ extern SDL_DECLSPEC bool SDLCALL SDL_GamepadHasCapSense(SDL_Gamepad *gamepad, SD
 extern SDL_DECLSPEC bool SDLCALL SDL_GetGamepadCapSense(SDL_Gamepad *gamepad, SDL_GamepadCapSenseType type);
 
 /**
+ * Get the UID of the NFC tag currently held against a gamepad's reader.
+ *
+ * Supported on Nintendo Switch right Joy-Con and Pro Controller when NFC
+ * reading is enabled with SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC. The UID is
+ * written as lowercase hex with no separators (for example "04a1b2c3d4e5f6"),
+ * or an empty string when no tag is present or the gamepad has no reader.
+ * A buffer of 21 bytes always holds the longest UID (10 bytes of hex plus
+ * the terminator); a shorter buffer receives a truncated string while the
+ * return value still reports presence.
+ *
+ * \param gamepad a gamepad.
+ * \param uid a buffer to receive the NUL-terminated UID string, may be NULL.
+ * \param len the length of the buffer.
+ * \returns true if a tag is currently present, false otherwise.
+ *
+ * \threadsafety It is safe to call this function from any thread.
+ *
+ * \since This function is available since SDL 3.6.0.
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_GetGamepadNfcTagUid(SDL_Gamepad *gamepad, char *uid, int len);
+
+/**
  * Start a rumble effect on a gamepad.
  *
  * Each call to this function cancels any previous rumble effect, and calling
