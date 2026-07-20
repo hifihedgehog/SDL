@@ -1308,3 +1308,4 @@ _SDL_JoystickSensorEnabled
 _SDL_GetJoystickSensorDataRate
 _SDL_GetJoystickSensorData
 _SDL_GetGamepadNfcTagUid
+_SDL_GetGamepadBulkState

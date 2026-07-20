@@ -1343,3 +1343,4 @@ SDL_DYNAPI_PROC(bool,SDL_JoystickSensorEnabled,(SDL_Joystick *a,SDL_SensorType b
 SDL_DYNAPI_PROC(float,SDL_GetJoystickSensorDataRate,(SDL_Joystick *a,SDL_SensorType b),(a,b),return)
 SDL_DYNAPI_PROC(bool,SDL_GetJoystickSensorData,(SDL_Joystick *a,SDL_SensorType b,float *c,int d),(a,b,c,d),return)
 SDL_DYNAPI_PROC(bool,SDL_GetGamepadNfcTagUid,(SDL_Gamepad *a,char *b,int c),(a,b,c),return)
+SDL_DYNAPI_PROC(bool,SDL_GetGamepadBulkState,(SDL_Gamepad *a,SDL_GamepadBulkState *b),(a,b),return)
