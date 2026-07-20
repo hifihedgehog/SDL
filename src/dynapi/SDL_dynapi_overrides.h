@@ -1330,3 +1330,4 @@
 #define SDL_IsUbuntuTouch SDL_IsUbuntuTouch_REAL
 #define SDL_GetNumProperties SDL_GetNumProperties_REAL
 #define SDL_GetGamepadNfcTagUid SDL_GetGamepadNfcTagUid_REAL
+#define SDL_GetGamepadBulkState SDL_GetGamepadBulkState_REAL

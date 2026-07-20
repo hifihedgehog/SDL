@@ -4029,6 +4029,121 @@ bool SDL_GetGamepadNfcTagUid(SDL_Gamepad *gamepad, char *uid, int len)
     return result;
 }
 
+SDL_COMPILE_TIME_ASSERT(SDL_GamepadBulkStateButtons, SDL_GAMEPAD_BUTTON_COUNT <= 32);
+SDL_COMPILE_TIME_ASSERT(SDL_GamepadBulkStateCapSense, SDL_GAMEPAD_CAPSENSE_COUNT <= 32);
+
+static Uint64 GetGamepadSensorTimestamp_Locked(SDL_Joystick *joystick, SDL_SensorType type)
+{
+    int i;
+
+    SDL_AssertJoysticksLocked();
+
+    for (i = 0; i < joystick->nsensors; ++i) {
+        if (joystick->sensors[i].type == type) {
+            return joystick->sensors[i].sensor_timestamp;
+        }
+    }
+    return 0;
+}
+
+bool SDL_GetGamepadBulkState(SDL_Gamepad *gamepad, SDL_GamepadBulkState *out)
+{
+    int i, n;
+
+    if (!out) {
+        return SDL_InvalidParamError("out");
+    }
+
+    SDL_zerop(out);
+
+    SDL_LockJoysticks();
+    {
+        SDL_Joystick *joystick;
+
+        CHECK_GAMEPAD_MAGIC(gamepad, false);
+
+        joystick = gamepad->joystick;
+
+        out->timestamp = SDL_GetTicksNS();
+        out->connected = SDL_JoystickConnected(joystick);
+
+        for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i) {
+            out->axes[i] = SDL_GetGamepadAxis(gamepad, (SDL_GamepadAxis)i);
+        }
+
+        for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i) {
+            if (SDL_GetGamepadButton(gamepad, (SDL_GamepadButton)i)) {
+                out->buttons |= ((Uint32)1 << i);
+            }
+        }
+
+        n = SDL_GetNumJoystickAxes(joystick);
+        if (n > SDL_GAMEPAD_BULK_MAX_RAW_AXES) {
+            n = SDL_GAMEPAD_BULK_MAX_RAW_AXES;
+        }
+        out->num_raw_axes = (Uint8)n;
+        for (i = 0; i < n; ++i) {
+            out->raw_axes[i] = SDL_GetJoystickAxis(joystick, i);
+        }
+
+        n = SDL_GetNumJoystickButtons(joystick);
+        if (n > 32) {
+            n = 32;
+        }
+        for (i = 0; i < n; ++i) {
+            if (SDL_GetJoystickButton(joystick, i)) {
+                out->raw_buttons |= ((Uint32)1 << i);
+            }
+        }
+
+        if (SDL_GetNumJoystickHats(joystick) > 0) {
+            out->raw_hat = SDL_GetJoystickHat(joystick, 0);
+        }
+
+        for (i = 0; i < SDL_GAMEPAD_CAPSENSE_COUNT; ++i) {
+            if (SDL_GetGamepadCapSense(gamepad, (SDL_GamepadCapSenseType)i)) {
+                out->capsense |= ((Uint32)1 << i);
+            }
+        }
+
+        out->has_gyro = SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO);
+        if (out->has_gyro) {
+            out->gyro_enabled = SDL_GamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO);
+            SDL_GetGamepadSensorData(gamepad, SDL_SENSOR_GYRO, out->gyro, 3);
+            out->gyro_timestamp = GetGamepadSensorTimestamp_Locked(joystick, SDL_SENSOR_GYRO);
+        }
+
+        out->has_accel = SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL);
+        if (out->has_accel) {
+            out->accel_enabled = SDL_GamepadSensorEnabled(gamepad, SDL_SENSOR_ACCEL);
+            SDL_GetGamepadSensorData(gamepad, SDL_SENSOR_ACCEL, out->accel, 3);
+            out->accel_timestamp = GetGamepadSensorTimestamp_Locked(joystick, SDL_SENSOR_ACCEL);
+        }
+
+        out->has_accel_l = SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL_L);
+        if (out->has_accel_l) {
+            out->accel_l_enabled = SDL_GamepadSensorEnabled(gamepad, SDL_SENSOR_ACCEL_L);
+            SDL_GetGamepadSensorData(gamepad, SDL_SENSOR_ACCEL_L, out->accel_l, 3);
+            out->accel_l_timestamp = GetGamepadSensorTimestamp_Locked(joystick, SDL_SENSOR_ACCEL_L);
+        }
+
+        if (SDL_GetNumGamepadTouchpads(gamepad) > 0) {
+            n = SDL_GetNumGamepadTouchpadFingers(gamepad, 0);
+            if (n > SDL_GAMEPAD_BULK_MAX_FINGERS) {
+                n = SDL_GAMEPAD_BULK_MAX_FINGERS;
+            }
+            out->num_fingers = (Uint8)n;
+            for (i = 0; i < n; ++i) {
+                SDL_GamepadBulkFinger *finger = &out->fingers[i];
+                SDL_GetGamepadTouchpadFinger(gamepad, 0, i, &finger->down, &finger->x, &finger->y, &finger->pressure);
+            }
+        }
+    }
+    SDL_UnlockJoysticks();
+
+    return true;
+}
+
 SDL_JoystickID SDL_GetGamepadID(SDL_Gamepad *gamepad)
 {
     SDL_Joystick *joystick = SDL_GetGamepadJoystick(gamepad);

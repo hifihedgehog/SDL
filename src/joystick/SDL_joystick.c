@@ -3977,6 +3977,7 @@ void SDL_SendJoystickSensor(Uint64 timestamp, SDL_Joystick *joystick, SDL_Sensor
 
                 // Update internal sensor state
                 SDL_memcpy(sensor->data, data, num_values * sizeof(*data));
+                sensor->sensor_timestamp = sensor_timestamp;
                 joystick->update_complete = timestamp;
 
                 // Post the event, if desired

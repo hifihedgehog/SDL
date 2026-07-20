@@ -1582,6 +1582,101 @@ extern SDL_DECLSPEC bool SDLCALL SDL_GetGamepadCapSense(SDL_Gamepad *gamepad, SD
 extern SDL_DECLSPEC bool SDLCALL SDL_GetGamepadNfcTagUid(SDL_Gamepad *gamepad, char *uid, int len);
 
 /**
+ * The number of raw joystick axes captured by SDL_GetGamepadBulkState().
+ *
+ * \since This macro is available since SDL 3.6.0.
+ */
+#define SDL_GAMEPAD_BULK_MAX_RAW_AXES 16
+
+/**
+ * The number of touchpad finger slots captured by SDL_GetGamepadBulkState().
+ *
+ * \since This macro is available since SDL 3.6.0.
+ */
+#define SDL_GAMEPAD_BULK_MAX_FINGERS 2
+
+/**
+ * One touchpad finger slot inside SDL_GamepadBulkState.
+ *
+ * The slot index is the finger identity, matching the finger parameter of
+ * SDL_GetGamepadTouchpadFinger().
+ *
+ * \since This struct is available since SDL 3.6.0.
+ */
+typedef struct SDL_GamepadBulkFinger
+{
+    bool down;      /**< true if the finger is down */
+    Uint8 padding1;
+    Uint8 padding2;
+    Uint8 padding3;
+    float x;        /**< finger x, normalized 0...1, 0 on the left */
+    float y;        /**< finger y, normalized 0...1, 0 at the top */
+    float pressure; /**< finger pressure, normalized 0...1 */
+} SDL_GamepadBulkFinger;
+
+/**
+ * A full gamepad state snapshot filled by SDL_GetGamepadBulkState().
+ *
+ * Every field holds exactly what the corresponding public getter returns at
+ * the moment of the snapshot. See SDL_GetGamepadBulkState() for details.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ */
+typedef struct SDL_GamepadBulkState
+{
+    Uint64 timestamp;         /**< SDL_GetTicksNS() when the snapshot was taken */
+    Uint64 gyro_timestamp;    /**< hardware timestamp of the gyro data in nanoseconds, 0 when no data has been received */
+    Uint64 accel_timestamp;   /**< hardware timestamp of the accelerometer data in nanoseconds, 0 when no data has been received */
+    Uint64 accel_l_timestamp; /**< hardware timestamp of the left accelerometer data in nanoseconds, 0 when no data has been received */
+    Uint32 buttons;           /**< bit N set when SDL_GetGamepadButton() reports SDL_GamepadButton N held */
+    Uint32 raw_buttons;       /**< bit N set when SDL_GetJoystickButton() reports raw button N held, buttons 0-31 */
+    Uint32 capsense;          /**< bit N set when SDL_GetGamepadCapSense() reports SDL_GamepadCapSenseType N touched */
+    bool connected;           /**< SDL_JoystickConnected() */
+    Uint8 raw_hat;            /**< SDL_GetJoystickHat() state of raw hat 0, 0 when the joystick has no hats */
+    Uint8 num_raw_axes;       /**< number of valid entries in raw_axes */
+    Uint8 num_fingers;        /**< number of valid entries in fingers, from touchpad 0 */
+    Sint16 axes[SDL_GAMEPAD_AXIS_COUNT];            /**< SDL_GetGamepadAxis() per SDL_GamepadAxis */
+    Sint16 raw_axes[SDL_GAMEPAD_BULK_MAX_RAW_AXES]; /**< SDL_GetJoystickAxis() per raw axis */
+    bool has_gyro;        /**< SDL_GamepadHasSensor(SDL_SENSOR_GYRO) */
+    bool gyro_enabled;    /**< SDL_GamepadSensorEnabled(SDL_SENSOR_GYRO) */
+    bool has_accel;       /**< SDL_GamepadHasSensor(SDL_SENSOR_ACCEL) */
+    bool accel_enabled;   /**< SDL_GamepadSensorEnabled(SDL_SENSOR_ACCEL) */
+    bool has_accel_l;     /**< SDL_GamepadHasSensor(SDL_SENSOR_ACCEL_L) */
+    bool accel_l_enabled; /**< SDL_GamepadSensorEnabled(SDL_SENSOR_ACCEL_L) */
+    Uint8 padding1;
+    Uint8 padding2;
+    float gyro[3];    /**< SDL_GetGamepadSensorData(SDL_SENSOR_GYRO), zeros when the sensor is absent */
+    float accel[3];   /**< SDL_GetGamepadSensorData(SDL_SENSOR_ACCEL), zeros when the sensor is absent */
+    float accel_l[3]; /**< SDL_GetGamepadSensorData(SDL_SENSOR_ACCEL_L), zeros when the sensor is absent */
+    SDL_GamepadBulkFinger fingers[SDL_GAMEPAD_BULK_MAX_FINGERS]; /**< SDL_GetGamepadTouchpadFinger() per slot on touchpad 0 */
+} SDL_GamepadBulkState;
+
+/**
+ * Get a full gamepad state snapshot under a single joystick lock hold.
+ *
+ * This fills every field of `out` with exactly the value the corresponding
+ * public getter would return, by calling those same getters while the
+ * joystick lock is held once for the whole snapshot. One call replaces the
+ * 22-26 getter crossings a full poll otherwise costs, and the snapshot is
+ * coherent: no driver update can land between two fields.
+ *
+ * The sensor timestamps report the hardware timestamp of each sensor's most
+ * recent sample, matching the sensor_timestamp field of
+ * SDL_EVENT_GAMEPAD_SENSOR_UPDATE, and stay 0 until the sensor has delivered
+ * data.
+ *
+ * \param gamepad a gamepad.
+ * \param out the snapshot structure to fill.
+ * \returns true on success or false on failure; call SDL_GetError() for more
+ *          information.
+ *
+ * \threadsafety It is safe to call this function from any thread.
+ *
+ * \since This function is available since SDL 3.6.0.
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_GetGamepadBulkState(SDL_Gamepad *gamepad, SDL_GamepadBulkState *out);
+
+/**
  * Start a rumble effect on a gamepad.
  *
  * Each call to this function cancels any previous rumble effect, and calling
