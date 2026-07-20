@@ -1321,3 +1321,4 @@ _SDL_EncodeURL
 _SDL_SetRenderHDRHeadroom
 _SDL_GetRenderHDRHeadroom
 _SDL_GetGamepadNfcTagUid
+_SDL_GetGamepadBulkState
