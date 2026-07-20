@@ -1343,3 +1343,4 @@
 #define SDL_RequestOpenHarmonyPermission SDL_RequestOpenHarmonyPermission_REAL
 #define SDL_GetAudioDeviceProperties SDL_GetAudioDeviceProperties_REAL
 #define SDL_GetGamepadNfcTagUid SDL_GetGamepadNfcTagUid_REAL
+#define SDL_GetGamepadBulkState SDL_GetGamepadBulkState_REAL
