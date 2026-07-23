@@ -339,8 +339,9 @@ typedef struct
     Uint64 m_ulNfcActionTicks;  // last state-machine send (retry / cooldown / pacing)
     Uint64 m_ulNfcLastMcuTicks; // last NFC-shaped MCU packet seen (stream watchdog)
     Uint64 m_ulNfcLastTagTicks; // last UID-bearing status seen (stream-death backstop)
-    Uint8 m_ucNfcStatusMisses;  // consecutive UID-less statuses while a tag is published
-    Uint64 m_ulNfcMissTicks;    // last counted miss, one count per outstanding status request
+    Uint8 m_ucNfcStatusMisses;  // consecutive UID-less answers while a tag is published
+    Uint64 m_ulNfcMissTicks;    // last counted miss, one count per outstanding request
+    Uint64 m_ulNfcVerifyTicks;  // last verification restart (or fresh acquisition)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -1280,14 +1281,16 @@ typedef enum
     k_eSwitchNfcState_SetModeNFC,   // subcmd 0x21, MCU cmd 0x21/0x00 mode 0x04; ack bytes 15/22 == 0x01/0x01 (jctool.cpp:2356-2396)
     k_eSwitchNfcState_AwaitNFC,     // 0x11/0x01 poll until byte 56 == 0x04 (jctool.cpp:2398-2424)
     k_eSwitchNfcState_WaitReceive,  // 0x11 NFC cmd 0x04; reply 0x2a/0x0500/0x31 state 0x00 (jctool.cpp:2426-2465)
-    k_eSwitchNfcState_Polling,      // steady state: polling re-arm (0x01) with no tag, status requests (0x04) around one (mcu.py:270-275)
+    k_eSwitchNfcState_Polling,      // steady state: polling re-arm (0x01) with no tag, passive around an acquired one (0x04 is a mode-arm, never sent mid-session: mcu.md:60-73, jctool.cpp:2438)
+    k_eSwitchNfcState_RestartPolling, // paced verification: 0x02 (no response documented, mcu.md:95-99) then the rediscovery tail; bench-measured ~1.23 s per cycle
     k_eSwitchNfcState_Failed        // gave up; retried after a cooldown while the hint stays on
 } ESwitchNfcState;
 
 #define SWITCH_NFC_RESEND_MS         600  // ~8 reads at the report cadence (jc_toolkit retries > 8 at 64 ms)
 #define SWITCH_NFC_MAX_ROUNDS        7    // jc_toolkit error_reading > 7
-#define SWITCH_NFC_TAG_GONE_MS       900  // stream-death backstop only: removal is detected by affirmative UID-less statuses, this clears a published tag when statuses stop arriving entirely
-#define SWITCH_NFC_STATUS_MISSES     3    // consecutive UID-less status answers (~one per 100 ms request) before a published tag is cleared
+#define SWITCH_NFC_TAG_GONE_MS       3500 // backstop: outlives one verification cycle at its stalest (2000 ms cadence + 1230 ms measured cycle) so a resting tag never flickers
+#define SWITCH_NFC_STATUS_MISSES     3    // consecutive UID-less answers to post-verification polling before a published tag is cleared (a real Joy-Con served 3 stale 0x09s after a stop, mcu.md:73)
+#define SWITCH_NFC_VERIFY_MS         2000 // pacing of the verification restart while a tag is published
 #define SWITCH_NFC_POLL_PACE_MS      100  // minimum spacing between StartPolling re-issues
 #define SWITCH_NFC_RETRY_COOLDOWN_MS 5000 // wait after a failed bring-up before trying again
 
@@ -1338,6 +1341,8 @@ static bool WriteNfcCommand(SDL_DriverSwitch_Context *ctx, Uint8 ucNfcCommand, c
         SDL_memcpy(&rgucPacket[16], pPayload, ucPayloadLen);
     }
     rgucPacket[47] = MCUCrc8(&rgucPacket[11], 36);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "NFCRAW tx t=%llu nfccmd=%02x",
+                (unsigned long long)SDL_GetTicks(), ucNfcCommand);
     return WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
 }
 
@@ -1407,6 +1412,9 @@ static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 n
         break;
     case k_eSwitchNfcState_Polling:
         SendNfcStartPolling(ctx);
+        break;
+    case k_eSwitchNfcState_RestartPolling:
+        WriteNfcCommand(ctx, 0x02, NULL, 0); // stop polling: no response documented (mcu.md:95-99)
         break;
     default:
         break;
@@ -1516,6 +1524,15 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
         return;
     }
 
+    if (buf[49] == 0x2a) {
+        // Raw dump for the issue #15 bench: every NFC-shaped response, bytes 49-66
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "NFCRAW rx t=%llu st=%u sz=%d %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                    (unsigned long long)now, ctx->m_ucNfcState, size,
+                    buf[49], buf[50], buf[51], buf[52], buf[53], buf[54], buf[55], buf[56], buf[57],
+                    buf[58], buf[59], buf[60], buf[61], buf[62], buf[63], buf[64], buf[65], buf[66]);
+    }
+
     switch (ctx->m_ucNfcState) {
     case k_eSwitchNfcState_AwaitStandby:
         if (buf[49] == 0x01 && buf[56] == 0x01) {
@@ -1533,7 +1550,12 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
         if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05 && buf[55] == 0x31) {
             if (buf[56] == 0x00) {
                 ctx->m_ucNfcRounds = 0;
-                ctx->m_ulNfcLastTagTicks = 0;
+                if (!ctx->m_bNfcTagPresent) {
+                    /* Fresh session only: a verification pass through here
+                       with a tag published must keep the backstop clock,
+                       or zeroing it would clear presence instantly. */
+                    ctx->m_ulNfcLastTagTicks = 0;
+                }
                 EnterNfcState(ctx, k_eSwitchNfcState_Polling, now);
             } else if (buf[56] == 0x0b &&
                        now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
@@ -1558,15 +1580,15 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
             if (buf[56] == 0x01 || buf[56] == 0x09) {
                 /* POLL (0x01) carries the UID for a newly seen tag and
                    POLL_AGAIN (0x09) for the same tag still in the field
-                   (mcu.py:71-78, 204-217). Accepting both matches the
-                   console-validated semantics; jc_toolkit's 0x09-only
-                   loop merely spends one extra round reaching
+                   (mcu.py:71-78, 204-217; mcu.md:66-71). jc_toolkit's
+                   0x09-only loop merely spends one extra round reaching
                    POLL_AGAIN. */
                 int nUidLen = buf[64];
                 if (nUidLen > 10) {
                     nUidLen = 10;
                 }
                 if (nUidLen > 0 && size >= 65 + nUidLen) {
+                    bool bWasPresent = ctx->m_bNfcTagPresent;
                     char rgchUid[21];
                     int i;
                     for (i = 0; i < nUidLen; ++i) {
@@ -1577,16 +1599,31 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                     ctx->m_ulNfcLastTagTicks = now;
                     ctx->m_ucNfcStatusMisses = 0;
                     bUidStatus = true;
+                    if (!bWasPresent) {
+                        // A fresh acquisition is its own verification
+                        ctx->m_ulNfcVerifyTicks = now;
+                    } else if (now >= ctx->m_ulNfcVerifyTicks + SWITCH_NFC_VERIFY_MS) {
+                        /* Paced verification: the stream around an acquired
+                           tag repeats stale answers (bench: echoes outlived
+                           removal by ~6.5 s, and 0x04 is a mode-arm that
+                           kills the stream mid-session per mcu.md:60-73),
+                           so periodically force a genuine re-acquisition
+                           through the bench-measured ~1.23 s restart
+                           tail. */
+                        ctx->m_ulNfcVerifyTicks = now;
+                        EnterNfcState(ctx, k_eSwitchNfcState_RestartPolling, now);
+                    }
                 }
             }
             if (!bUidStatus && ctx->m_bNfcTagPresent &&
                 ctx->m_ulNfcMissTicks < ctx->m_ulNfcActionTicks) {
-                /* A UID-less status is the MCU's affirmative empty-field
-                   answer, same frame shape minus the UID block
-                   (mcu.py:214-221), not silence to be timed out. Count
-                   one miss per outstanding status request, because the
-                   stream repeats the previous response until the request
-                   is answered, and clear on a short streak. */
+                /* A UID-less answer while a tag is published means a
+                   verification's fresh polling found an empty field
+                   (mcu.py:214-221). One count per outstanding request,
+                   because the stream repeats the previous answer, and a
+                   short streak clears presence. Three stale 0x09s after a
+                   stop were captured on real hardware (mcu.md:73), which
+                   sizes the streak. */
                 ctx->m_ulNfcMissTicks = now;
                 if (++ctx->m_ucNfcStatusMisses >= SWITCH_NFC_STATUS_MISSES) {
                     ctx->m_ucNfcStatusMisses = 0;
@@ -1594,20 +1631,32 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                 }
             }
             ctx->m_ucNfcRounds = 0;
-            /* Steady-state driving, paced: around an acquired tag ask for
-               status (0x04), the command the console spams for resting
-               tags (mcu.py:270-272); with no tag keep re-arming polling
-               (jctool.cpp step6, and every bench detection). Polling is
-               entered once (mcu.py:273-275) and never re-entered around
-               an acquired target, and StopPolling is never sent: it
-               exits the session outright (mcu.py:319-322). */
-            if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+            /* Paced driving. No tag published: re-arm polling, the
+               bench-proven scan loop (jctool.cpp step6). Tag published
+               and the last verification's polling is answering UID-less:
+               keep polling actively, it is a live empty-field scan. Tag
+               published and refreshing: fully passive, the stream feeds
+               itself and 0x04 is never sent (mcu.md:60-73: mode-arm,
+               only ever answered after a stop). */
+            if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS &&
+                (!ctx->m_bNfcTagPresent || ctx->m_ucNfcStatusMisses > 0)) {
                 ctx->m_ulNfcActionTicks = now;
-                if (ctx->m_bNfcTagPresent) {
-                    WriteNfcCommand(ctx, 0x04, NULL, 0);
-                } else {
-                    SendNfcStartPolling(ctx);
-                }
+                SendNfcStartPolling(ctx);
+            }
+        }
+        break;
+    case k_eSwitchNfcState_RestartPolling:
+        /* Kept byte-identical to the build the bench measured at ~1.23 s
+           per cycle: loose gate, any non-echo non-busy NFC response
+           advances (a stop itself has no documented response,
+           mcu.md:95-99). */
+        if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05) {
+            if (buf[56] == 0x09) {
+                // Stale echo before the stop lands; keep the clock honest
+                ctx->m_ulNfcLastTagTicks = now;
+            } else if (buf[56] != 0x0b) {
+                ctx->m_ucNfcRounds = 0;
+                EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
             }
         }
         break;
@@ -1682,14 +1731,13 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
                 SetNfcTagUid(ctx, joystick, NULL);
                 EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
             } else {
-                /* Nudge with the steady-state command for the current
-                   acquisition state. */
+                /* Nudge with StartPolling in every acquisition state: on
+                   an active-empty session it is the proven scan re-arm,
+                   and on a quietly latched one it revives the echo with
+                   the truth either way. 0x04 is never the nudge, it is a
+                   mode-arm that kills an active session (mcu.md:60-73). */
                 ctx->m_ulNfcActionTicks = now;
-                if (ctx->m_bNfcTagPresent) {
-                    WriteNfcCommand(ctx, 0x04, NULL, 0);
-                } else {
-                    SendNfcStartPolling(ctx);
-                }
+                SendNfcStartPolling(ctx);
             }
         }
         break;
@@ -1698,7 +1746,14 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
         if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS) {
             ctx->m_ucNfcRounds++;
             if (ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
-                FailNfc(ctx, joystick, now);
+                if (ctx->m_ucNfcState == k_eSwitchNfcState_RestartPolling) {
+                    /* A stalled verification degrades to plain polling,
+                       never a dead reader. */
+                    ctx->m_ucNfcRounds = 0;
+                    EnterNfcState(ctx, k_eSwitchNfcState_Polling, now);
+                } else {
+                    FailNfc(ctx, joystick, now);
+                }
             } else {
                 EnterNfcState(ctx, ctx->m_ucNfcState, now);
             }
