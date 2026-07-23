@@ -1559,6 +1559,18 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                     SetNfcTagUid(ctx, joystick, rgchUid);
                     ctx->m_ulNfcLastTagTicks = now;
                 }
+                /* Re-issue polling after a detection too, paced like the
+                   no-tag branch: the MCU latches the last-read tag and
+                   echoes this 0x09 result without re-scanning until a
+                   fresh StartPolling, so without this a removed tag
+                   stays present until the echoes stop plus the debounce
+                   (~8.5 s measured on a Pro Controller) instead of
+                   roughly the debounce alone. */
+                if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+                    ctx->m_ulNfcActionTicks = now;
+                    SendNfcStartPolling(ctx);
+                }
+                ctx->m_ucNfcRounds = 0;
             } else {
                 /* Any other NFC response (awaiting-command 0x00, polled-with-
                    no-tag 0x01, or a state we do not decode) means this poll
