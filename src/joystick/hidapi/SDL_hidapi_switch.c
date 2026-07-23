@@ -342,6 +342,7 @@ typedef struct
     Uint8 m_ucNfcStatusMisses;  // consecutive failed presence reads while a tag is published
     Uint64 m_ulNfcMissTicks;    // last counted failure, one count per outstanding read
     Uint64 m_ulNfcReadTicks;    // last timer-driven solicitation (0x04 scanning / 0x06 presence read)
+    bool m_bNfcProbeAlt;        // alternates the presence-probe page so each read defeats the MCU's last-block cache
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -1363,18 +1364,25 @@ static bool SendNfcPresenceRead(SDL_DriverSwitch_Context *ctx)
     /* NTAG read request (0x06), jc_toolkit step7's frame: 0xd0 0x07, a
        zeroed 7-byte UID slot (read whatever is selected), 0x00 = all tag
        types (0x01 is NTAG215-only and errors 0x48 on anything else,
-       jctool.cpp:2571), then one block covering page 0 only, the probe
-       shape jc_toolkit itself sends when the tag type is still unknown
-       (jctool.cpp:2577-2580). A selected tag serves this and stays
-       awake; a removed tag cannot answer it. */
-    static const Uint8 rgucPayload[] = {
-        0xd0, 0x07, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // UID slot: any
-        0x00,                               // all tag types
-        0x01,                               // one page block
-        0x00, 0x00,                         // pages 0..0
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
+       jctool.cpp:2571), then one single-page block. The probed page
+       alternates between 3 and 4 every read: the bench showed a fixed
+       page-0 probe answered from the MCU's cache for ~1.9 s after
+       removal (18 UID-bearing answers, page 0 was cached at detection),
+       so each probe asks for the page the previous one did not, forcing
+       a real RF transaction. Pages 3 and 4 exist on every NTAG and
+       Ultralight type, unlike the NTAG215-only high region whose
+       out-of-range reads error 0x3e (jctool.cpp:2576), and detection
+       never touches them. */
+    Uint8 rgucPayload[19];
+
+    SDL_zeroa(rgucPayload);
+    rgucPayload[0] = 0xd0;
+    rgucPayload[1] = 0x07;
+    /* bytes 2-8: UID slot, zeroed. byte 9: 0x00 = all tag types. */
+    rgucPayload[10] = 0x01; // one page block
+    ctx->m_bNfcProbeAlt = !ctx->m_bNfcProbeAlt;
+    rgucPayload[11] = ctx->m_bNfcProbeAlt ? 0x04 : 0x03; // block start page
+    rgucPayload[12] = rgucPayload[11];                   // block end page
 
     return WriteNfcCommand(ctx, 0x06, rgucPayload, sizeof(rgucPayload));
 }
