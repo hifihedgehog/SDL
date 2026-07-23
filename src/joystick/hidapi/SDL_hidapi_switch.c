@@ -1282,6 +1282,7 @@ typedef enum
     k_eSwitchNfcState_AwaitNFC,     // 0x11/0x01 poll until byte 56 == 0x04 (jctool.cpp:2398-2424)
     k_eSwitchNfcState_WaitReceive,  // 0x11 NFC cmd 0x04; reply 0x2a/0x0500/0x31 state 0x00 (jctool.cpp:2426-2465)
     k_eSwitchNfcState_Polling,      // steady state: 0x01 once on entry, then presence check by paced 0x06 reads (a selected tag serves reads, a removed one fails them)
+    k_eSwitchNfcState_CloseSession, // 0x02 sent after a read-failure clear (no response exists, mcu.md:95-99); dwell to absorb the 3-echo tail (mcu.md:73), then rediscover
     k_eSwitchNfcState_Failed        // gave up; retried after a cooldown while the hint stays on
 } ESwitchNfcState;
 
@@ -1291,6 +1292,7 @@ typedef enum
 #define SWITCH_NFC_READ_FAILS        2    // consecutive failed presence reads before clearing, ~1.0-1.5 s at the read cadence
 #define SWITCH_NFC_PRESENCE_READ_MS  500  // presence-check read cadence: a selected tag serves each read in ~3 packets, dump round trips measure ~30 ms
 #define SWITCH_NFC_STATUS_PACE_MS    50   // pre-acquisition status-request cadence, the dump-proven detection vehicle (every request answered, tap surfaces as 01+UID)
+#define SWITCH_NFC_CLOSE_DWELL_MS    200  // command-quiet dwell after the session-close 0x02, ample for the 3-echo stale tail (mcu.md:73) before rediscovery
 #define SWITCH_NFC_POLL_PACE_MS      100  // minimum spacing between StartPolling re-issues
 #define SWITCH_NFC_RETRY_COOLDOWN_MS 5000 // wait after a failed bring-up before trying again
 
@@ -1440,6 +1442,9 @@ static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 n
         ctx->m_ulNfcReadTicks = 0;
         SendNfcStartPolling(ctx);
         break;
+    case k_eSwitchNfcState_CloseSession:
+        WriteNfcCommand(ctx, 0x02, NULL, 0); // stop polling: closes the errored session, no response to wait for (mcu.md:95-99)
+        break;
     default:
         break;
     }
@@ -1542,10 +1547,15 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
        with an all-zero MCU tail when no MCU activity is pending, and letting
        those refresh the watchdog would let a lost polling command livelock
        forever. */
-    if (buf[49] == 0x01 || buf[49] == 0x2a || buf[49] == 0x3a) {
-        ctx->m_ulNfcLastMcuTicks = now;
-    } else {
+    if (buf[49] != 0x01 && buf[49] != 0x2a && buf[49] != 0x3a) {
         return;
+    }
+    /* Error answers (nonzero error byte) do not feed the heartbeat: the
+       bench showed a dead session answering every request with the same
+       2a 47 error frame for 40+ seconds, which would hold the watchdog
+       off forever. */
+    if (buf[49] != 0x2a || buf[50] == 0x00) {
+        ctx->m_ulNfcLastMcuTicks = now;
     }
 
     if (buf[49] == 0x2a || buf[49] == 0x3a) {
@@ -1622,15 +1632,18 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                    ctx->m_bNfcTagPresent &&
                    ctx->m_ulNfcMissTicks < ctx->m_ulNfcReadTicks) {
             /* Error answer: buf[50] is the error byte (CTCaer's
-               annotation and his captured 2a 4a 05 sequence error; read
-               errors 0x3e/0x40/0x48 documented at jctool.cpp:2571-2576).
-               No capture shows a removed tag's exact failure bytes, so
-               ANY nonzero error counts, one per outstanding presence
-               read. The round accounting in UpdateNfc catches silent
-               failures the same way. */
+               annotation; the bench pinned a removed tag's read answer
+               as 2a 47 05 with stale UID in the tail; read errors
+               0x3e/0x40/0x48 documented at jctool.cpp:2571-2576). Any
+               nonzero error counts, one per outstanding presence read.
+               The round accounting in UpdateNfc catches silent failures
+               the same way. */
             ctx->m_ulNfcMissTicks = now;
             ++ctx->m_ucNfcStatusMisses;
         }
+        break;
+    case k_eSwitchNfcState_CloseSession:
+        // Absorb everything: stale echoes and error frames carry no information here
         break;
     default:
         break;
@@ -1670,9 +1683,9 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
     }
 
     /* Stream-death backstop, in every active state: removal is normally
-       detected by affirmative UID-less status answers in the Polling
-       handler, so this only clears a published tag when statuses stop
-       arriving at all. The Idle and Failed paths clear the tag on entry. */
+       detected by failed presence reads in the Polling machinery, so this
+       only clears a published tag when answers stop arriving at all. The
+       Idle and Failed paths clear the tag on entry. */
     if (ctx->m_bNfcTagPresent && now >= ctx->m_ulNfcLastTagTicks + SWITCH_NFC_TAG_GONE_MS) {
         SetNfcTagUid(ctx, joystick, NULL);
     }
@@ -1686,6 +1699,16 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
         if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RETRY_COOLDOWN_MS) {
             ctx->m_ucNfcRounds = 0;
             EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
+        }
+        break;
+    case k_eSwitchNfcState_CloseSession:
+        /* No response exists for the stop (mcu.md:95-99): advance on a
+           short command-quiet dwell that absorbs the stale-echo tail
+           (mcu.md:73), then rediscover through the leg-0-proven
+           bring-up tail. */
+        if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_CLOSE_DWELL_MS) {
+            ctx->m_ucNfcRounds = 0;
+            EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
         }
         break;
     case k_eSwitchNfcState_Polling:
@@ -1718,12 +1741,18 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
                 ctx->m_ucNfcStatusMisses = 0;
                 ctx->m_ulNfcReadTicks = 0;
                 SetNfcTagUid(ctx, joystick, NULL);
+                /* The failed session is dead (bench: error state answers
+                   every request from here on and the next tap cannot
+                   detect). Close it and re-run the proven discovery
+                   tail. */
+                ctx->m_ucNfcRounds = 0;
+                EnterNfcState(ctx, k_eSwitchNfcState_CloseSession, now);
             } else {
                 ctx->m_ulNfcReadTicks = now;
                 SendNfcPresenceRead(ctx);
             }
         }
-        // Stream watchdog: no NFC-shaped packet despite the status timer
+        // Stream watchdog: no clean NFC-shaped packet despite the timers
         if (now >= ctx->m_ulNfcLastMcuTicks + (2 * SWITCH_NFC_RESEND_MS) &&
             now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS) {
             ctx->m_ucNfcRounds++;
