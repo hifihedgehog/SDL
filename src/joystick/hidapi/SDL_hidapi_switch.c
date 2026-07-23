@@ -1544,9 +1544,17 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
             } else if (buf[56] == 0x0b &&
                        now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
                 /* Busy: reissue promptly, matching jc_toolkit's re-send-on-
-                   busy loop rather than waiting out the full resend window */
-                ctx->m_ulNfcActionTicks = now;
-                WriteNfcCommand(ctx, 0x04, NULL, 0);
+                   busy loop, but bounded by the round counter (their
+                   error_reading equivalent): each reissue refreshes the
+                   action clock the 600 ms round timer keys on, so an
+                   unbounded busy storm would otherwise pin this state
+                   forever. */
+                if (++ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
+                    FailNfc(ctx, joystick, now);
+                } else {
+                    ctx->m_ulNfcActionTicks = now;
+                    WriteNfcCommand(ctx, 0x04, NULL, 0);
+                }
             }
         }
         break;
@@ -1597,21 +1605,24 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
         }
         break;
     case k_eSwitchNfcState_RestartPolling:
-        if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05 && buf[55] == 0x31) {
-            if (buf[56] == 0x00) {
-                // Target dropped; re-run discovery through the proven bring-up tail
-                ctx->m_ucNfcRounds = 0;
-                EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
-            } else if (buf[56] == 0x09) {
+        /* Same loose gate as the Polling state: no hardware capture of
+           the ack to a stop exists, so requiring a specific response
+           subtype could ignore every reply and starve the state. Any
+           NFC-class response that is not a tag echo or a busy means the
+           stop has been processed. */
+        if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05) {
+            if (buf[56] == 0x09) {
                 /* Latch echo still in flight before the stop lands; keep
                    the presence clock honest for the brief overlap. */
                 ctx->m_ulNfcLastTagTicks = now;
-            } else if (buf[56] == 0x0b &&
-                       now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
-                // Busy: reissue promptly, matching the other busy paths
-                ctx->m_ulNfcActionTicks = now;
-                WriteNfcCommand(ctx, 0x02, NULL, 0);
+            } else if (buf[56] != 0x0b) {
+                // Target dropped; re-run discovery through the proven bring-up tail
+                ctx->m_ucNfcRounds = 0;
+                EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
             }
+            /* Busy (0x0b): no fast reissue here. Leaving the action clock
+               alone lets the 600 ms round timer re-send the stop, so a
+               busy storm stays bounded by the round counter. */
         }
         break;
     default:
@@ -1683,11 +1694,17 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
                 ctx->m_ucNfcRounds = 0;
                 SetNfcTagUid(ctx, joystick, NULL);
                 EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
-            } else {
-                /* Nudge through a full discovery restart: a bare
-                   StartPolling into a session that still holds a target
-                   only re-arms the latch echo. */
+            } else if (ctx->m_bNfcTagPresent) {
+                /* A latch echo can only exist when a target was acquired:
+                   nudge through a full discovery restart, because a bare
+                   StartPolling into a session that holds a target only
+                   re-arms the echo. */
                 EnterNfcState(ctx, k_eSwitchNfcState_RestartPolling, now);
+            } else {
+                /* No target acquired, nothing to cancel: the bare nudge
+                   is the hardware-proven quiet-stream recovery. */
+                ctx->m_ulNfcActionTicks = now;
+                SendNfcStartPolling(ctx);
             }
         }
         break;
@@ -1696,7 +1713,15 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
         if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS) {
             ctx->m_ucNfcRounds++;
             if (ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
-                FailNfc(ctx, joystick, now);
+                if (ctx->m_ucNfcState == k_eSwitchNfcState_RestartPolling) {
+                    /* A failed stop handshake degrades to plain polling,
+                       worst case the old latched-tag hold, never a dead
+                       reader. */
+                    ctx->m_ucNfcRounds = 0;
+                    EnterNfcState(ctx, k_eSwitchNfcState_Polling, now);
+                } else {
+                    FailNfc(ctx, joystick, now);
+                }
             } else {
                 EnterNfcState(ctx, ctx->m_ucNfcState, now);
             }
