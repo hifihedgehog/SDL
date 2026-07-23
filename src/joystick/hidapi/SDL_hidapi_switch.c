@@ -1289,8 +1289,8 @@ typedef enum
 #define SWITCH_NFC_RESEND_MS         600  // ~8 reads at the report cadence (jc_toolkit retries > 8 at 64 ms)
 #define SWITCH_NFC_MAX_ROUNDS        7    // jc_toolkit error_reading > 7
 #define SWITCH_NFC_TAG_GONE_MS       3500 // stream-death insurance only: removal is detected by failed presence reads long before this
-#define SWITCH_NFC_READ_FAILS        2    // consecutive failed presence reads before clearing, ~1.0-1.5 s at the read cadence
-#define SWITCH_NFC_PRESENCE_READ_MS  500  // presence-check read cadence: a selected tag serves each read in ~3 packets, dump round trips measure ~30 ms
+#define SWITCH_NFC_READ_FAILS        2    // consecutive failed presence reads before clearing
+#define SWITCH_NFC_PRESENCE_READ_MS  100  // presence-check read cadence: removal costs ~5-6 periods (phase + the 3-answer stale-echo tail + the failure streak), so this prices removal at ~0.5-0.9 s while staying 3-4x above the measured 25-30 ms round trip
 #define SWITCH_NFC_STATUS_PACE_MS    50   // pre-acquisition status-request cadence, the dump-proven detection vehicle (every request answered, tap surfaces as 01+UID)
 #define SWITCH_NFC_CLOSE_DWELL_MS    200  // command-quiet dwell after the session-close 0x02, ample for the 3-echo stale tail (mcu.md:73) before rediscovery
 #define SWITCH_NFC_POLL_PACE_MS      100  // minimum spacing between StartPolling re-issues
@@ -1436,10 +1436,13 @@ static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 n
     case k_eSwitchNfcState_Polling:
         /* One StartPolling per session (mcu.py:273-275): a re-issue into
            an active session produces sequence errors (CTCaer's raw
-           capture). The presence-read timer takes over after the first
-           acquisition. */
+           capture). The solicitation clock is stamped NOW, never zeroed:
+           a zeroed clock let the status timer fire in the same tick as
+           this 0x01 and the 0x04 mode-arm stomped the just-started poll
+           (dump: state-00 answers for 69+ s). The poll's first answer
+           gets a full timer slot before any other command. */
         ctx->m_ucNfcStatusMisses = 0;
-        ctx->m_ulNfcReadTicks = 0;
+        ctx->m_ulNfcReadTicks = now;
         SendNfcStartPolling(ctx);
         break;
     case k_eSwitchNfcState_CloseSession:
@@ -1626,6 +1629,17 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                     ctx->m_ulNfcLastTagTicks = now;
                     ctx->m_ucNfcStatusMisses = 0;
                 }
+            } else if (buf[56] == 0x00 && !ctx->m_bNfcTagPresent &&
+                       now >= ctx->m_ulNfcReadTicks + SWITCH_NFC_POLL_PACE_MS) {
+                /* Pre-acquisition only: a state-00 answer means the MCU
+                   is awaiting command, not polling (the dump showed 69+ s
+                   of state-00 answers after a stomped poll, and no tap
+                   could ever detect). Re-arm with a paced StartPolling,
+                   CTCaer's acquisition loop. The mid-session re-issue ban
+                   stands untouched: this branch requires no published
+                   tag. */
+                ctx->m_ulNfcReadTicks = now;
+                SendNfcStartPolling(ctx);
             }
             ctx->m_ucNfcRounds = 0;
         } else if (buf[49] == 0x2a && buf[51] == 0x05 && buf[50] != 0x00 &&
