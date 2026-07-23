@@ -1316,4 +1316,3 @@ _SDL_GetOpenHarmonyInternalStoragePath
 _SDL_RequestOpenHarmonyPermission
 _SDL_GetAudioDeviceProperties
 _SDL_GetGamepadNfcTagUid
-_SDL_GetGamepadBulkState
