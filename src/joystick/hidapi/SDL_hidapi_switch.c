@@ -331,6 +331,7 @@ typedef struct
     bool m_bSensorsSupported;
     bool m_bReportSensors;
     bool m_bIRSensorActive; // right Joy-Con NIR camera streaming (input report 0x31)
+    Uint64 m_ulIRModeFixTicks; // last report-mode-watchdog re-init (externally knocked input mode)
     // NFC tag reading (fork issue #15): MCU-driven, async off the update loop
     bool m_bNfcActive;          // machine running: input mode 0x31 held, MCU coming up or polling
     Uint8 m_ucNfcState;         // ESwitchNfcState
@@ -923,6 +924,13 @@ static void DisableIRSensor(SDL_DriverSwitch_Context *ctx)
     Uint8 ucState = 0x00;
 
     WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucState, sizeof(ucState), NULL);
+    if (ctx->m_bIRSensorActive && ctx->joystick) {
+        /* Park the IR axis at its floor: it otherwise keeps the last
+           frame's value, and a bright last frame false-fires brightness
+           bindings when the camera later re-enables, until a fresh frame
+           arrives (PadForge#248 closure audit). */
+        SDL_SendJoystickAxis(SDL_GetTicksNS(), ctx->joystick, SDL_GAMEPAD_AXIS_COUNT, SDL_MIN_SINT16);
+    }
     ctx->m_bIRSensorActive = false;
 }
 
@@ -1298,11 +1306,19 @@ typedef enum
 
 static bool IsNfcSupported(SDL_DriverSwitch_Context *ctx)
 {
-    // The NFC reader is in the right Joy-Con and the Pro Controller
-    if (ctx->m_bInputOnly || ctx->device->parent) {
+    if (ctx->m_bInputOnly) {
         return false;
     }
-    return ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight ||
+    /* The reader is in the right Joy-Con, paired or standalone, and the
+       Pro Controller. A combined pair's right child runs this machine on
+       its own HID handle and posts to the pair's joystick, the same
+       plumbing that already delivers the child's input and GYRO_R/ACCEL_R
+       (PadForge#248). The left child has no reader and stays excluded by
+       the type check. */
+    if (ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight) {
+        return true;
+    }
+    return !ctx->device->parent &&
            ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_ProController;
 }
 
@@ -1343,8 +1359,6 @@ static bool WriteNfcCommand(SDL_DriverSwitch_Context *ctx, Uint8 ucNfcCommand, c
         SDL_memcpy(&rgucPacket[16], pPayload, ucPayloadLen);
     }
     rgucPacket[47] = MCUCrc8(&rgucPacket[11], 36);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "NFCRAW tx t=%llu nfccmd=%02x",
-                (unsigned long long)SDL_GetTicks(), ucNfcCommand);
     return WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
 }
 
@@ -1562,15 +1576,6 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
        off forever. */
     if (buf[49] != 0x2a || buf[50] == 0x00) {
         ctx->m_ulNfcLastMcuTicks = now;
-    }
-
-    if (buf[49] == 0x2a || buf[49] == 0x3a) {
-        // Raw dump for the issue #15 bench: every NFC-shaped response, bytes 49-66
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "NFCRAW rx t=%llu st=%u sz=%d %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                    (unsigned long long)now, ctx->m_ucNfcState, size,
-                    buf[49], buf[50], buf[51], buf[52], buf[53], buf[54], buf[55], buf[56], buf[57],
-                    buf[58], buf[59], buf[60], buf[61], buf[62], buf[63], buf[64], buf[65], buf[66]);
     }
 
     switch (ctx->m_ucNfcState) {
@@ -3793,6 +3798,21 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
                 if (ctx->m_bNfcActive &&
                     ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState) {
                     HandleNfcMcuReport(ctx, joystick, now, size);
+                }
+                if (ctx->m_bIRSensorActive &&
+                    ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerState &&
+                    now >= ctx->m_ulIRModeFixTicks + 1000) {
+                    /* Report-mode watchdog, mirroring the NFC one: a 0x30
+                       report while the camera streams means an external
+                       raw writer knocked the input mode, and without this
+                       the camera strands until reconnect (PadForge#248:
+                       its haptic-writer guard has an unavoidable TOCTOU
+                       window). Re-run the bring-up, paced to one attempt
+                       per second; a failed re-enable clears the active
+                       flag and closes this gate on its own. */
+                    ctx->m_ulIRModeFixTicks = now;
+                    DisableIRSensor(ctx);
+                    EnableIRSensor(ctx);
                 }
                 break;
             default:
