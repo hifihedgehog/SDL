@@ -1338,4 +1338,3 @@ SDL_DYNAPI_PROC(const char*,SDL_GetDeviceFormFactorName,(SDL_FormFactor a),(a),r
 SDL_DYNAPI_PROC(bool,SDL_IsUbuntuTouch,(void),(),return)
 SDL_DYNAPI_PROC(int,SDL_GetNumProperties,(SDL_PropertiesID a),(a),return)
 SDL_DYNAPI_PROC(bool,SDL_GetGamepadNfcTagUid,(SDL_Gamepad *a,char *b,int c),(a,b,c),return)
-SDL_DYNAPI_PROC(bool,SDL_GetGamepadBulkState,(SDL_Gamepad *a,SDL_GamepadBulkState *b),(a,b),return)

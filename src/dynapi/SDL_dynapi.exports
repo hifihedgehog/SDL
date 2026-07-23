@@ -1303,4 +1303,3 @@ _SDL_GetDeviceFormFactorName
 _SDL_IsUbuntuTouch
 _SDL_GetNumProperties
 _SDL_GetGamepadNfcTagUid
-_SDL_GetGamepadBulkState
