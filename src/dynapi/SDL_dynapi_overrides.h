@@ -1335,4 +1335,3 @@
 #define SDL_GetJoystickSensorDataRate SDL_GetJoystickSensorDataRate_REAL
 #define SDL_GetJoystickSensorData SDL_GetJoystickSensorData_REAL
 #define SDL_GetGamepadNfcTagUid SDL_GetGamepadNfcTagUid_REAL
-#define SDL_GetGamepadBulkState SDL_GetGamepadBulkState_REAL

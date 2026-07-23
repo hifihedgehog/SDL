@@ -71,7 +71,6 @@ typedef struct SDL_JoystickSensorInfo
     bool enabled;
     float rate;
     float data[3]; // If this needs to expand, update SDL_GamepadSensorEvent
-    Uint64 sensor_timestamp; // hardware timestamp of data, in nanoseconds
 } SDL_JoystickSensorInfo;
 
 typedef struct SDL_JoystickCapSenseInfo
