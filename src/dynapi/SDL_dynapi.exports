@@ -1315,4 +1315,3 @@ _SDL_GetOpenHarmonySDKVersion
 _SDL_GetOpenHarmonyInternalStoragePath
 _SDL_RequestOpenHarmonyPermission
 _SDL_GetGamepadNfcTagUid
-_SDL_GetGamepadBulkState
