@@ -1298,7 +1298,7 @@ typedef enum
 #define SWITCH_NFC_MAX_ROUNDS        7    // jc_toolkit error_reading > 7
 #define SWITCH_NFC_TAG_GONE_MS       3500 // stream-death insurance only: removal is detected by failed presence reads long before this
 #define SWITCH_NFC_READ_FAILS        2    // consecutive failed presence reads before clearing
-#define SWITCH_NFC_PRESENCE_READ_MS  100  // presence-check read cadence: removal costs ~5-6 periods (phase + the 3-answer stale-echo tail + the failure streak), so this prices removal at ~0.5-0.9 s while staying 3-4x above the measured 25-30 ms round trip
+#define SWITCH_NFC_PRESENCE_READ_MS  100  // presence-check read cadence, 3-4x above the measured 25-30 ms round trip. Removal detection is floored by silicon regardless: ~1.9 s until the MCU's own departure cycle serves the first error answer, plus the two-probe confirm, ~2.1 s total (bench-measured)
 #define SWITCH_NFC_STATUS_PACE_MS    50   // pre-acquisition status-request cadence, the dump-proven detection vehicle (every request answered, tap surfaces as 01+UID)
 #define SWITCH_NFC_CLOSE_DWELL_MS    200  // command-quiet dwell after the session-close 0x02, ample for the 3-echo stale tail (mcu.md:73) before rediscovery
 #define SWITCH_NFC_POLL_PACE_MS      100  // minimum spacing between StartPolling re-issues
