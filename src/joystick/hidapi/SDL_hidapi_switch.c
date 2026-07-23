@@ -1279,12 +1279,13 @@ typedef enum
     k_eSwitchNfcState_AwaitNFC,     // 0x11/0x01 poll until byte 56 == 0x04 (jctool.cpp:2398-2424)
     k_eSwitchNfcState_WaitReceive,  // 0x11 NFC cmd 0x04; reply 0x2a/0x0500/0x31 state 0x00 (jctool.cpp:2426-2465)
     k_eSwitchNfcState_Polling,      // 0x11 NFC cmd 0x01 sent; steady tag polling (jctool.cpp:2467-2540)
+    k_eSwitchNfcState_RestartPolling, // 0x11 NFC cmd 0x02 (StopPolling, named at jctool.cpp:2478) sent; forces discovery to re-run
     k_eSwitchNfcState_Failed        // gave up; retried after a cooldown while the hint stays on
 } ESwitchNfcState;
 
 #define SWITCH_NFC_RESEND_MS         600  // ~8 reads at the report cadence (jc_toolkit retries > 8 at 64 ms)
 #define SWITCH_NFC_MAX_ROUNDS        7    // jc_toolkit error_reading > 7
-#define SWITCH_NFC_TAG_GONE_MS       2000 // removal debounce: outlasts one watchdog re-poll cycle so a held tag re-detects first
+#define SWITCH_NFC_TAG_GONE_MS       900  // removal debounce: one healthy rediscover cycle (~300 ms) plus one lost-command resend window, so a resting tag survives a single hiccup without a presence flicker while removal still clears in about a second
 #define SWITCH_NFC_POLL_PACE_MS      100  // minimum spacing between StartPolling re-issues
 #define SWITCH_NFC_RETRY_COOLDOWN_MS 5000 // wait after a failed bring-up before trying again
 
@@ -1404,6 +1405,9 @@ static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 n
         break;
     case k_eSwitchNfcState_Polling:
         SendNfcStartPolling(ctx);
+        break;
+    case k_eSwitchNfcState_RestartPolling:
+        WriteNfcCommand(ctx, 0x02, NULL, 0); // StopPolling: drop the acquired target so discovery can re-run
         break;
     default:
         break;
@@ -1530,7 +1534,12 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
         if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05 && buf[55] == 0x31) {
             if (buf[56] == 0x00) {
                 ctx->m_ucNfcRounds = 0;
-                ctx->m_ulNfcLastTagTicks = 0;
+                if (!ctx->m_bNfcTagPresent) {
+                    /* Fresh session only: a discovery restart with a tag
+                       resting on the reader must keep the debounce clock,
+                       or every cycle would clear presence for an instant. */
+                    ctx->m_ulNfcLastTagTicks = 0;
+                }
                 EnterNfcState(ctx, k_eSwitchNfcState_Polling, now);
             } else if (buf[56] == 0x0b &&
                        now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
@@ -1559,16 +1568,17 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                     SetNfcTagUid(ctx, joystick, rgchUid);
                     ctx->m_ulNfcLastTagTicks = now;
                 }
-                /* Re-issue polling after a detection too, paced like the
-                   no-tag branch: the MCU latches the last-read tag and
-                   echoes this 0x09 result without re-scanning until a
-                   fresh StartPolling, so without this a removed tag
-                   stays present until the echoes stop plus the debounce
-                   (~8.5 s measured on a Pro Controller) instead of
-                   roughly the debounce alone. */
+                /* Paced discovery restart. A bare StartPolling into an
+                   acquired session never re-scans: it re-arms the MCU's
+                   latch echo, measured on hardware as presence held
+                   forever, and CTCaer's MCU protocol log shows the same
+                   latch plus sequence errors on naive re-issue. Cancel
+                   the target with StopPolling and re-run the proven
+                   0x04 -> 0x01 discovery tail instead, so a resting tag
+                   genuinely re-acquires and a removed one turns up empty
+                   within one cycle. */
                 if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
-                    ctx->m_ulNfcActionTicks = now;
-                    SendNfcStartPolling(ctx);
+                    EnterNfcState(ctx, k_eSwitchNfcState_RestartPolling, now);
                 }
                 ctx->m_ucNfcRounds = 0;
             } else {
@@ -1583,6 +1593,24 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
                     SendNfcStartPolling(ctx);
                 }
                 ctx->m_ucNfcRounds = 0;
+            }
+        }
+        break;
+    case k_eSwitchNfcState_RestartPolling:
+        if (buf[49] == 0x2a && buf[50] == 0x00 && buf[51] == 0x05 && buf[55] == 0x31) {
+            if (buf[56] == 0x00) {
+                // Target dropped; re-run discovery through the proven bring-up tail
+                ctx->m_ucNfcRounds = 0;
+                EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
+            } else if (buf[56] == 0x09) {
+                /* Latch echo still in flight before the stop lands; keep
+                   the presence clock honest for the brief overlap. */
+                ctx->m_ulNfcLastTagTicks = now;
+            } else if (buf[56] == 0x0b &&
+                       now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+                // Busy: reissue promptly, matching the other busy paths
+                ctx->m_ulNfcActionTicks = now;
+                WriteNfcCommand(ctx, 0x02, NULL, 0);
             }
         }
         break;
@@ -1623,6 +1651,13 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
         return;
     }
 
+    /* Removal debounce, in every active state: presence must clear on
+       schedule even while a discovery restart or a bring-up retry is in
+       flight. The Idle and Failed paths clear the tag on entry. */
+    if (ctx->m_bNfcTagPresent && now >= ctx->m_ulNfcLastTagTicks + SWITCH_NFC_TAG_GONE_MS) {
+        SetNfcTagUid(ctx, joystick, NULL);
+    }
+
     switch (ctx->m_ucNfcState) {
     case k_eSwitchNfcState_Idle:
         ctx->m_ucNfcRounds = 0;
@@ -1635,10 +1670,6 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
         }
         break;
     case k_eSwitchNfcState_Polling:
-        // Removal debounce
-        if (ctx->m_bNfcTagPresent && now >= ctx->m_ulNfcLastTagTicks + SWITCH_NFC_TAG_GONE_MS) {
-            SetNfcTagUid(ctx, joystick, NULL);
-        }
         // Stream watchdog: no NFC-shaped packet for a while, nudge or re-init
         if (now >= ctx->m_ulNfcLastMcuTicks + (2 * SWITCH_NFC_RESEND_MS) &&
             now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS) {
@@ -1653,8 +1684,10 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
                 SetNfcTagUid(ctx, joystick, NULL);
                 EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
             } else {
-                ctx->m_ulNfcActionTicks = now;
-                SendNfcStartPolling(ctx);
+                /* Nudge through a full discovery restart: a bare
+                   StartPolling into a session that still holds a target
+                   only re-arms the latch echo. */
+                EnterNfcState(ctx, k_eSwitchNfcState_RestartPolling, now);
             }
         }
         break;
