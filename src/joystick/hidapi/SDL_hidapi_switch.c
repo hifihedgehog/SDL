@@ -348,6 +348,7 @@ typedef struct
     Uint32 m_unNfcWindowMaxUs;  // USB diag: longest single NFC write this window
     Uint16 m_unNfcWindowWrites; // USB diag: NFC writes this window
     Uint16 m_unNfcWindowDeferred; // USB diag: paced sends the budget deferred this window
+    Uint16 m_unNfcWindowAcks;   // USB diag: inbound 0x21 subcommand replies seen this window
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -1813,15 +1814,16 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
             ctx->m_ulNfcWindowMs = now;
         } else if (now >= ctx->m_ulNfcWindowMs + 1000) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "NFCDIAG win t=%llu writes=%u blocked_us=%u max_us=%u deferred=%u st=%u",
+                        "NFCDIAG win t=%llu writes=%u blocked_us=%u max_us=%u deferred=%u acks=%u st=%u",
                         (unsigned long long)now, ctx->m_unNfcWindowWrites,
                         ctx->m_unNfcWindowBlockedUs, ctx->m_unNfcWindowMaxUs,
-                        ctx->m_unNfcWindowDeferred, ctx->m_ucNfcState);
+                        ctx->m_unNfcWindowDeferred, ctx->m_unNfcWindowAcks, ctx->m_ucNfcState);
             ctx->m_ulNfcWindowMs = now;
             ctx->m_unNfcWindowBlockedUs = 0;
             ctx->m_unNfcWindowMaxUs = 0;
             ctx->m_unNfcWindowWrites = 0;
             ctx->m_unNfcWindowDeferred = 0;
+            ctx->m_unNfcWindowAcks = 0;
         }
     }
 
@@ -3891,6 +3893,20 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             HandleInputOnlyControllerState(joystick, ctx, (SwitchInputOnlyControllerStatePacket_t *)&ctx->m_rgucReadBuffer[0]);
         } else {
             if (ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_SubcommandReply) {
+                if (!ctx->device->is_bluetooth && ctx->m_bNfcActive) {
+                    /* USB diag: every inbound subcommand reply while the
+                       machine is up, bytes 0-20 (ack at 13, subcommand id
+                       at 14), so the bench can tell a delivery failure
+                       (no lines while sends flow) from a framing failure
+                       (lines whose gate bytes differ from the BT shape). */
+                    const Uint8 *b = ctx->m_rgucReadBuffer;
+                    ctx->m_unNfcWindowAcks++;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "NFCRAW ack t=%llu st=%u sz=%d %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                                (unsigned long long)now, ctx->m_ucNfcState, size,
+                                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10],
+                                b[11], b[12], b[13], b[14], b[15], b[16], b[17], b[18], b[19], b[20]);
+                }
                 if (ctx->m_bNfcActive) {
                     HandleNfcSubcommandReply(ctx, joystick, now, size);
                 }
