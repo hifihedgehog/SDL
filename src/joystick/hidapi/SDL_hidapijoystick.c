@@ -164,8 +164,25 @@ void HIDAPI_DumpPacket(const char *prefix, const Uint8 *data, int size)
     SDL_free(buffer);
 }
 
-bool HIDAPI_SupportsPlaystationDetection(Uint16 vendor, Uint16 product)
+bool HIDAPI_SupportsPlaystationDetection(SDL_HIDAPI_Device *device, Uint16 vendor, Uint16 product)
 {
+    /* Never probe an interface presented by the XInput driver: xusb's
+     * synthetic HID collections carry "IG_" in the device path (the same
+     * heuristic the DirectInput backend trusts), a Sony-protocol
+     * interface can never live behind it, and the Sony third-party
+     * capabilities probe hangs the enumerating thread forever on such
+     * pads: the Windows feature read waits with no timeout and the
+     * xusb-wrapped firmware never answers (hifihedgehog/SDL#19,
+     * PadForge#235, Nacon PS4 Compact 146b:0603 in XInput mode).
+     * XInput-mode PS4 pads slip the type check below because
+     * k_eControllerType_XInputPS4Controller collapses to STANDARD off
+     * the UI path. hidapi lowercases its paths, so match
+     * case-insensitively. A non-xusb presentation of the same VID:PID
+     * has no IG_ and still gets probed. */
+    if (device && device->path && SDL_strcasestr(device->path, "IG_") != NULL) {
+        return false;
+    }
+
     /* If we already know the controller is a different type, don't try to detect it.
      * This fixes a hang with the HORIPAD for Nintendo Switch (0x0f0d/0x00c1)
      */
