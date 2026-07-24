@@ -351,6 +351,7 @@ typedef struct
     Uint16 m_unNfcWindowAcks;   // USB diag: inbound 0x21 subcommand replies seen this window
     Uint64 m_ulNfcAttemptStartMs; // USB: start of the current bring-up attempt (per-attempt deadline)
     Uint8 m_ucNfcFailedAttempts;  // USB: consecutive failed bring-up attempts (parking counter)
+    Uint64 m_ulForceUSBTicks;   // last ForceUSB keepalive nudge (rate bound)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -4156,10 +4157,23 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             if (!ctx->m_bInputOnly && !device->is_bluetooth &&
                 ctx->device->product_id != USB_PRODUCT_NINTENDO_SWITCH_JOYCON_GRIP) {
                 const int INPUT_WAIT_TIMEOUT_MS = 100;
-                if (now >= (ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS)) {
-                    // Steam may have put the controller back into non-reporting mode
+                const int FORCE_USB_MIN_INTERVAL_MS = 1000;
+                /* Steam may have put the controller back into non-reporting
+                   mode. Nudge it, but ONE shot per interval and never while
+                   the NFC machine is conversing: unbounded, this fired every
+                   tick once input stalled, a continuous 80 04 stream at the
+                   ~8 ms endpoint interval that wedged the subcommand channel
+                   (no 0x21 acks), suppressed the input stream it was checking
+                   for, and convoyed a 1 kHz consumer to 110-120 Hz
+                   (issue #15, named by the write-discriminator capture). An
+                   active NFC conversation proves the link itself and its
+                   drains stamp m_ulLastInput. */
+                if (now >= (ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS) &&
+                    now >= (ctx->m_ulForceUSBTicks + FORCE_USB_MIN_INTERVAL_MS) &&
+                    !ctx->m_bNfcActive) {
                     bool wasSyncWrite = ctx->m_bSyncWrite;
 
+                    ctx->m_ulForceUSBTicks = now;
                     ctx->m_bSyncWrite = true;
                     WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ForceUSB, NULL, 0, false);
                     ctx->m_bSyncWrite = wasSyncWrite;
