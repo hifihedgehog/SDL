@@ -352,6 +352,10 @@ typedef struct
     Uint64 m_ulNfcAttemptStartMs; // USB: start of the current bring-up attempt (per-attempt deadline)
     Uint8 m_ucNfcFailedAttempts;  // USB: consecutive failed bring-up attempts (parking counter)
     Uint8 m_ucNfcDrainRemaining;  // USB: reads left in the current spread reply window (one read per tick)
+    Uint8 m_ucNfcSeenReportId;    // USB: report id of the last frame the machine read (stream-observation for the teardown restore)
+    Uint8 m_ucNfcRestoreMode;     // USB teardown: the input mode being restored
+    bool m_bNfcTearToFailed;      // USB teardown: destination is Failed (from FailNfc) vs Idle (hint drop)
+    Uint8 m_ucNfcRxSample;        // USB diag: 1-in-N sampler for stream frames in the rx-twin log
     Uint64 m_ulForceUSBTicks;   // last ForceUSB keepalive nudge (rate bound, unarmed sessions only)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
@@ -867,33 +871,6 @@ static Uint8 MCUCrc8(const Uint8 *pBuf, int nLen)
  * no CRC is set (ir_sensor step 2, jctool.cpp:1738-1749). */
 static void NfcRecordWrite(SDL_DriverSwitch_Context *ctx, Uint8 ucWhat, Uint64 ulElapsedNs);
 
-/* USB: wrap a UART command in the 80 92 envelope, dekuNukem's USB-native
- * per-packet request-response contract (USB-HID-Notes.md: "Sends any UART
- * command. The UART post-header length is specified in the 16-bit word
- * following 80 92 ... and retrieves a response for that packet", example
- * frame 80 92 00 01 00 00 00 00 1F, so length big-endian at bytes 2-3,
- * four zero bytes, payload from byte 8). Plain 01-family MCU subcommands
- * never ack over USB on this bench (0x22 failed in every capture,
- * interference-free windows included), while the 0x03 family round-trips,
- * so the MCU-family conversation rides this envelope on USB. The response
- * framing beyond "retrieves a response" is undocumented, so the read side
- * accepts both a plain reply and an 81 92-enveloped one. */
-static bool WriteUartEnvelope(SDL_DriverSwitch_Context *ctx, const Uint8 *pPacket, Uint8 ucLen)
-{
-    Uint8 rgucWrapped[8 + k_unSwitchOutputPacketDataLength];
-
-    if (ucLen > k_unSwitchOutputPacketDataLength) {
-        return false;
-    }
-    SDL_zeroa(rgucWrapped);
-    rgucWrapped[0] = 0x80;
-    rgucWrapped[1] = 0x92;
-    rgucWrapped[2] = 0x00;
-    rgucWrapped[3] = ucLen; // 16-bit big-endian post-header length
-    SDL_memcpy(&rgucWrapped[8], pPacket, ucLen);
-    return WritePacket(ctx, rgucWrapped, (Uint8)(8 + ucLen));
-}
-
 static bool WriteMcuDataRequest(SDL_DriverSwitch_Context *ctx, Uint8 ucMcuSubcommand, Uint8 ucArg1, Uint8 ucFragAck)
 {
     Uint8 rgucPacket[k_unSwitchOutputPacketDataLength];
@@ -918,12 +895,7 @@ static bool WriteMcuDataRequest(SDL_DriverSwitch_Context *ctx, Uint8 ucMcuSubcom
         if (!ctx->device->is_bluetooth && ctx->m_bNfcActive) {
             ulT0 = SDL_GetTicksNS();
         }
-        if (!ctx->device->is_bluetooth && ctx->m_bNfcActive) {
-            // NFC machine traffic rides the USB envelope; IR's plain sends are untouched
-            result = WriteUartEnvelope(ctx, rgucPacket, sizeof(rgucPacket));
-        } else {
-            result = WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
-        }
+        result = WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
         if (ulT0) {
             NfcRecordWrite(ctx, ucMcuSubcommand, SDL_GetTicksNS() - ulT0);
         }
@@ -1371,6 +1343,8 @@ typedef enum
     k_eSwitchNfcState_WaitReceive,  // 0x11 NFC cmd 0x04; reply 0x2a/0x0500/0x31 state 0x00 (jctool.cpp:2426-2465)
     k_eSwitchNfcState_Polling,      // steady state: 0x01 once on entry, then presence check by paced 0x06 reads (a selected tag serves reads, a removed one fails them)
     k_eSwitchNfcState_CloseSession, // 0x02 sent after a read-failure clear (no response exists, mcu.md:95-99); dwell to absorb the 3-echo tail (mcu.md:73), then rediscover
+    k_eSwitchNfcState_TearRestore,  // USB teardown: 0x03 restore sent in mode 0x31 (no ack comes there, the transport law), confirmed by the STREAM's report ids returning to the restore mode
+    k_eSwitchNfcState_TearMcuOff,   // USB teardown: 0x22 off sent after the restore confirmed, where its ack provably flows (mode 0x30)
     k_eSwitchNfcState_Failed        // gave up; retried after a cooldown while the hint stays on
 } ESwitchNfcState;
 
@@ -1466,16 +1440,7 @@ static bool SendSubcommandAsync(SDL_DriverSwitch_Context *ctx, ESwitchSubcommand
     if (!ctx->device->is_bluetooth && ctx->m_bNfcActive) {
         ulT0 = SDL_GetTicksNS();
     }
-    if (!ctx->device->is_bluetooth &&
-        (ucCommandID == k_eSwitchSubcommandIDs_SetMCUState ||
-         ucCommandID == k_eSwitchSubcommandIDs_SetMCUConfig)) {
-        /* The MCU-family subcommands never ack as plain 01s over USB
-           (bench-proven across all captures); ride the envelope. The
-           0x03 family stays plain, it is the proven one. */
-        result = WriteUartEnvelope(ctx, (const Uint8 *)&commandPacket, sizeof(commandPacket));
-    } else {
-        result = WritePacket(ctx, &commandPacket, sizeof(commandPacket));
-    }
+    result = WritePacket(ctx, &commandPacket, sizeof(commandPacket));
     if (ulT0) {
         NfcRecordWrite(ctx, (Uint8)ucCommandID, SDL_GetTicksNS() - ulT0);
     }
@@ -1515,11 +1480,7 @@ static bool WriteNfcCommand(SDL_DriverSwitch_Context *ctx, Uint8 ucNfcCommand, c
         if (!ctx->device->is_bluetooth && ctx->m_bNfcActive) {
             ulT0 = SDL_GetTicksNS();
         }
-        if (!ctx->device->is_bluetooth) {
-            result = WriteUartEnvelope(ctx, rgucPacket, sizeof(rgucPacket));
-        } else {
-            result = WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
-        }
+        result = WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
         if (ulT0) {
             NfcRecordWrite(ctx, ucNfcCommand, SDL_GetTicksNS() - ulT0);
         }
@@ -1638,6 +1599,9 @@ static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 n
 /* Drop the machine without touching the bus: used when the IR path takes
  * MCU ownership (suspending the MCU here would kill the camera it just
  * configured). */
+static void NfcUsbBeginTeardown(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, bool bToFailed);
+static void NfcUsbFinishTeardown(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now);
+
 static void AbandonNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick)
 {
     SetNfcTagUid(ctx, joystick, NULL);
@@ -1666,35 +1630,19 @@ static void TeardownNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, b
     if (bWasUp && bRestoreInputMode && !ctx->m_bIRSensorActive) {
         Uint8 ucMode = ctx->m_bReportSensors ? GetSensorInputMode(ctx) : GetDefaultInputMode(ctx);
         ctx->m_nCurrentInputMode = ucMode;
-        if (!ctx->device->is_bluetooth) {
-            /* USB: the restore MUST be confirmed. An unconfirmed restore
-               leaves the controller in 0x31 or half-transitioned and
-               producing no reports at all, the bench's mute-controller
-               state. WriteSubcommand retries with bounded reply windows;
-               on failure, escalate to the documented session reset
-               (ResetMCU 0x06, USB-HID-Notes.md) and the driver's own
-               proven init ladder, then retry the restore once. */
-            bool bWasSyncWrite = ctx->m_bSyncWrite;
-
-            ctx->m_bSyncWrite = true;
-            if (!WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode), NULL)) {
-                WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ResetMCU, NULL, 0, false);
-                WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_Handshake, NULL, 0, true);
-                WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_HighSpeed, NULL, 0, true);
-                WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_Handshake, NULL, 0, true);
-                WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ForceUSB, NULL, 0, false);
-                WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode), NULL);
-            }
-            ctx->m_bSyncWrite = bWasSyncWrite;
-        } else {
-            SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
-        }
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
     }
     AbandonNfc(ctx, joystick);
 }
 
 static void FailNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now)
 {
+    if (!ctx->device->is_bluetooth) {
+        /* USB: teardown is the stream-verified tick-spread ladder, and it
+           parks in Failed when it completes. */
+        NfcUsbBeginTeardown(ctx, joystick, true);
+        return;
+    }
     TeardownNfc(ctx, joystick, true);
     ctx->m_ucNfcState = k_eSwitchNfcState_Failed;
     ctx->m_ulNfcActionTicks = now;
@@ -1729,19 +1677,46 @@ static void HandleNfcSubcommandReply(SDL_DriverSwitch_Context *ctx, SDL_Joystick
     case k_eSwitchNfcState_SetInputMode:
         if (buf[13] == 0x80 && buf[14] == 0x03) {
             ctx->m_ucNfcRounds = 0;
-            EnterNfcState(ctx, k_eSwitchNfcState_EnableMCU, now);
+            if (ctx->device->is_bluetooth) {
+                EnterNfcState(ctx, k_eSwitchNfcState_EnableMCU, now);
+            } else {
+                /* USB order (CTCaer scan_amiibo.log): the mode switch is
+                   the LAST plain subcommand, so its ack completes the
+                   pre-switch ladder and MCU status polls take over. */
+                EnterNfcState(ctx, k_eSwitchNfcState_AwaitNFC, now);
+            }
         }
         break;
     case k_eSwitchNfcState_EnableMCU:
         if (buf[13] == 0x80 && buf[14] == 0x22) {
             ctx->m_ucNfcRounds = 0;
-            EnterNfcState(ctx, k_eSwitchNfcState_AwaitStandby, now);
+            if (ctx->device->is_bluetooth) {
+                EnterNfcState(ctx, k_eSwitchNfcState_AwaitStandby, now);
+            } else {
+                // USB: configure NFC mode next, still pre-switch where acks flow
+                EnterNfcState(ctx, k_eSwitchNfcState_SetModeNFC, now);
+            }
         }
         break;
     case k_eSwitchNfcState_SetModeNFC:
-        if (buf[14] == 0x21 && buf[15] == 0x01 && buf[22] == 0x01) {
+        if (ctx->device->is_bluetooth) {
+            if (buf[14] == 0x21 && buf[15] == 0x01 && buf[22] == 0x01) {
+                ctx->m_ucNfcRounds = 0;
+                EnterNfcState(ctx, k_eSwitchNfcState_AwaitNFC, now);
+            }
+        } else if (buf[13] == 0xa0 && buf[14] == 0x21) {
+            /* USB gate is the ack word ONLY (capture: a021 with a busy
+               echo, 01 00 ff ... mid-transition), never the echo state
+               bytes. Mode confirmation is deferred to the post-switch
+               MCU status polls. */
             ctx->m_ucNfcRounds = 0;
-            EnterNfcState(ctx, k_eSwitchNfcState_AwaitNFC, now);
+            EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
+        }
+        break;
+    case k_eSwitchNfcState_TearMcuOff:
+        if (buf[13] == 0x80 && buf[14] == 0x22) {
+            // MCU off confirmed in mode 0x30, where its ack provably flows
+            NfcUsbFinishTeardown(ctx, joystick, now);
         }
         break;
     default:
@@ -1882,6 +1857,27 @@ static void HandleNfcMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joys
 
 static void HandleFullControllerState(SDL_Joystick *joystick, SDL_DriverSwitch_Context *ctx, SwitchStatePacket_t *packet);
 
+/* USB diag, armed sessions: the rx twin of the wr log. EVERY inbound
+ * frame's leading 12 bytes BEFORE classification, so a reply in any
+ * unexpected shape is visible instead of falling through a silent
+ * default. Stream frames (0x30/0x31) are sampled one in 16; everything
+ * else always logs. */
+static void NfcUsbLogRx(SDL_DriverSwitch_Context *ctx, Uint64 ulNow, int nSize)
+{
+    const Uint8 *p = ctx->m_rgucReadBuffer;
+
+    if (p[0] == k_eSwitchInputReportIDs_FullControllerState ||
+        p[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState) {
+        if ((++ctx->m_ucNfcRxSample & 0x0F) != 0) {
+            return;
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "NFCRAW rxx t=%llu sz=%d %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                (unsigned long long)ulNow, nSize,
+                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
+}
+
 /* USB: ONE bounded read for the currently open reply window, at most one
  * per UpdateDevice tick (the reporter's hard requirement after 8-read
  * windows ran whole inside single ticks at 71-87 ms). The window itself
@@ -1907,11 +1903,8 @@ static bool NfcUsbReadOne(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick)
     }
     ulNow = SDL_GetTicks();
     ctx->m_ulLastInput = ulNow;
-    if (ctx->m_rgucReadBuffer[0] == 0x81 && ctx->m_rgucReadBuffer[1] == 0x92 && nRead > 8) {
-        // Enveloped response: the inner report starts at byte 8
-        SDL_memmove(ctx->m_rgucReadBuffer, &ctx->m_rgucReadBuffer[8], (size_t)(nRead - 8));
-        nRead -= 8;
-    }
+    ctx->m_ucNfcSeenReportId = ctx->m_rgucReadBuffer[0];
+    NfcUsbLogRx(ctx, ulNow, nRead);
     switch (ctx->m_rgucReadBuffer[0]) {
     case k_eSwitchInputReportIDs_SubcommandReply:
         HandleNfcSubcommandReply(ctx, joystick, ulNow, nRead);
@@ -1929,6 +1922,42 @@ static bool NfcUsbReadOne(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick)
     return ctx->m_ucNfcState != ucState || ctx->m_bNfcTagPresent != bTag ||
            ctx->m_ulNfcLastTagTicks != ulTag || ctx->m_ulNfcMissTicks != ulMiss ||
            ctx->m_ulNfcLastMcuTicks != ulMcu;
+}
+
+/* USB teardown ladder, stream-verified (issue #15 final spec): StopPolling
+ * (no response exists), then the 0x03 restore sent in mode 0x31 where no
+ * ack will come (the transport law) and confirmed by the STREAM's report
+ * ids returning to the restore mode, then 0x22 off where its ack provably
+ * flows. The mute-controller state is structurally unreachable: the
+ * restore is verified by the same stream whose death defined the bug. */
+static void NfcUsbBeginTeardown(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, bool bToFailed)
+{
+    bool bWasSync = ctx->m_bSyncWrite;
+
+    (void)joystick;
+    ctx->m_bSyncWrite = true;
+    ctx->m_bNfcTearToFailed = bToFailed;
+    ctx->m_ucNfcRestoreMode = ctx->m_bReportSensors ? GetSensorInputMode(ctx) : GetDefaultInputMode(ctx);
+    ctx->m_nCurrentInputMode = ctx->m_ucNfcRestoreMode;
+    WriteNfcCommand(ctx, 0x02, NULL, 0); // StopPolling, no response (mcu.md:95-99); one write this tick
+    ctx->m_ucNfcState = k_eSwitchNfcState_TearRestore;
+    ctx->m_ucNfcRounds = 0;
+    ctx->m_ucNfcDrainRemaining = 0;
+    ctx->m_ulNfcActionTicks = 0; // restore goes out on the next tick
+    ctx->m_ulNfcAttemptStartMs = SDL_GetTicks();
+    ctx->m_ucNfcSeenReportId = 0;
+    ctx->m_bSyncWrite = bWasSync;
+}
+
+static void NfcUsbFinishTeardown(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now)
+{
+    bool bToFailed = ctx->m_bNfcTearToFailed;
+
+    AbandonNfc(ctx, joystick);
+    if (bToFailed) {
+        ctx->m_ucNfcState = k_eSwitchNfcState_Failed;
+        ctx->m_ulNfcActionTicks = now;
+    }
 }
 
 /* USB machine: the async tick machine is Bluetooth-shaped (it rides the
@@ -1960,7 +1989,13 @@ static void NfcUsbUpdate(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, 
     if (ctx->m_ucNfcState == k_eSwitchNfcState_Idle) {
         ctx->m_ucNfcRounds = 0;
         ctx->m_ulNfcAttemptStartMs = now;
-        EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now); // one write
+        /* USB order (CTCaer scan_amiibo.log, the one complete working NFC
+           session on disk): MCU on (0x22), configure NFC (0x21), and the
+           mode switch (0x03 0x31) LAST, because USB delivers subcommand
+           acks in mode 0x30 and not in 0x31. Every subcommand that ever
+           acked on this bench was pre-switch; every one that never acked
+           was post-switch. */
+        EnterNfcState(ctx, k_eSwitchNfcState_EnableMCU, now); // one write
         ctx->m_ucNfcDrainRemaining = SWITCH_NFC_USB_READS;
     } else if (ctx->m_ucNfcState >= k_eSwitchNfcState_SetInputMode &&
                ctx->m_ucNfcState <= k_eSwitchNfcState_WaitReceive) {
@@ -1979,6 +2014,52 @@ static void NfcUsbUpdate(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, 
             FailNfc(ctx, joystick, now);
         } else {
             EnterNfcState(ctx, ctx->m_ucNfcState, now); // resend, one write
+            ctx->m_ucNfcDrainRemaining = SWITCH_NFC_USB_READS;
+        }
+    } else if (ctx->m_ucNfcState == k_eSwitchNfcState_TearRestore) {
+        if (ctx->m_ucNfcSeenReportId != 0 &&
+            ctx->m_ucNfcSeenReportId == ctx->m_ucNfcRestoreMode) {
+            /* The stream came back in the restore mode: confirmed by
+               observation, no ack needed. MCU off next, where its ack
+               provably flows. */
+            ctx->m_ucNfcRounds = 0;
+            ctx->m_ulNfcActionTicks = 0;
+            ctx->m_ulNfcAttemptStartMs = now;
+            ctx->m_ucNfcState = k_eSwitchNfcState_TearMcuOff;
+        } else if (now >= ctx->m_ulNfcAttemptStartMs + SWITCH_NFC_USB_BRINGUP_MS) {
+            /* The stream never returned: the one case that may escalate
+               to the documented session reset (ResetMCU 0x06,
+               USB-HID-Notes.md) plus the driver's proven init ladder and
+               one restore retry, synchronous and terminal. */
+            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ResetMCU, NULL, 0, false);
+            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_Handshake, NULL, 0, true);
+            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_HighSpeed, NULL, 0, true);
+            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_Handshake, NULL, 0, true);
+            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ForceUSB, NULL, 0, false);
+            WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ctx->m_ucNfcRestoreMode, sizeof(ctx->m_ucNfcRestoreMode), NULL);
+            NfcUsbFinishTeardown(ctx, joystick, now);
+        } else if (ctx->m_ucNfcDrainRemaining > 0) {
+            NfcUsbReadOne(ctx, joystick); // one read, observing the stream
+            ctx->m_ucNfcDrainRemaining--;
+        } else if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+            /* Paced resend of the restore. No ack will come in 0x31 (the
+               transport law): confirmation is the stream check above. */
+            ctx->m_ulNfcActionTicks = now;
+            SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ctx->m_ucNfcRestoreMode, sizeof(ctx->m_ucNfcRestoreMode)); // one write
+            ctx->m_ucNfcDrainRemaining = SWITCH_NFC_USB_READS;
+        }
+    } else if (ctx->m_ucNfcState == k_eSwitchNfcState_TearMcuOff) {
+        if (now >= ctx->m_ulNfcAttemptStartMs + SWITCH_NFC_USB_BRINGUP_MS) {
+            // Best effort: the restore (the load-bearing half) is already confirmed
+            NfcUsbFinishTeardown(ctx, joystick, now);
+        } else if (ctx->m_ucNfcDrainRemaining > 0) {
+            NfcUsbReadOne(ctx, joystick); // one read; the 0x22 ack finishes via the handler
+            ctx->m_ucNfcDrainRemaining--;
+        } else if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_POLL_PACE_MS) {
+            Uint8 ucOff = 0x00;
+
+            ctx->m_ulNfcActionTicks = now;
+            SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff)); // one write
             ctx->m_ucNfcDrainRemaining = SWITCH_NFC_USB_READS;
         }
     } else if (ctx->m_ucNfcState == k_eSwitchNfcState_CloseSession) {
@@ -2068,10 +2149,28 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
     if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC, false)) {
         if (ctx->m_ucNfcState == k_eSwitchNfcState_Failed) {
             ctx->m_ucNfcState = k_eSwitchNfcState_Idle;
-        } else if (ctx->m_ucNfcState != k_eSwitchNfcState_Idle) {
-            TeardownNfc(ctx, joystick, true);
+            return;
         }
-        return;
+        if (ctx->m_ucNfcState == k_eSwitchNfcState_Idle) {
+            return;
+        }
+        if (ctx->device->is_bluetooth) {
+            TeardownNfc(ctx, joystick, true);
+            return;
+        }
+        /* USB: a hint drop enters the stream-verified teardown ladder and
+           keeps ticking it until it completes, so a drop mid-session can
+           never strand a half-transitioned controller. */
+        if (ctx->m_ucNfcState != k_eSwitchNfcState_TearRestore &&
+            ctx->m_ucNfcState != k_eSwitchNfcState_TearMcuOff) {
+            bool bWasSync = ctx->m_bSyncWrite;
+
+            ctx->m_bSyncWrite = true;
+            NfcUsbBeginTeardown(ctx, joystick, false);
+            ctx->m_bSyncWrite = bWasSync;
+            return;
+        }
+        // Fall through: tick the ladder below
     }
 
     /* Stream-death backstop, in every active state: removal is normally
@@ -4174,6 +4273,11 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             }
 
             ctx->m_nCurrentInputMode = ctx->m_rgucReadBuffer[0];
+            if (!device->is_bluetooth &&
+                SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC, false)) {
+                ctx->m_ucNfcSeenReportId = ctx->m_rgucReadBuffer[0];
+                NfcUsbLogRx(ctx, now, size);
+            }
 
             switch (ctx->m_rgucReadBuffer[0]) {
             case k_eSwitchInputReportIDs_SimpleControllerState:
