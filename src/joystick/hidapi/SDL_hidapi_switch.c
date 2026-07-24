@@ -1309,6 +1309,15 @@ static bool IsNfcSupported(SDL_DriverSwitch_Context *ctx)
     if (ctx->m_bInputOnly) {
         return false;
     }
+    if (!ctx->device->is_bluetooth) {
+        /* Bluetooth only. The machine is shaped around the unsolicited
+           60 Hz 0x31 stream; over USB every solicitation is a blocking
+           interrupt-OUT write on an ~8 ms service interval, and the field
+           trace showed a 1 kHz consumer convoying down to 110-120 Hz
+           behind the joystick lock while armed. USB support needs its
+           own budgeted writes and USB-measured pacing (issue #15). */
+        return false;
+    }
     /* The reader is in the right Joy-Con, paired or standalone, and the
        Pro Controller. A combined pair's right child runs this machine on
        its own HID handle and posts to the pair's joystick, the same
