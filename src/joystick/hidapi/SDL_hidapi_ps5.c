@@ -298,6 +298,13 @@ static bool HIDAPI_DriverPS5_IsSupportedDevice(SDL_HIDAPI_Device *device, const 
     Uint8 data[USB_PACKET_LENGTH];
     int size;
 
+    /* Never claim or probe an xusb interface: no DualSense protocol lives
+     * behind the XInput driver, and claiming one would send it the untimed
+     * capability probe from InitDevice (hifihedgehog/SDL#19). */
+    if (HIDAPI_IsXInputInterfacePath(device)) {
+        return false;
+    }
+
     if (vendor_id == USB_VENDOR_BACKBONE &&
         product_id == USB_PRODUCT_BACKBONE_ONE_PS5_V2) {
         // This product doesn't appear to use the DualSense protocol

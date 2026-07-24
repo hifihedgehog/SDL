@@ -210,6 +210,8 @@ extern void HIDAPI_UpdateDeviceProperties(SDL_HIDAPI_Device *device);
 
 extern void HIDAPI_DumpPacket(const char *prefix, const Uint8 *data, int size);
 
+extern bool HIDAPI_IsXInputInterfacePath(SDL_HIDAPI_Device *device);
+
 extern bool HIDAPI_SupportsPlaystationDetection(SDL_HIDAPI_Device *device, Uint16 vendor, Uint16 product);
 
 extern float HIDAPI_RemapVal(float val, float val_min, float val_max, float output_min, float output_max);

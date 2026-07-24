@@ -635,6 +635,17 @@ static bool HIDAPI_DriverPS3ThirdParty_IsSupportedDevice(SDL_HIDAPI_Device *devi
     Uint8 data[USB_PACKET_LENGTH];
     int size;
 
+    /* Never claim or probe an xusb interface: no PS3-protocol device lives
+     * behind the XInput driver, and the type == PS3 arm below would
+     * otherwise reach the untimed feature read on it. 80 controller_list.h
+     * entries are unconditionally PS3-typed, at least one of them
+     * Xbox-360-protocol (0f0d:0086), so the arm is reachable on XInput
+     * hardware (hifihedgehog/SDL#19). The Chillstream check below is
+     * unaffected: its XInput presentation is a different PID (046d:c242). */
+    if (HIDAPI_IsXInputInterfacePath(device)) {
+        return false;
+    }
+
     if (vendor_id == USB_VENDOR_LOGITECH &&
         product_id == USB_PRODUCT_LOGITECH_CHILLSTREAM) {
         return true;
