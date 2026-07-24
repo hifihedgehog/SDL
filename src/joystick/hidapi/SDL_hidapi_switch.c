@@ -519,7 +519,14 @@ static bool WritePacket(SDL_DriverSwitch_Context *ctx, void *pBuf, Uint8 ucLen)
     Uint8 rgucBuf[k_unSwitchMaxOutputPacketLength];
     const size_t unWriteSize = ctx->device->is_bluetooth ? k_unSwitchBluetoothPacketLength : k_unSwitchUSBPacketLength;
 
-    if (ucLen > k_unSwitchOutputPacketDataLength) {
+    /* The guard admits up to the USB packet size (the size of rgucBuf),
+       not just the 49-byte payload constant: the 80 92 UART envelope is
+       57 bytes and was rejected here, so it never reached the wire.
+       BINDING INVARIANT: over-49 writes are legal on USB ONLY. The
+       Bluetooth write size is 49, and an over-49 frame on BT would skip
+       the pad branch and go out raw, so every envelope producer must
+       stay gated on !is_bluetooth (both current call sites are). */
+    if (ucLen > k_unSwitchMaxOutputPacketLength) {
         return false;
     }
 
