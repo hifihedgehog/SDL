@@ -641,7 +641,7 @@ static bool HIDAPI_DriverPS3ThirdParty_IsSupportedDevice(SDL_HIDAPI_Device *devi
     }
 
     if ((type == SDL_GAMEPAD_TYPE_PS3 && vendor_id != USB_VENDOR_SONY) ||
-        HIDAPI_SupportsPlaystationDetection(vendor_id, product_id)) {
+        HIDAPI_SupportsPlaystationDetection(device, vendor_id, product_id)) {
         if (device && device->dev) {
             size = ReadFeatureReport(device->dev, 0x03, data, sizeof(data));
             if (size == 8 && data[2] == 0x26) {
