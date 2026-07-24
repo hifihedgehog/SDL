@@ -164,22 +164,30 @@ void HIDAPI_DumpPacket(const char *prefix, const Uint8 *data, int size)
     SDL_free(buffer);
 }
 
+bool HIDAPI_IsXInputInterfacePath(SDL_HIDAPI_Device *device)
+{
+    /* xusb's synthetic HID collections carry "&IG_" in the interface path,
+     * the marker both the DirectInput backend and the Windows hid_enumerate
+     * exclusion (src/hidapi/windows/hid.c) trust. No Sony-protocol interface
+     * can live behind the XInput driver, and the Sony third-party
+     * capabilities probe hangs the enumerating thread forever on such pads:
+     * the Windows feature read waits with no timeout on firmware that never
+     * answers (hifihedgehog/SDL#19, PadForge#235). hid_enumerate already
+     * skips "&IG_" interfaces case-sensitively, so on the standard xusb path
+     * this predicate is a second layer that only fires if an interface slips
+     * that filter. Interface paths keep whatever casing the driver stack
+     * registered (CM_Get_Device_Interface_ListW returns uppercase on current
+     * Windows; SetupDi-era enumerators return lowercase), so match
+     * case-insensitively. */
+    return device && device->path && SDL_strcasestr(device->path, "&IG_") != NULL;
+}
+
 bool HIDAPI_SupportsPlaystationDetection(SDL_HIDAPI_Device *device, Uint16 vendor, Uint16 product)
 {
-    /* Never probe an interface presented by the XInput driver: xusb's
-     * synthetic HID collections carry "IG_" in the device path (the same
-     * heuristic the DirectInput backend trusts), a Sony-protocol
-     * interface can never live behind it, and the Sony third-party
-     * capabilities probe hangs the enumerating thread forever on such
-     * pads: the Windows feature read waits with no timeout and the
-     * xusb-wrapped firmware never answers (hifihedgehog/SDL#19,
-     * PadForge#235, Nacon PS4 Compact 146b:0603 in XInput mode).
-     * XInput-mode PS4 pads slip the type check below because
-     * k_eControllerType_XInputPS4Controller collapses to STANDARD off
-     * the UI path. hidapi lowercases its paths, so match
-     * case-insensitively. A non-xusb presentation of the same VID:PID
-     * has no IG_ and still gets probed. */
-    if (device && device->path && SDL_strcasestr(device->path, "IG_") != NULL) {
+    /* Never probe an xusb interface. XInput-mode PS4 pads slip the type
+     * check below because k_eControllerType_XInputPS4Controller collapses
+     * to STANDARD off the UI path (hifihedgehog/SDL#19). */
+    if (HIDAPI_IsXInputInterfacePath(device)) {
         return false;
     }
 
