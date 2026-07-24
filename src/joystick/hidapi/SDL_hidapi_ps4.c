@@ -215,6 +215,13 @@ static bool HIDAPI_DriverPS4_IsSupportedDevice(SDL_HIDAPI_Device *device, const 
     Uint8 data[USB_PACKET_LENGTH];
     int size;
 
+    /* Never claim or probe an xusb interface: no DualShock 4 protocol lives
+     * behind the XInput driver, and claiming one would send it the untimed
+     * capability probe from InitDevice (hifihedgehog/SDL#19). */
+    if (HIDAPI_IsXInputInterfacePath(device)) {
+        return false;
+    }
+
     if (type == SDL_GAMEPAD_TYPE_PS4) {
         return true;
     }
