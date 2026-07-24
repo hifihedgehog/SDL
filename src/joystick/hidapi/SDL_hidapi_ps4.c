@@ -219,7 +219,7 @@ static bool HIDAPI_DriverPS4_IsSupportedDevice(SDL_HIDAPI_Device *device, const 
         return true;
     }
 
-    if (HIDAPI_SupportsPlaystationDetection(vendor_id, product_id)) {
+    if (HIDAPI_SupportsPlaystationDetection(device, vendor_id, product_id)) {
         if (device && device->dev) {
             size = ReadFeatureReport(device->dev, k_ePS4FeatureReportIdCapabilities, data, sizeof(data));
             if (size == 48 && data[2] == 0x27) {
