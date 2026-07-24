@@ -349,6 +349,8 @@ typedef struct
     Uint16 m_unNfcWindowWrites; // USB diag: NFC writes this window
     Uint16 m_unNfcWindowDeferred; // USB diag: paced sends the budget deferred this window
     Uint16 m_unNfcWindowAcks;   // USB diag: inbound 0x21 subcommand replies seen this window
+    Uint64 m_ulNfcAttemptStartMs; // USB: start of the current bring-up attempt (per-attempt deadline)
+    Uint8 m_ucNfcFailedAttempts;  // USB: consecutive failed bring-up attempts (parking counter)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
     Uint64 m_ulLastIMUReset;
@@ -524,6 +526,23 @@ static bool WritePacket(SDL_DriverSwitch_Context *ctx, void *pBuf, Uint8 ucLen)
         SDL_memset(rgucBuf + ucLen, 0, unWriteSize - ucLen);
         pBuf = rgucBuf;
         ucLen = (Uint8)unWriteSize;
+    }
+    if (!ctx->device->is_bluetooth &&
+        SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC, false)) {
+        /* USB diag, armed sessions only: EVERY write this driver submits
+           for this device, with sender thread and leading bytes, so one
+           capture names whatever traffic begins at the ack-death boundary
+           (issue #15: subcommand acks die ~2 s after connect on this
+           bench, across two machine architectures). Report id at byte 0
+           (0x01 subcommand, 0x10 rumble, 0x11 MCU, 0x80 proprietary),
+           subcommand id at byte 10 for 0x01s. */
+        const Uint8 *p = (const Uint8 *)pBuf;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "NFCDIAG wr t=%llu tid=%llu sync=%d %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                    (unsigned long long)SDL_GetTicks(),
+                    (unsigned long long)SDL_GetCurrentThreadID(),
+                    ctx->m_bSyncWrite ? 1 : 0,
+                    p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
     }
     if (ctx->m_bSyncWrite) {
         return SDL_hid_write(ctx->device->dev, (Uint8 *)pBuf, ucLen) >= 0;
@@ -1330,9 +1349,11 @@ typedef enum
 #define SWITCH_NFC_STATUS_PACE_USB_MS   500   // pre-acquisition status cadence over USB
 #define SWITCH_NFC_PRESENCE_READ_USB_MS 500   // presence-read cadence over USB; removal adds at most one period over the ~2.1 s silicon floor
 #define SWITCH_NFC_USB_WRITE_BUDGET_US  50000 // measured solicitation block time (write plus reply drain) allowed per rolling second, so a stretching endpoint throttles the machine, never the consumer
-#define SWITCH_NFC_USB_READ_TIMEOUT_MS  64    // per-read timeout in a drain window (jc_toolkit's hid_read_timeout constant)
-#define SWITCH_NFC_USB_READS            8     // reads per drain window (jc_toolkit retries > 8)
-#define SWITCH_NFC_USB_BRINGUP_MS       600   // deadline on the one-shot synchronous bring-up chain
+#define SWITCH_NFC_USB_READ_TIMEOUT_MS  8     // per-read timeout in a drain window; acks measure 2-30 ms, and 8 reads cap a window at ~64 ms so one window fits a tick without stalling the engine
+#define SWITCH_NFC_USB_READS            8     // reads per drain window
+#define SWITCH_NFC_USB_BRINGUP_MS       600   // per-attempt deadline on the bring-up ladder, measured across ticks (one solicitation and one drain window per tick)
+#define SWITCH_NFC_USB_PARK_AFTER       3     // consecutive failed bring-up attempts before parking
+#define SWITCH_NFC_USB_PARK_MS          60000 // parked cooldown: a persistently ack-dead session stops costing the engine anything until the next long retry or a hint bounce
 
 static bool IsNfcSupported(SDL_DriverSwitch_Context *ctx)
 {
@@ -1851,44 +1872,51 @@ static void NfcUsbUpdate(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, 
 
     ctx->m_bSyncWrite = true;
 
-    if (ctx->m_ucNfcState == k_eSwitchNfcState_Failed &&
-        now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RETRY_COOLDOWN_MS) {
-        ctx->m_ucNfcState = k_eSwitchNfcState_Idle;
+    if (ctx->m_ucNfcState == k_eSwitchNfcState_Failed) {
+        /* A persistently ack-dead session parks on the long cooldown
+           after enough consecutive failures, so it stops costing the
+           engine anything while the interferer capture runs. */
+        Uint32 unCooldown = (ctx->m_ucNfcFailedAttempts >= SWITCH_NFC_USB_PARK_AFTER)
+                                ? SWITCH_NFC_USB_PARK_MS
+                                : SWITCH_NFC_RETRY_COOLDOWN_MS;
+        if (now >= ctx->m_ulNfcActionTicks + unCooldown) {
+            ctx->m_ucNfcState = k_eSwitchNfcState_Idle;
+        }
     }
 
     if (ctx->m_ucNfcState == k_eSwitchNfcState_Idle) {
-        /* One-shot bring-up chain: each transition's handler sends the
-           next command synchronously, so the whole ladder completes
-           inside these drain windows, deadline-bounded. Recorded whole
-           into the block-time meter (what=b0). */
-        Uint64 ulDeadline = SDL_GetTicks() + SWITCH_NFC_USB_BRINGUP_MS;
-        Uint64 ulT0 = SDL_GetTicksNS();
-
+        /* Bring-up ladder, spread across ticks: this tick sends the first
+           step and drains one short window. Later ticks advance, resend,
+           or fail it under the per-attempt deadline. At most one
+           solicitation and one ~64 ms window per tick, so the engine
+           never eats the ladder whole. */
         ctx->m_ucNfcRounds = 0;
+        ctx->m_ulNfcAttemptStartMs = now;
         EnterNfcState(ctx, k_eSwitchNfcState_SetInputMode, now);
-        while (ctx->m_ucNfcState >= k_eSwitchNfcState_SetInputMode &&
+        NfcUsbDrainWindow(ctx, joystick);
+    } else if (ctx->m_ucNfcState >= k_eSwitchNfcState_SetInputMode &&
                ctx->m_ucNfcState <= k_eSwitchNfcState_WaitReceive) {
-            if (SDL_GetTicks() >= ulDeadline) {
-                FailNfc(ctx, joystick, SDL_GetTicks());
-                break;
-            }
-            if (NfcUsbDrainWindow(ctx, joystick)) {
-                ctx->m_ucNfcRounds = 0;
-            } else if (++ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
-                FailNfc(ctx, joystick, SDL_GetTicks());
-                break;
-            } else {
-                EnterNfcState(ctx, ctx->m_ucNfcState, SDL_GetTicks());
-            }
+        if (now >= ctx->m_ulNfcAttemptStartMs + SWITCH_NFC_USB_BRINGUP_MS) {
+            ctx->m_ucNfcFailedAttempts++;
+            FailNfc(ctx, joystick, now);
+        } else if (NfcUsbDrainWindow(ctx, joystick)) {
+            ctx->m_ucNfcRounds = 0;
+        } else if (++ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
+            ctx->m_ucNfcFailedAttempts++;
+            FailNfc(ctx, joystick, now);
+        } else {
+            EnterNfcState(ctx, ctx->m_ucNfcState, now);
         }
-        NfcRecordWrite(ctx, 0xb0, SDL_GetTicksNS() - ulT0);
     } else if (ctx->m_ucNfcState == k_eSwitchNfcState_CloseSession) {
         /* No response exists for the stop (mcu.md:95-99) and USB has no
-           unsolicited echoes to absorb: rediscover immediately. */
+           unsolicited echoes to absorb: rediscover as a fresh
+           deadline-bounded mini-attempt through WaitReceive. */
         ctx->m_ucNfcRounds = 0;
+        ctx->m_ulNfcAttemptStartMs = now;
         EnterNfcState(ctx, k_eSwitchNfcState_WaitReceive, now);
         NfcUsbDrainWindow(ctx, joystick);
     } else if (ctx->m_ucNfcState == k_eSwitchNfcState_Polling) {
+        ctx->m_ucNfcFailedAttempts = 0; // a completed bring-up clears the parking counter
         if (!ctx->m_bNfcTagPresent) {
             if (now >= ctx->m_ulNfcReadTicks + NfcStatusPaceMs(ctx)) {
                 if (NfcWriteBudgetOk(ctx)) {
@@ -1937,16 +1965,6 @@ static void NfcUsbUpdate(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, 
                     }
                     NfcRecordWrite(ctx, 0xdd, SDL_GetTicksNS() - ulT0);
                 }
-            }
-        }
-    } else {
-        // Residual bring-up state (a stalled close-rediscovery): retry on the resend clock
-        if (now >= ctx->m_ulNfcActionTicks + SWITCH_NFC_RESEND_MS && NfcWriteBudgetOk(ctx)) {
-            if (++ctx->m_ucNfcRounds > SWITCH_NFC_MAX_ROUNDS) {
-                FailNfc(ctx, joystick, now);
-            } else {
-                EnterNfcState(ctx, ctx->m_ucNfcState, now);
-                NfcUsbDrainWindow(ctx, joystick);
             }
         }
     }
