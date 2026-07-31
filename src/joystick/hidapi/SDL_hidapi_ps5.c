@@ -1582,6 +1582,19 @@ static bool HIDAPI_DriverPS5_IsPacketValid(SDL_DriverPS5_Context *ctx, Uint8 *da
 
     case k_EPS5ReportIdBluetoothState:
         if (VerifyCRC(data, size)) {
+            /* A DualSense with an open microphone session interleaves 0x31
+             * reports whose payload is a 71-byte Opus mic frame instead of
+             * controller state (header data[1]: bit0 = HasHID, bit1 =
+             * HasMic, bits 4..7 = sequence). Mic frames carry a valid CRC,
+             * so without this check they decode as erratic stick, button,
+             * and IMU input (hifihedgehog/SDL#20, PadForge#255). Normal
+             * reports never set bit1, so this is a no-op unless a co-app
+             * opens the mic. Filter on bit1 only: bit0's semantics on
+             * normal reports are unconfirmed by capture, and keying on it
+             * could drop all BT input if the protocol notes are wrong. */
+            if ((data[1] & 0x02) != 0) {
+                return false; /* mic frame, consume silently */
+            }
             return true;
         }
         break;
