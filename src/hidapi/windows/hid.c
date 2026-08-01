@@ -943,21 +943,48 @@ static struct hid_device_info *hid_internal_get_device_info(const wchar_t *path,
 /* PadForge/HIDMaestro filter.
 
    Returns 1 if this HID device interface belongs to a HIDMaestro virtual
-   controller. max_depth controls how far up the PnP parent chain to walk:
-     1 — depth 0 only. Sufficient for non-Xbox HIDMaestro profiles (DS4,
-         DualSense, wheels, flight sticks), which carry "HID\HIDMaestro"
-         directly in their Hardware IDs at the HID child devnode. Cheap:
-         one CM interface-id lookup + one CM Hardware IDs read per device.
-     N > 1 — walk up to N parents. Needed when the caller passes an
-         XInput-class HID (path contains "&IG_"), because Xbox-family
-         profiles spoof the real Microsoft Hardware IDs at the HID child
-         level and the HIDMaestro marker only appears at the root
-         enumerator a few levels up.
+   controller. max_depth is how many devnodes to inspect: 1 checks the HID
+   child only, N checks it plus N-1 parents. Where the marker sits depends
+   on the profile:
+     depth 0. Non-Xbox UMDF2 profiles (DS4, DualSense, wheels, flight
+         sticks) carry "HID\HIDMaestro" directly in the HID child's
+         Hardware IDs.
+     a few levels up. Xbox-family profiles spoof the real Microsoft
+         Hardware IDs at the HID child level, so the marker only appears
+         at the root enumerator.
+     depth 4. Composite USB personas carry genuine vendor ids the whole
+         way and are identifiable only at the emulated host controller.
 
-   Callers: SDL's own hid_enumerate loop already skips "&IG_" devices
-   before calling this, so it can use max_depth=1. The XInput-backend
-   autonomous filter inspects HIDs matching an occupied XInput slot's
-   VID/PID, which includes "&IG_" ones, so it passes max_depth=3. */
+   Every call site passes HM_FILTER_MAX_DEPTH. Composite personas set that
+   floor, and no caller can afford a shallower walk. */
+/* Depth every caller walks.
+
+   Composite USB personas (HIDMaestro v1.4.0+) enumerate through the real
+   USB stack with genuine vendor identifiers, because Windows must see a
+   real device for the class drivers to bind. Nothing on the device itself
+   can be marked, so HIDMaestro v1.4.3 stamps the one node it owns, the
+   emulated host controller, with an additive hardware id (upstream's id
+   stays at index 0, so driver matching is unchanged):
+
+     ROOT\USB\0000  ids = [ROOT\USBIP_WIN2\UDE, ROOT\HIDMAESTRO_UDE]
+
+   Measured ancestry of a live persona's HID interface:
+
+     depth 0  HID\VID_054C&PID_0CE6&MI_03\...
+     depth 1  USB\VID_054C&PID_0CE6&MI_03\...
+     depth 2  USB\VID_054C&PID_0CE6\...
+     depth 3  USB\ROOT_HUB30\...
+     depth 4  ROOT\USB\0000                     <== token
+     depth 5  HTREE\ROOT\0
+
+   The loop below checks depth 0 as the HID node itself and one parent per
+   iteration, so reaching depth 4 needs a limit of 5. Only HTREE\ROOT\0
+   sits above it, so 5 walks as far as this tree can carry a marker. The
+   hm_cache memoises per interface path, so the walk runs once per device
+   and the cost stays bounded to the first enumeration pass that sees it
+   (hifihedgehog/SDL#21, hifihedgehog/HIDMaestro#42). */
+#define HM_FILTER_MAX_DEPTH 5
+
 /* Cache of device-interface path -> is_hidmaestro result.  HID interface
    paths are stable per device instance, so once we've walked the PnP tree
    for one we can reuse the result on every subsequent enumeration.  The
@@ -1117,10 +1144,10 @@ static int hid_internal_is_hidmaestro_device(const wchar_t *device_interface, in
 
 /* PadForge/HIDMaestro filter — ANSI HID interface path entry point.
 
-   Exported for SDL's RawInput joystick backend, which receives HID
-   interface paths as char* from GetRawInputDeviceInfoA. Converts to
-   wide and calls the core walker with depth 3 (covers the
-   HID-leaf → ROOT\HIDMaestro* parent chain). */
+   Exported for SDL's RawInput and DirectInput joystick backends, which
+   receive HID interface paths as char* from GetRawInputDeviceInfoA and
+   from the DirectInput device path. Converts to wide and calls the core
+   walker. */
 int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path)
 {
 	wchar_t wpath[512];
@@ -1128,7 +1155,7 @@ int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path)
 	if (!ansi_path || !ansi_path[0]) return 0;
 	n = MultiByteToWideChar(CP_ACP, 0, ansi_path, -1, wpath, 512);
 	if (n <= 0) return 0;
-	return hid_internal_is_hidmaestro_device(wpath, 3);
+	return hid_internal_is_hidmaestro_device(wpath, HM_FILTER_MAX_DEPTH);
 }
 
 
@@ -1211,11 +1238,13 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
             continue;
         }
 
-        /* PadForge: skip HIDMaestro virtual controllers. Depth-0 only —
-           the "&IG_" skip above means only non-XInput HIDs reach here, and
-           non-Xbox HIDMaestro profiles carry "HID\HIDMaestro" in their
-           Hardware IDs at depth 0. */
-        if (hid_internal_is_hidmaestro_device(device_interface, 1)) {
+        /* PadForge: skip HIDMaestro virtual controllers. Non-Xbox profiles
+           carry "HID\HIDMaestro" at depth 0, but composite USB personas
+           carry genuine vendor ids all the way up and are only identifiable
+           at the emulated host controller, so this walks the full depth
+           too. Without it a host that instantiates a persona also picks it
+           up as an ordinary second gamepad in its own process. */
+        if (hid_internal_is_hidmaestro_device(device_interface, HM_FILTER_MAX_DEPTH)) {
             continue;
         }
 
