@@ -35,6 +35,7 @@ typedef struct SDL_HIDAPI_RumbleRequest
     int size;
     SDL_HIDAPI_RumbleSentCallback callback;
     void *userdata;
+    SDL_HIDAPI_RumbleWriteFunc write_func; // NULL means SDL_hid_write
     struct SDL_HIDAPI_RumbleRequest *prev;
 
 } SDL_HIDAPI_RumbleRequest;
@@ -81,7 +82,11 @@ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
 #ifdef DEBUG_RUMBLE
                 HIDAPI_DumpPacket("Rumble packet: size = %d", request->data, request->size);
 #endif
-                SDL_hid_write(request->device->dev, request->data, request->size);
+                if (request->write_func) {
+                    request->write_func(request->device, request->data, request->size);
+                } else {
+                    SDL_hid_write(request->device->dev, request->data, request->size);
+                }
             }
             if (request->callback) {
                 request->callback(request->userdata);
@@ -176,7 +181,7 @@ bool SDL_HIDAPI_LockRumble(void)
     return true;
 }
 
-bool SDL_HIDAPI_GetPendingRumbleLocked(SDL_HIDAPI_Device *device, Uint8 **data, int **size, int *maximum_size)
+static SDL_HIDAPI_RumbleRequest *SDL_HIDAPI_GetPendingRequestLocked(SDL_HIDAPI_Device *device)
 {
     SDL_HIDAPI_RumbleContext *ctx = &rumble_context;
     SDL_HIDAPI_RumbleRequest *request, *found;
@@ -187,6 +192,13 @@ bool SDL_HIDAPI_GetPendingRumbleLocked(SDL_HIDAPI_Device *device, Uint8 **data, 
             found = request;
         }
     }
+    return found;
+}
+
+bool SDL_HIDAPI_GetPendingRumbleLocked(SDL_HIDAPI_Device *device, Uint8 **data, int **size, int *maximum_size)
+{
+    SDL_HIDAPI_RumbleRequest *found = SDL_HIDAPI_GetPendingRequestLocked(device);
+
     if (found) {
         *data = found->data;
         *size = &found->size;
@@ -196,12 +208,7 @@ bool SDL_HIDAPI_GetPendingRumbleLocked(SDL_HIDAPI_Device *device, Uint8 **data, 
     return false;
 }
 
-int SDL_HIDAPI_SendRumbleAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size)
-{
-    return SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(device, data, size, NULL, NULL);
-}
-
-int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleSentCallback callback, void *userdata)
+static int SDL_HIDAPI_SendRequestAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleSentCallback callback, void *userdata, SDL_HIDAPI_RumbleWriteFunc write_func)
 {
     SDL_HIDAPI_RumbleContext *ctx = &rumble_context;
     SDL_HIDAPI_RumbleRequest *request;
@@ -222,6 +229,7 @@ int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const 
     request->size = size;
     request->callback = callback;
     request->userdata = userdata;
+    request->write_func = write_func;
 
     SDL_AtomicIncRef(&device->rumble_pending);
 
@@ -240,6 +248,16 @@ int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const 
     return size;
 }
 
+int SDL_HIDAPI_SendRumbleAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size)
+{
+    return SDL_HIDAPI_SendRequestAndUnlock(device, data, size, NULL, NULL, NULL);
+}
+
+int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleSentCallback callback, void *userdata)
+{
+    return SDL_HIDAPI_SendRequestAndUnlock(device, data, size, callback, userdata, NULL);
+}
+
 void SDL_HIDAPI_UnlockRumble(void)
 {
     SDL_UnlockMutex(SDL_HIDAPI_rumble_lock);
@@ -247,9 +265,12 @@ void SDL_HIDAPI_UnlockRumble(void)
 
 int SDL_HIDAPI_SendRumble(SDL_HIDAPI_Device *device, const Uint8 *data, int size)
 {
-    Uint8 *pending_data;
-    int *pending_size;
-    int maximum_size;
+    return SDL_HIDAPI_SendRumbleWithWriteFunc(device, data, size, NULL);
+}
+
+int SDL_HIDAPI_SendRumbleWithWriteFunc(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleWriteFunc write_func)
+{
+    SDL_HIDAPI_RumbleRequest *pending;
 
     if (size <= 0) {
         SDL_SetError("Tried to send rumble with invalid size");
@@ -260,15 +281,19 @@ int SDL_HIDAPI_SendRumble(SDL_HIDAPI_Device *device, const Uint8 *data, int size
         return -1;
     }
 
-    // check if there is a pending request for the device and update it
-    if (SDL_HIDAPI_GetPendingRumbleLocked(device, &pending_data, &pending_size, &maximum_size) &&
-        size == *pending_size && data[0] == pending_data[0]) {
-        SDL_memcpy(pending_data, data, size);
+    /* Check if there is a pending request for the device and update it.
+       The send override must match too: replacing a plain write's payload
+       with feature-report data (or the reverse) would send the new bytes
+       through the old transfer type. */
+    pending = SDL_HIDAPI_GetPendingRequestLocked(device);
+    if (pending && size == pending->size && data[0] == pending->data[0] &&
+        write_func == pending->write_func) {
+        SDL_memcpy(pending->data, data, size);
         SDL_HIDAPI_UnlockRumble();
         return size;
     }
 
-    return SDL_HIDAPI_SendRumbleAndUnlock(device, data, size);
+    return SDL_HIDAPI_SendRequestAndUnlock(device, data, size, NULL, NULL, write_func);
 }
 
 void SDL_HIDAPI_QuitRumble(void)
