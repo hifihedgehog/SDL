@@ -1332,10 +1332,101 @@ static bool HIDAPI_DriverSteam_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joyst
     return true;
 }
 
+/* The 2015 Steam Controller has no rumble motors. Rumble renders as sustained
+   ID_TRIGGER_HAPTIC_PULSE (0x8F) trains on the two touchpad haptic actuators,
+   the same emulation Steam Input uses (hifihedgehog/SDL#23, PadForge#261).
+   Wire format per MsgFireHapticPulse (steam/controller_structs.h), confirmed
+   by SteamControllerSinger (main.cpp, full 64-byte USB feature payload) and
+   sc-controller (sc_dongle.py, '<BBBHHH' pack): report id 0, then
+   {0x8f, 0x07, which_pad, on_us16, off_us16, count16} little-endian, with
+   0x01 = left pad, 0x00 = right, and 0x7FFF the sustain-until-replaced count
+   both references use. The low-frequency motor image renders on the LEFT pad
+   and high on the RIGHT, matching SDL's combined Joy-Con convention.
+   Intensity maps to duty cycle against a fixed per-side carrier, capped at
+   50%. The carriers are bench-tunable constants; the structure is not. */
+#define STEAM_RUMBLE_LEFT_PERIOD_US  15000 // ~67 Hz carrier, low-frequency image
+#define STEAM_RUMBLE_RIGHT_PERIOD_US 7500  // ~133 Hz carrier, high-frequency image
+#define STEAM_RUMBLE_SUSTAIN_COUNT   0x7FFF
+#define STEAM_RUMBLE_BLOB_SIZE       10 // report id + {0x8f, 0x07, pad, on16, off16, count16}
+
+static void BuildHapticPulseCommand(Uint8 *blob, Uint8 which_pad, Uint32 on_us, Uint32 period_us)
+{
+    // Zero intensity sends the stop form: zero durations, zero count.
+    Uint32 off_us = (on_us > 0) ? (period_us - on_us) : 0;
+    Uint16 count = (on_us > 0) ? STEAM_RUMBLE_SUSTAIN_COUNT : 0;
+
+    blob[0] = 0; // report number
+    blob[1] = ID_TRIGGER_HAPTIC_PULSE;
+    blob[2] = 0x07; // payload length: which_pad + pulse_duration + pulse_interval + pulse_count
+    blob[3] = which_pad;
+    blob[4] = (Uint8)(on_us & 0xFF);
+    blob[5] = (Uint8)((on_us >> 8) & 0xFF);
+    blob[6] = (Uint8)(off_us & 0xFF);
+    blob[7] = (Uint8)((off_us >> 8) & 0xFF);
+    blob[8] = (Uint8)(count & 0xFF);
+    blob[9] = (Uint8)((count >> 8) & 0xFF);
+}
+
+/* Rumble-thread write func for a queued pair of haptic pulse commands over
+   Bluetooth: two consecutive STEAM_RUMBLE_BLOB_SIZE feature blobs, one per
+   pad, each a one-segment BLE write. The pair travels as ONE request because
+   two queued requests would replace-coalesce and drop the first pad's
+   update. Short lengths are the driver's norm for BLE commands (every
+   open-time SetFeatureReport sends them), so each pad costs one segment
+   here rather than the four a full 65-byte blob would. Like every rumble
+   write func, this must not touch dev->context. */
+static int SteamWriteRumblePair(SDL_HIDAPI_Device *dev, const Uint8 *data, int size)
+{
+    int half = size / 2;
+    int nRetLeft = SteamWriteSegmentedFeatureReport(dev, data, half);
+    int nRetRight = SteamWriteSegmentedFeatureReport(dev, data + half, half);
+    return (nRetLeft < 0) ? nRetLeft : nRetRight;
+}
+
 static bool HIDAPI_DriverSteam_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
-    // You should use the full Steam Input API for rumble support
-    return SDL_Unsupported();
+    Uint8 blobs[2 * STEAM_RUMBLE_BLOB_SIZE];
+    Uint32 on_left, on_right;
+
+    /* No driver-level change-gate, deliberately. The joystick core already
+       drops app calls with unchanged values (SDL_RumbleJoystick only updates
+       the expiration), so every call that reaches this function is either a
+       genuine value change or the core's 2-second keep-alive resend, and the
+       keep-alive must reach the hardware: the 0x7FFF sustain runs out after
+       4-8 minutes of constant rumble, and over Bluetooth the resend is also
+       what recovers a dropped queued write. */
+    on_left = ((Uint32)low_frequency_rumble * (STEAM_RUMBLE_LEFT_PERIOD_US / 2)) / SDL_MAX_UINT16;
+    on_right = ((Uint32)high_frequency_rumble * (STEAM_RUMBLE_RIGHT_PERIOD_US / 2)) / SDL_MAX_UINT16;
+
+    BuildHapticPulseCommand(&blobs[0], 1, on_left, STEAM_RUMBLE_LEFT_PERIOD_US);
+    BuildHapticPulseCommand(&blobs[STEAM_RUMBLE_BLOB_SIZE], 0, on_right, STEAM_RUMBLE_RIGHT_PERIOD_US);
+
+    if (device->is_bluetooth) {
+        /* Queue through the rumble thread so the segmented writes never run
+           under the joystick lock (the hifihedgehog/SDL#22 stall class). A
+           newer pair replace-coalesces over a pending one. Effects never
+           collide with this slot: their request size and write func both
+           differ, so the two kinds queue independently. */
+        if (SDL_HIDAPI_SendRumbleWithWriteFunc(device, blobs, sizeof(blobs), SteamWriteRumblePair) != sizeof(blobs)) {
+            return false;
+        }
+    } else {
+        // Wired and dongle: single fast control transfers, one per pad
+        unsigned char buf[65];
+
+        SDL_zero(buf);
+        SDL_memcpy(buf, &blobs[0], STEAM_RUMBLE_BLOB_SIZE);
+        if (SetFeatureReport(device, buf, STEAM_RUMBLE_BLOB_SIZE) < 0) {
+            return SDL_SetError("Couldn't send haptic pulse command");
+        }
+
+        SDL_zero(buf);
+        SDL_memcpy(buf, &blobs[STEAM_RUMBLE_BLOB_SIZE], STEAM_RUMBLE_BLOB_SIZE);
+        if (SetFeatureReport(device, buf, STEAM_RUMBLE_BLOB_SIZE) < 0) {
+            return SDL_SetError("Couldn't send haptic pulse command");
+        }
+    }
+    return true;
 }
 
 static bool HIDAPI_DriverSteam_RumbleJoystickTriggers(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint16 left_rumble, Uint16 right_rumble)
@@ -1345,8 +1436,8 @@ static bool HIDAPI_DriverSteam_RumbleJoystickTriggers(SDL_HIDAPI_Device *device,
 
 static Uint32 HIDAPI_DriverSteam_GetJoystickCapabilities(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
 {
-    // You should use the full Steam Input API for extended capabilities
-    return 0;
+    // Rumble renders on the touchpad haptic actuators, see RumbleJoystick
+    return SDL_JOYSTICK_CAP_RUMBLE;
 }
 
 static bool HIDAPI_DriverSteam_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint8 red, Uint8 green, Uint8 blue)
