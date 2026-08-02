@@ -1282,6 +1282,20 @@ static bool HIDAPI_DriverSteam_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joyst
 
     SDL_AssertJoysticksLocked();
 
+    if (device->is_bluetooth) {
+        /* A haptic effect queued before a previous close can still be in
+           flight on the rumble thread (CloseJoystick's pending wait is
+           best-effort), and the segmented-write mutex only serializes whole
+           writes: an effect landing between one of ResetSteamController's
+           command writes and its response read could clobber the response
+           and fail the open. Drain pending sends first. The common case is
+           a single atomic read of zero; no lock cycle, since the rumble
+           thread never takes the joystick lock. */
+        for (int attempt = 0; attempt < 10 && SDL_GetAtomicInt(&device->rumble_pending) > 0; ++attempt) {
+            SDL_Delay(10);
+        }
+    }
+
     ctx->report_sensors = false;
     SDL_zero(ctx->m_assembler);
     SDL_zero(ctx->m_state);
