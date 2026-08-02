@@ -332,6 +332,12 @@ typedef struct
     bool m_bReportSensors;
     bool m_bIRSensorActive; // right Joy-Con NIR camera streaming (input report 0x31)
     Uint64 m_ulIRModeFixTicks; // last report-mode-watchdog re-init (externally knocked input mode)
+    // NIR camera async bring-up (fork issue #24): one machine step per update tick
+    Uint8 m_ucIRState;          // ESwitchIRState
+    Uint8 m_ucIRRounds;         // command re-send rounds in the current state
+    Uint8 m_ucIRFails;          // consecutive failed bring-ups (retry backoff)
+    Uint64 m_ulIRActionTicks;   // last state-machine send (retry / cooldown pacing)
+    Uint64 m_ulIRLastFragTicks; // last image fragment while streaming (stall watchdog)
     // NFC tag reading (fork issue #15): MCU-driven, async off the update loop
     bool m_bNfcActive;          // machine running: input mode 0x31 held, MCU coming up or polling
     Uint8 m_ucNfcState;         // ESwitchNfcState
@@ -852,264 +858,6 @@ static bool WriteMcuDataRequest(SDL_DriverSwitch_Context *ctx, Uint8 ucMcuSubcom
     return WritePacket(ctx, rgucPacket, sizeof(rgucPacket));
 }
 
-/* Write subcommand 0x21 (set MCU config) with the 38-byte MCU payload:
- * payload[0] = mcu_cmd, payload[1] = mcu_subcmd, ..., payload[37] = crc8 over
- * payload[1..36] (jc_toolkit: buf[48] = mcu_crc8_calc(buf + 12, 36), where
- * buf[11] is mcu_cmd and buf[12] is mcu_subcmd, jctool.cpp:1388). The reply
- * payload (raw report bytes 15+) comes back as rgucSubcommandData.
- *
- * bNudgeIRStatus replicates jc_toolkit's step 7, which sends an 0x11/0x03
- * arg-0x02 IR status request between the register write and the ack read
- * (jctool.cpp:1954-1965); without the interleave the ack can arrive in its
- * alternate 0x23 form, which the callers also accept. */
-static SwitchSubcommandInputPacket_t *WriteMCUConfig(SDL_DriverSwitch_Context *ctx, Uint8 *rgucPayload38, bool bNudgeIRStatus)
-{
-    SwitchSubcommandInputPacket_t *reply = NULL;
-    int nTries;
-
-    rgucPayload38[37] = MCUCrc8(&rgucPayload38[1], 36);
-    for (nTries = 1; !reply && nTries <= ctx->m_nMaxWriteAttempts; ++nTries) {
-        SwitchSubcommandOutputPacket_t commandPacket;
-        ConstructSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload38, 38, &commandPacket);
-
-        if (!WritePacket(ctx, &commandPacket, sizeof(commandPacket))) {
-            continue;
-        }
-        if (bNudgeIRStatus) {
-            WriteMcuDataRequest(ctx, 0x03, 0x02, 0x00);
-        }
-        reply = ReadSubcommandReply(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload38, 38);
-    }
-    return reply;
-}
-
-/* Poll the MCU status (0x11 output, subcmd 0x01) until a 0x31 input report
- * carries MCU state report byte 49 == 0x01 with the state byte 56 equal to
- * the expected mode (1 = Standby, 5 = IR; ir_sensor steps 2 and 4,
- * jctool.cpp:1738-1766/1810-1838). */
-static bool PollMCUStatus(SDL_DriverSwitch_Context *ctx, Uint8 ucExpectedState)
-{
-    int nAttempt, nRead;
-
-    for (nAttempt = 0; nAttempt < 10; ++nAttempt) {
-        Uint64 endTicks;
-
-        if (!WriteMcuDataRequest(ctx, 0x01, 0, 0)) {
-            continue;
-        }
-        endTicks = SDL_GetTicks() + 100;
-        do {
-            nRead = ReadInput(ctx);
-            if (nRead > 56 &&
-                ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState &&
-                ctx->m_rgucReadBuffer[49] == 0x01 &&
-                ctx->m_rgucReadBuffer[56] == ucExpectedState) {
-                return true;
-            }
-            if (nRead <= 0) {
-                SDL_Delay(4);
-            }
-        } while (SDL_GetTicks() < endTicks);
-    }
-    return false;
-}
-
-/* Power the MCU back down (subcmd 0x22 arg 0x00, ir_sensor step 10,
- * jctool.cpp:2064-2075), so the camera does not drain the battery or leave
- * the Joy-Con stuck in IR mode. The caller restores the input mode. Safe to
- * send even if the MCU never resumed, so the failed-enable paths also use it
- * as a best-effort power-down (jc_toolkit likewise jumps to its disable step
- * on every enable failure). */
-static void DisableIRSensor(SDL_DriverSwitch_Context *ctx)
-{
-    Uint8 ucState = 0x00;
-
-    WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucState, sizeof(ucState), NULL);
-    if (ctx->m_bIRSensorActive && ctx->joystick) {
-        /* Park the IR axis at its floor: it otherwise keeps the last
-           frame's value, and a bright last frame false-fires brightness
-           bindings when the camera later re-enables, until a fresh frame
-           arrives (PadForge#248 closure audit). */
-        SDL_SendJoystickAxis(SDL_GetTicksNS(), ctx->joystick, SDL_GAMEPAD_AXIS_COUNT, SDL_MIN_SINT16);
-    }
-    ctx->m_bIRSensorActive = false;
-}
-
-/* Boot the NFC/IR MCU into IR image-transfer mode and start the stream.
- * Transcribed step-for-step from jc_toolkit ir_sensor() (jctool.cpp:1672-2099):
- * input mode 0x31, resume MCU, poll standby, MCU mode IR, poll IR, IR mode 7
- * (image transfer) at 30x40 with 4 fragments, the two register-write blocks,
- * and the initial 0x11/0x03 poll that starts the stream. 30x40 (res register
- * 0x69, ir_max_frag_no 0x03) is the lowest-bandwidth preset (FormJoy.h:
- * 6127-6131), all this scalar needs. Every failure after the MCU resume powers
- * the MCU back down, matching jc_toolkit's goto-step10 rollback. */
-static bool EnableIRSensor(SDL_DriverSwitch_Context *ctx)
-{
-    SwitchSubcommandInputPacket_t *reply = NULL;
-
-    // Step 0: input report mode 0x31 (NFC/IR)
-    if (!SetInputMode(ctx, k_eSwitchInputReportIDs_FullControllerAndMcuState)) {
-        return false;
-    }
-
-    // Step 1: resume the MCU (subcmd 0x22 arg 0x01, jctool.cpp:1706-1734)
-    {
-        Uint8 ucState = 0x01;
-        if (!WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucState, sizeof(ucState), NULL)) {
-            return false;
-        }
-    }
-
-    // Step 2: poll until the MCU reports Standby (state 0x01)
-    if (!PollMCUStatus(ctx, 0x01)) {
-        goto failed;
-    }
-
-    // Step 3: set MCU mode IR (mcu_cmd 0x21, mcu_subcmd 0x00, mode 0x05,
-    // jctool.cpp:1770-1806). The ack reports the pre-switch Standby state
-    // (raw bytes 15 and 22-25: 0x01 and u32 0x01).
-    {
-        Uint8 rgucPayload[38];
-        SDL_zeroa(rgucPayload);
-        rgucPayload[0] = 0x21; // Set MCU mode cmd
-        rgucPayload[1] = 0x00;
-        rgucPayload[2] = 0x05; // MCU mode 5: IR
-        reply = WriteMCUConfig(ctx, rgucPayload, false);
-        if (!reply ||
-            reply->rgucSubcommandData[0] != 0x01 ||
-            reply->rgucSubcommandData[7] != 0x01 ||
-            reply->rgucSubcommandData[8] != 0x00 ||
-            reply->rgucSubcommandData[9] != 0x00 ||
-            reply->rgucSubcommandData[10] != 0x00) {
-            goto failed;
-        }
-    }
-
-    // Step 4: poll until the MCU reports IR mode (state 0x05)
-    if (!PollMCUStatus(ctx, 0x05)) {
-        goto failed;
-    }
-
-    // Step 5: IR mode 7 (image transfer), 30x40 = frag numbers 0-3, require
-    // IR MCU FW 5.18 (jctool.cpp:1841-1882). Ack byte is 0x0b.
-    {
-        Uint8 rgucPayload[38];
-        SDL_zeroa(rgucPayload);
-        rgucPayload[0] = 0x23; // MCU write cmd
-        rgucPayload[1] = 0x01; // Set IR mode subcmd
-        rgucPayload[2] = 0x07; // IR mode 7: image transfer
-        rgucPayload[3] = 0x03; // fragments per blob: 0-3 (30x40)
-        rgucPayload[4] = 0x00; // required major FW 0x0005 (u16 LE 0x0500)
-        rgucPayload[5] = 0x05;
-        rgucPayload[6] = 0x00; // required minor FW 0x0018 (u16 LE 0x1800)
-        rgucPayload[7] = 0x18;
-        reply = WriteMCUConfig(ctx, rgucPayload, false);
-        if (!reply || reply->rgucSubcommandData[0] != 0x0b) {
-            goto failed;
-        }
-    }
-
-    // Step 7: first register block, 9 registers (jctool.cpp:1925-1951):
-    // resolution 0x002e = 0x69 (30x40), exposure 0x0130/0x0131 = 300us
-    // (31200 * 300 / 1000 = 0x2490), manual exposure 0x0132 = 0, both LED
-    // groups 0x0010 = 0, digital gain 0x012e/0x012f = 1, external light
-    // filter 0x00e0 = 0x03, white-pixel threshold 0x0143 = 0xc8.
-    {
-        static const Uint8 rgucRegisters1[] = {
-            0x23, 0x04, 0x09,
-            0x00, 0x2e, 0x69,
-            0x01, 0x30, 0x90,
-            0x01, 0x31, 0x24,
-            0x01, 0x32, 0x00,
-            0x00, 0x10, 0x00,
-            0x01, 0x2e, 0x10,
-            0x01, 0x2f, 0x00,
-            0x00, 0x0e, 0x03,
-            0x01, 0x43, 0xc8
-        };
-        Uint8 rgucPayload[38];
-        SDL_zeroa(rgucPayload);
-        SDL_memcpy(rgucPayload, rgucRegisters1, sizeof(rgucRegisters1));
-        // The nudge and the "registers for mode 7 set" ack (raw byte 15 = 0x13,
-        // u16 at 16 = 0x0700) follow jctool.cpp:1954-1978.
-        reply = WriteMCUConfig(ctx, rgucPayload, true);
-        if (!reply ||
-            reply->rgucSubcommandData[0] != 0x13 ||
-            reply->rgucSubcommandData[1] != 0x00 ||
-            reply->rgucSubcommandData[2] != 0x07) {
-            goto failed;
-        }
-    }
-
-    // Step 8: second register block, 8 registers (jctool.cpp:1986-2024):
-    // LED 1/2 intensity 0x0011 = 0x0f (max), LED 3/4 intensity 0x0012 = 0x10
-    // (max), no flip 0x002d = 0, denoise on 0x0167 = 1 with edge 0x0168 = 0x23
-    // and color 0x0169 = 0x44 defaults, buffer update time 0x0004 = 0x2d (the
-    // 30x40 value), finalize 0x0007 = 0x01 (without it nothing takes effect).
-    {
-        static const Uint8 rgucRegisters2[] = {
-            0x23, 0x04, 0x08,
-            0x00, 0x11, 0x0f,
-            0x00, 0x12, 0x10,
-            0x00, 0x2d, 0x00,
-            0x01, 0x67, 0x01,
-            0x01, 0x68, 0x23,
-            0x01, 0x69, 0x44,
-            0x00, 0x04, 0x2d,
-            0x00, 0x07, 0x01
-        };
-        Uint8 rgucPayload[38];
-        SDL_zeroa(rgucPayload);
-        SDL_memcpy(rgucPayload, rgucRegisters2, sizeof(rgucRegisters2));
-        // Without a second nudge the ack can arrive as mcu-config-write 0x23
-        // instead of 0x13/0x0700; both are accepted (jctool.cpp:2029-2038).
-        reply = WriteMCUConfig(ctx, rgucPayload, false);
-        if (!reply ||
-            !((reply->rgucSubcommandData[0] == 0x13 &&
-               reply->rgucSubcommandData[1] == 0x00 &&
-               reply->rgucSubcommandData[2] == 0x07) ||
-              reply->rgucSubcommandData[0] == 0x23)) {
-            goto failed;
-        }
-    }
-
-    // Step 9: start the stream. The 0x31 report carries all-zero IR data until
-    // an 0x11 output with subcmd 0x03 is sent (dekuNukem notes:83; jc_toolkit's
-    // "first ack", jctool.cpp:1425-1433). Fragment ACKs continue in UpdateDevice.
-    if (!WriteMcuDataRequest(ctx, 0x03, 0x00, 0x00)) {
-        goto failed;
-    }
-
-    ctx->m_bIRSensorActive = true;
-    return true;
-
-failed:
-    // The MCU was resumed but the camera never fully configured; power it back
-    // down so a half-enabled sensor cannot drain the battery.
-    DisableIRSensor(ctx);
-    return false;
-}
-
-/* One 0x31 IR image-data fragment: byte 49 == 0x03 identifies IR image data,
- * byte 52 is the fragment number, byte 53 is the MCU-computed average
- * intensity, 0-255 (get_raw_ir_image, jctool.cpp:1440-1443/1495-1499). The
- * scalar is posted normalized to the dedicated axis, and the fragment is
- * ACKed (0x11/0x03 with byte 14 = fragment number) so the MCU keeps
- * streaming, exactly as jc_toolkit ACKs every fragment. Repeats are ACKed
- * the same way (jctool.cpp:1516-1528), so a dropped ACK self-heals. */
-static void HandleMcuIRReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick)
-{
-    Uint64 timestamp = SDL_GetTicksNS();
-    Sint16 sValue = (Sint16)((ctx->m_rgucReadBuffer[53] * 32767) / 255);
-
-    /* Data axis: seed past the analog anti-jitter gate so low intensities at
-       connect are not withheld inside the band (hifihedgehog/SDL#14) */
-    SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
-    SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
-
-    WriteMcuDataRequest(ctx, 0x03, 0x00, ctx->m_rgucReadBuffer[52]);
-}
-
 static bool SetHomeLED(SDL_DriverSwitch_Context *ctx, Uint8 brightness)
 {
     Uint8 ucLedIntensity = 0;
@@ -1244,11 +992,15 @@ static Uint8 GetSensorInputMode(SDL_DriverSwitch_Context *ctx)
     return input_mode;
 }
 
+// Defined with the NIR machine below: true while the IR bring-up or stream
+// holds the MCU (any state but Idle and Failed)
+static bool IsIROwningMcu(SDL_DriverSwitch_Context *ctx);
+
 static void UpdateInputMode(SDL_DriverSwitch_Context *ctx)
 {
     Uint8 input_mode;
 
-    if (ctx->m_bIRSensorActive || ctx->m_bNfcActive) {
+    if (IsIROwningMcu(ctx) || ctx->m_bNfcActive) {
         // The NIR camera and the NFC reader stream over the NFC/IR report,
         // which also carries the full controller state, so buttons/sticks/IMU
         // keep flowing.
@@ -1448,9 +1200,9 @@ static void EnterNfcState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 n
     {
         /* Subcommand 0x21 with the 38-byte MCU payload: mcu_cmd 0x21,
            mcu_subcmd 0x00, mode 0x04 (NFC), crc8 over payload[1..36] at
-           payload[37], the same layout WriteMCUConfig builds for the
-           camera (jctool.cpp:2363-2374). Sent async; the ack gate runs in
-           HandleNfcSubcommandReply. */
+           payload[37], the same layout the IR machine's SetModeIR state
+           builds for the camera (jctool.cpp:2363-2374). Sent async; the
+           ack gate runs in HandleNfcSubcommandReply. */
         Uint8 rgucPayload[38];
         SDL_zeroa(rgucPayload);
         rgucPayload[0] = 0x21;
@@ -1511,7 +1263,7 @@ static void TeardownNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, b
         Uint8 ucOff = 0x00;
         SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff));
     }
-    if (bWasUp && bRestoreInputMode && !ctx->m_bIRSensorActive) {
+    if (bWasUp && bRestoreInputMode && !IsIROwningMcu(ctx)) {
         Uint8 ucMode = ctx->m_bReportSensors ? GetSensorInputMode(ctx) : GetDefaultInputMode(ctx);
         ctx->m_nCurrentInputMode = ucMode;
         SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
@@ -1693,11 +1445,11 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
         return;
     }
 
-    /* The NIR camera owns the MCU while it streams (it programs MCU mode 5,
-       NFC needs mode 4). Abandon without touching the bus: a teardown's MCU
-       suspend would kill the camera the IR path just configured. The machine
-       re-arms automatically when the camera stops. */
-    if (ctx->m_bIRSensorActive) {
+    /* The NIR camera owns the MCU while its machine runs, bring-up included
+       (it programs MCU mode 5, NFC needs mode 4). Abandon without touching
+       the bus: a teardown's MCU suspend would kill the camera the IR path is
+       configuring. The machine re-arms automatically when the camera stops. */
+    if (IsIROwningMcu(ctx)) {
         if (ctx->m_ucNfcState != k_eSwitchNfcState_Idle &&
             ctx->m_ucNfcState != k_eSwitchNfcState_Failed) {
             AbandonNfc(ctx, joystick);
@@ -1818,6 +1570,483 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
                 FailNfc(ctx, joystick, now);
             } else {
                 EnterNfcState(ctx, ctx->m_ucNfcState, now);
+            }
+        }
+        break;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * NIR camera bring-up (fork issues #7/#151, rebuilt async as #24).
+ *
+ * The right Joy-Con's NIR camera enable is jc_toolkit ir_sensor()
+ * (jctool.cpp:1672-2099) rebuilt on the NFC machine's pattern above: one
+ * step per UpdateDevice tick, commands sent async, acks read from the
+ * reports the update loop reads anyway (subcommand acks on 0x21, MCU
+ * payloads on 0x31), a per-state resend/deadline budget matching
+ * jc_toolkit's (8 reads x 64 ms per write, 8 writes per step, roughly four
+ * seconds of patience per step), and a Failed state retried on a backoff
+ * while demand persists, so one bad bring-up at connect no longer kills the
+ * feature for the session. Every transition and failure logs through
+ * SDL_LogDebug, which is the acceptance mechanism: the maintainers have no
+ * IR hardware, so the log is what names a refusing step in the field.
+ * The old enable was synchronous on the caller's thread and held SDL's
+ * joystick lock for its full duration; this machine never blocks. */
+
+typedef enum
+{
+    k_eSwitchIRState_Idle,
+    k_eSwitchIRState_SetInputMode, // subcmd 0x03 arg 0x31; ack bytes 13/14 == 0x80/0x03
+    k_eSwitchIRState_EnableMCU,    // subcmd 0x22 arg 0x01; ack 0x80/0x22 (jctool.cpp:1706-1734)
+    k_eSwitchIRState_AwaitStandby, // 0x11/0x01 poll until bytes 49/56 == 0x01/0x01 (jctool.cpp:1738-1766)
+    k_eSwitchIRState_SetModeIR,    // subcmd 0x21, MCU cmd 0x21/0x00 mode 0x05; ack = pre-switch Standby echo, raw bytes 15 and 22-25 = 0x01 and u32 0x01 (jctool.cpp:1770-1806)
+    k_eSwitchIRState_AwaitIR,      // 0x11/0x01 poll until byte 56 == 0x05 (jctool.cpp:1810-1838)
+    k_eSwitchIRState_SetIRMode7,   // subcmd 0x21, MCU 0x23/0x01: IR mode 7 (image transfer), 30x40, FW 5.18; ack byte 15 == 0x0b (jctool.cpp:1841-1882)
+    k_eSwitchIRState_Registers1,   // first register block + the status nudge; ack bytes 15-17 == 0x13/0x00/0x07 (jctool.cpp:1925-1978)
+    k_eSwitchIRState_Registers2,   // second register block; same ack or the 0x23 alternate (jctool.cpp:1986-2038)
+    k_eSwitchIRState_FirstAck,     // 0x11/0x03 starts the stream (dekuNukem notes:83); advance on the first image fragment
+    k_eSwitchIRState_Streaming,    // m_bIRSensorActive: fragments post + ACK, watchdogs live
+    k_eSwitchIRState_Failed        // gave up; retried on a backoff while demand persists
+} ESwitchIRState;
+
+#define SWITCH_IR_RESEND_MS         600   // per-round ack patience, ~8 reads at the report cadence (jc_toolkit reads 8 x 64 ms per write)
+#define SWITCH_IR_MAX_ROUNDS        7     // fresh re-writes per state before failing (jc_toolkit error_reading > 7)
+#define SWITCH_IR_RETRY_COOLDOWN_MS 5000  // base retry delay after a failed bring-up; doubles per consecutive failure
+#define SWITCH_IR_STREAM_GONE_MS    2000  // no image fragment while streaming: restart the bring-up
+#define SWITCH_IR_MODE_FIX_PACE_MS  1000  // report-mode watchdog pacing (a 0x30 report while streaming)
+#define SWITCH_IR_FRAG_MAX          0x03  // final fragment number at 30x40 (ir_max_frag_no, FormJoy.h:6127-6131)
+
+static const char *GetIRStateName(Uint8 ucState)
+{
+    static const char *const k_rgpszIRStates[] = {
+        "Idle", "SetInputMode", "EnableMCU", "AwaitStandby", "SetModeIR",
+        "AwaitIR", "SetIRMode7", "Registers1", "Registers2", "FirstAck",
+        "Streaming", "Failed"
+    };
+
+    if (ucState < SDL_arraysize(k_rgpszIRStates)) {
+        return k_rgpszIRStates[ucState];
+    }
+    return "Unknown";
+}
+
+/* The gating the sync enable used, unchanged (fork #151): opt-in by hint
+ * because powering the MCU costs battery, standalone right Joy-Con only
+ * because a combined pair's shared joystick has no IR axis to deliver to. */
+static bool IsIRSupported(SDL_DriverSwitch_Context *ctx)
+{
+    return !ctx->m_bInputOnly &&
+           ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight &&
+           !ctx->device->parent;
+}
+
+static bool IsIROwningMcu(SDL_DriverSwitch_Context *ctx)
+{
+    return ctx->m_ucIRState != k_eSwitchIRState_Idle &&
+           ctx->m_ucIRState != k_eSwitchIRState_Failed;
+}
+
+/* Power the MCU back down (subcmd 0x22 arg 0x00, ir_sensor step 10,
+ * jctool.cpp:2064-2075), so the camera does not drain the battery or leave
+ * the Joy-Con stuck in IR mode. Synchronous: used from the close path and
+ * the sensors-off edge, where no later update tick is guaranteed. Safe to
+ * send even if the MCU never resumed (jc_toolkit likewise jumps to its
+ * disable step on every enable failure). Also resets the machine. */
+static void DisableIRSensor(SDL_DriverSwitch_Context *ctx)
+{
+    Uint8 ucState = 0x00;
+
+    WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucState, sizeof(ucState), NULL);
+    if (ctx->m_bIRSensorActive && ctx->joystick) {
+        /* Park the IR axis at its floor: it otherwise keeps the last
+           frame's value, and a bright last frame false-fires brightness
+           bindings when the camera later re-enables, until a fresh frame
+           arrives (PadForge#248 closure audit). */
+        SDL_SendJoystickAxis(SDL_GetTicksNS(), ctx->joystick, SDL_GAMEPAD_AXIS_COUNT, SDL_MIN_SINT16);
+    }
+    ctx->m_bIRSensorActive = false;
+    if (ctx->m_ucIRState != k_eSwitchIRState_Idle) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: torn down from step %d (%s)",
+                     ctx->m_ucIRState, GetIRStateName(ctx->m_ucIRState));
+    }
+    ctx->m_ucIRState = k_eSwitchIRState_Idle;
+    ctx->m_ucIRRounds = 0;
+}
+
+/* Enter a state and send its command. Also used to re-send the current
+ * state's command on a retry round. The payloads are the sync enable's
+ * bytes, byte-faithful to jc_toolkit (re-verified in fork #24). */
+static void EnterIRState(SDL_DriverSwitch_Context *ctx, Uint8 ucState, Uint64 now)
+{
+    if (ctx->m_ucIRState != ucState) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: step %d (%s) -> step %d (%s)",
+                     ctx->m_ucIRState, GetIRStateName(ctx->m_ucIRState),
+                     ucState, GetIRStateName(ucState));
+    }
+    ctx->m_ucIRState = ucState;
+    ctx->m_ulIRActionTicks = now;
+
+    switch (ucState) {
+    case k_eSwitchIRState_SetInputMode:
+    {
+        Uint8 ucMode = k_eSwitchInputReportIDs_FullControllerAndMcuState;
+        // Keep the mode bookkeeping in agreement so nothing reverts it
+        ctx->m_nCurrentInputMode = ucMode;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
+        break;
+    }
+    case k_eSwitchIRState_EnableMCU:
+    {
+        Uint8 ucOn = 0x01;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOn, sizeof(ucOn));
+        break;
+    }
+    case k_eSwitchIRState_AwaitStandby:
+    case k_eSwitchIRState_AwaitIR:
+        WriteMcuDataRequest(ctx, 0x01, 0, 0); // MCU status poll
+        break;
+    case k_eSwitchIRState_SetModeIR:
+    {
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        rgucPayload[0] = 0x21; // Set MCU mode cmd
+        rgucPayload[1] = 0x00;
+        rgucPayload[2] = 0x05; // MCU mode 5: IR
+        rgucPayload[37] = MCUCrc8(&rgucPayload[1], 36);
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload, sizeof(rgucPayload));
+        break;
+    }
+    case k_eSwitchIRState_SetIRMode7:
+    {
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        rgucPayload[0] = 0x23; // MCU write cmd
+        rgucPayload[1] = 0x01; // Set IR mode subcmd
+        rgucPayload[2] = 0x07; // IR mode 7: image transfer
+        rgucPayload[3] = 0x03; // fragments per blob: 0-3 (30x40)
+        rgucPayload[4] = 0x00; // required major FW 0x0005 (u16 LE 0x0500)
+        rgucPayload[5] = 0x05;
+        rgucPayload[6] = 0x00; // required minor FW 0x0018 (u16 LE 0x1800)
+        rgucPayload[7] = 0x18;
+        rgucPayload[37] = MCUCrc8(&rgucPayload[1], 36);
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload, sizeof(rgucPayload));
+        break;
+    }
+    case k_eSwitchIRState_Registers1:
+    {
+        /* First register block, 9 registers (jctool.cpp:1925-1951):
+           resolution 0x002e = 0x69 (30x40), exposure 0x0130/0x0131 = 300us
+           (31200 * 300 / 1000 = 0x2490), manual exposure 0x0132 = 0, both LED
+           groups 0x0010 = 0, digital gain 0x012e/0x012f = 1, external light
+           filter 0x00e0 = 0x03, white-pixel threshold 0x0143 = 0xc8. */
+        static const Uint8 rgucRegisters1[] = {
+            0x23, 0x04, 0x09,
+            0x00, 0x2e, 0x69,
+            0x01, 0x30, 0x90,
+            0x01, 0x31, 0x24,
+            0x01, 0x32, 0x00,
+            0x00, 0x10, 0x00,
+            0x01, 0x2e, 0x10,
+            0x01, 0x2f, 0x00,
+            0x00, 0x0e, 0x03,
+            0x01, 0x43, 0xc8
+        };
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        SDL_memcpy(rgucPayload, rgucRegisters1, sizeof(rgucRegisters1));
+        rgucPayload[37] = MCUCrc8(&rgucPayload[1], 36);
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload, sizeof(rgucPayload));
+        /* jc_toolkit's step 7 interleaves an 0x11/0x03 arg-0x02 IR status
+           request between the register write and the ack read
+           (jctool.cpp:1954-1965); without it the ack can arrive in its
+           alternate 0x23 form, which the gates also accept. */
+        WriteMcuDataRequest(ctx, 0x03, 0x02, 0x00);
+        break;
+    }
+    case k_eSwitchIRState_Registers2:
+    {
+        /* Second register block, 8 registers (jctool.cpp:1986-2024):
+           LED 1/2 intensity 0x0011 = 0x0f (max), LED 3/4 intensity 0x0012 =
+           0x10 (max), no flip 0x002d = 0, denoise on 0x0167 = 1 with edge
+           0x0168 = 0x23 and color 0x0169 = 0x44 defaults, buffer update time
+           0x0004 = 0x2d (the 30x40 value), finalize 0x0007 = 0x01 (without
+           it nothing takes effect). */
+        static const Uint8 rgucRegisters2[] = {
+            0x23, 0x04, 0x08,
+            0x00, 0x11, 0x0f,
+            0x00, 0x12, 0x10,
+            0x00, 0x2d, 0x00,
+            0x01, 0x67, 0x01,
+            0x01, 0x68, 0x23,
+            0x01, 0x69, 0x44,
+            0x00, 0x04, 0x2d,
+            0x00, 0x07, 0x01
+        };
+        Uint8 rgucPayload[38];
+        SDL_zeroa(rgucPayload);
+        SDL_memcpy(rgucPayload, rgucRegisters2, sizeof(rgucRegisters2));
+        rgucPayload[37] = MCUCrc8(&rgucPayload[1], 36);
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUConfig, rgucPayload, sizeof(rgucPayload));
+        break;
+    }
+    case k_eSwitchIRState_FirstAck:
+        /* The 0x31 report carries all-zero IR data until an 0x11 output with
+           subcmd 0x03 is sent (dekuNukem notes:83; jc_toolkit's "first ack",
+           jctool.cpp:1425-1433). */
+        WriteMcuDataRequest(ctx, 0x03, 0x00, 0x00);
+        break;
+    case k_eSwitchIRState_Streaming:
+        ctx->m_bIRSensorActive = true;
+        ctx->m_ulIRLastFragTicks = now;
+        ctx->m_ucIRFails = 0;
+        break;
+    default:
+        break;
+    }
+}
+
+/* Async teardown for machine-internal paths (failure, demand drop on the
+ * update loop): power the MCU down, park the axis, restore the input mode,
+ * reset to Idle. The sync DisableIRSensor above serves the paths where no
+ * later tick is guaranteed. */
+static void TeardownIRAsync(SDL_DriverSwitch_Context *ctx)
+{
+    Uint8 ucOff = 0x00;
+
+    SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff));
+    if (ctx->m_bIRSensorActive && ctx->joystick) {
+        // Park the IR axis at its floor (see DisableIRSensor)
+        SDL_SendJoystickAxis(SDL_GetTicksNS(), ctx->joystick, SDL_GAMEPAD_AXIS_COUNT, SDL_MIN_SINT16);
+    }
+    ctx->m_bIRSensorActive = false;
+    if (!ctx->m_bNfcActive) {
+        Uint8 ucMode = ctx->m_bReportSensors ? GetSensorInputMode(ctx) : GetDefaultInputMode(ctx);
+        ctx->m_nCurrentInputMode = ucMode;
+        SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetInputReportMode, &ucMode, sizeof(ucMode));
+    }
+    ctx->m_ucIRState = k_eSwitchIRState_Idle;
+    ctx->m_ucIRRounds = 0;
+}
+
+static Uint64 GetIRRetryCooldown(SDL_DriverSwitch_Context *ctx)
+{
+    // 5 s, 10 s, 20 s, 40 s, capped at 80 s
+    Uint8 ucShift = (ctx->m_ucIRFails > 4) ? 4 : (Uint8)(ctx->m_ucIRFails - 1);
+
+    return (Uint64)SWITCH_IR_RETRY_COOLDOWN_MS << ucShift;
+}
+
+static void FailIR(SDL_DriverSwitch_Context *ctx, Uint64 now)
+{
+    if (ctx->m_ucIRFails < 255) {
+        ctx->m_ucIRFails++;
+    }
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: bring-up failed at step %d (%s), failure %d, retry in %u ms",
+                 ctx->m_ucIRState, GetIRStateName(ctx->m_ucIRState),
+                 ctx->m_ucIRFails, (Uint32)GetIRRetryCooldown(ctx));
+    TeardownIRAsync(ctx);
+    ctx->m_ucIRState = k_eSwitchIRState_Failed;
+    ctx->m_ulIRActionTicks = now;
+}
+
+/* Restart the bring-up in place: used by the stream watchdogs, where the MCU
+ * is known powered, so it is suspended first (the bring-up expects to resume
+ * from suspended into Standby, the NFC watchdog's own precedent). */
+static void RestartIR(SDL_DriverSwitch_Context *ctx, Uint64 now, const char *pszReason)
+{
+    Uint8 ucOff = 0x00;
+
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: %s, restarting bring-up", pszReason);
+    if (ctx->m_bIRSensorActive && ctx->joystick) {
+        // Park the IR axis at its floor (see DisableIRSensor)
+        SDL_SendJoystickAxis(SDL_GetTicksNS(), ctx->joystick, SDL_GAMEPAD_AXIS_COUNT, SDL_MIN_SINT16);
+    }
+    ctx->m_bIRSensorActive = false;
+    SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff));
+    ctx->m_ucIRRounds = 0;
+    EnterIRState(ctx, k_eSwitchIRState_SetInputMode, now);
+}
+
+/* Ack gates for the subcommand-reply steps, on the raw 0x21 report bytes the
+ * sync enable checked: byte 13 = ack, byte 14 = replied subcommand, MCU
+ * config reply payload from byte 15 (rgucSubcommandData[i] = raw byte
+ * 15 + i). */
+static void HandleIRSubcommandReply(SDL_DriverSwitch_Context *ctx, Uint64 now, int size)
+{
+    const Uint8 *buf = ctx->m_rgucReadBuffer;
+
+    /* Byte 13's MSB is the ACK/NACK discriminator (dekuNukem
+       bluetooth_hid_notes.md); a truncated report or a NACK must not
+       advance the machine on stale payload bytes. */
+    if (size < 23 || !(buf[13] & 0x80)) {
+        return;
+    }
+    switch (ctx->m_ucIRState) {
+    case k_eSwitchIRState_SetInputMode:
+        if (buf[13] == 0x80 && buf[14] == 0x03) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_EnableMCU, now);
+        }
+        break;
+    case k_eSwitchIRState_EnableMCU:
+        if (buf[13] == 0x80 && buf[14] == 0x22) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_AwaitStandby, now);
+        }
+        break;
+    case k_eSwitchIRState_SetModeIR:
+        // Pre-switch Standby echo: bytes 15 and 22-25 = 0x01 and u32 0x01
+        if (size >= 26 && buf[14] == 0x21 && buf[15] == 0x01 &&
+            buf[22] == 0x01 && buf[23] == 0x00 && buf[24] == 0x00 && buf[25] == 0x00) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_AwaitIR, now);
+        }
+        break;
+    case k_eSwitchIRState_SetIRMode7:
+        if (buf[14] == 0x21 && buf[15] == 0x0b) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_Registers1, now);
+        }
+        break;
+    case k_eSwitchIRState_Registers1:
+        if (buf[14] == 0x21 &&
+            buf[15] == 0x13 && buf[16] == 0x00 && buf[17] == 0x07) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_Registers2, now);
+        }
+        break;
+    case k_eSwitchIRState_Registers2:
+        // The 0x23 alternate arrives when no status nudge interleaved (jctool.cpp:2029-2038)
+        if (buf[14] == 0x21 &&
+            ((buf[15] == 0x13 && buf[16] == 0x00 && buf[17] == 0x07) ||
+             buf[15] == 0x23)) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_FirstAck, now);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* MCU payload gates on 0x31 reports: status polls during bring-up, image
+ * fragments from FirstAck on. Byte 49 = MCU report type (0x01 status, 0x03
+ * IR image data), byte 52 = fragment number, byte 53 = the MCU-computed
+ * average intensity 0-255. jc_toolkit parses the stats header ONLY on a
+ * frame's final fragment (got_frag_no == ir_max_frag_no,
+ * jctool.cpp:1485-1499), so the intensity posts only there; earlier
+ * fragments would read whatever the field holds mid-frame, which fed the
+ * dead-zero symptom in PadForge#259. Every fragment is still ACKed
+ * (0x11/0x03 with byte 14 = fragment number) so the MCU keeps streaming,
+ * repeats included (jctool.cpp:1516-1528), so a dropped ACK self-heals. */
+static void HandleIRMcuReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now, int size)
+{
+    const Uint8 *buf = ctx->m_rgucReadBuffer;
+
+    if (buf[49] == 0x01 && size > 56) { // MCU status report
+        switch (ctx->m_ucIRState) {
+        case k_eSwitchIRState_AwaitStandby:
+            if (buf[56] == 0x01) {
+                ctx->m_ucIRRounds = 0;
+                EnterIRState(ctx, k_eSwitchIRState_SetModeIR, now);
+            }
+            break;
+        case k_eSwitchIRState_AwaitIR:
+            if (buf[56] == 0x05) {
+                ctx->m_ucIRRounds = 0;
+                EnterIRState(ctx, k_eSwitchIRState_SetIRMode7, now);
+            }
+            break;
+        default:
+            break;
+        }
+    } else if (buf[49] == 0x03 && size >= 54) { // IR image-data fragment
+        Uint8 ucFrag = buf[52];
+
+        if (ctx->m_ucIRState == k_eSwitchIRState_FirstAck) {
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_Streaming, now);
+        }
+        if (ctx->m_ucIRState == k_eSwitchIRState_Streaming) {
+            ctx->m_ulIRLastFragTicks = now;
+            if (ucFrag == SWITCH_IR_FRAG_MAX) {
+                Uint64 timestamp = SDL_GetTicksNS();
+                Sint16 sValue = (Sint16)((buf[53] * 32767) / 255);
+
+                /* Data axis: seed past the analog anti-jitter gate so low
+                   intensities at connect are not withheld inside the band
+                   (hifihedgehog/SDL#14). The axis keeps the last final-
+                   fragment value between frames. */
+                SDL_SeedJoystickDataAxis(joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
+                SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_COUNT, sValue);
+            }
+            WriteMcuDataRequest(ctx, 0x03, 0x00, ucFrag);
+        }
+    }
+}
+
+/* One machine step per update tick: start, retry, watchdog, backoff,
+ * teardown. Never blocks and never holds a wait under the joystick lock. */
+static void UpdateIR(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now)
+{
+    if (!IsIRSupported(ctx)) {
+        return;
+    }
+
+    /* Demand = sensors enabled + the app hint, read here on the update loop
+       because SDL's hint storage is thread-safe and a callback-written flag
+       would be a cross-thread data race (the NFC machine's precedent). */
+    if (!ctx->m_bReportSensors ||
+        !SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR, false)) {
+        if (ctx->m_ucIRState == k_eSwitchIRState_Failed) {
+            ctx->m_ucIRState = k_eSwitchIRState_Idle;
+            ctx->m_ucIRFails = 0;
+        } else if (ctx->m_ucIRState != k_eSwitchIRState_Idle) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: demand dropped, tearing down from step %d (%s)",
+                         ctx->m_ucIRState, GetIRStateName(ctx->m_ucIRState));
+            TeardownIRAsync(ctx);
+            ctx->m_ucIRFails = 0;
+        }
+        return;
+    }
+
+    switch (ctx->m_ucIRState) {
+    case k_eSwitchIRState_Idle:
+        /* Take the MCU. If the NFC machine holds it powered, suspend first:
+           the bring-up expects to resume from suspended into Standby (the
+           NFC watchdog's own re-init precedent). NFC re-arms automatically
+           when the camera stops. */
+        if (ctx->m_bNfcActive) {
+            Uint8 ucOff = 0x00;
+            SendSubcommandAsync(ctx, k_eSwitchSubcommandIDs_SetMCUState, &ucOff, sizeof(ucOff));
+            AbandonNfc(ctx, joystick);
+        }
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: arming bring-up");
+        ctx->m_ucIRRounds = 0;
+        EnterIRState(ctx, k_eSwitchIRState_SetInputMode, now);
+        break;
+    case k_eSwitchIRState_Failed:
+        if (now >= ctx->m_ulIRActionTicks + GetIRRetryCooldown(ctx)) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: retrying bring-up after failure %d", ctx->m_ucIRFails);
+            ctx->m_ucIRRounds = 0;
+            EnterIRState(ctx, k_eSwitchIRState_SetInputMode, now);
+        }
+        break;
+    case k_eSwitchIRState_Streaming:
+        if (now >= ctx->m_ulIRLastFragTicks + SWITCH_IR_STREAM_GONE_MS) {
+            RestartIR(ctx, now, "no image fragment within the stall window");
+        }
+        break;
+    default:
+        // Bring-up states: fresh re-write on timeout, fail after the round limit
+        if (now >= ctx->m_ulIRActionTicks + SWITCH_IR_RESEND_MS) {
+            ctx->m_ucIRRounds++;
+            if (ctx->m_ucIRRounds > SWITCH_IR_MAX_ROUNDS) {
+                FailIR(ctx, now);
+            } else {
+                SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con IR: step %d (%s) unanswered, resend round %d",
+                             ctx->m_ucIRState, GetIRStateName(ctx->m_ucIRState), ctx->m_ucIRRounds);
+                EnterIRState(ctx, ctx->m_ucIRState, now);
             }
         }
         break;
@@ -2880,20 +3109,13 @@ static bool HIDAPI_DriverSwitch_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *dev
     ctx->m_unIMUSamples = 0;
     ctx->m_ulIMUSampleTimestampNS = SDL_GetTicksNS();
 
-    /* Opt-in NIR camera on a standalone right Joy-Con: powering the MCU costs
-       battery, so enable rides the sensors toggle only when the app set the
-       hint. Combined pairs are excluded because their shared joystick has no
-       IR axis to deliver to. Enable runs before UpdateInputMode so the
-       IR-active state selects report 0x31, and a failed enable leaves
-       m_bIRSensorActive false with the input mode falling back to the ordinary
-       sensor mode. Disable keys on the active flag alone, not the hint, so
-       clearing the hint mid-session cannot strand a powered camera. */
-    if (enabled && !ctx->m_bIRSensorActive &&
-        ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight &&
-        !device->parent &&
-        SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR, false)) {
-        EnableIRSensor(ctx);
-    } else if (!enabled && ctx->m_bIRSensorActive) {
+    /* The NIR machine arms itself from the update loop when sensors + the
+       app hint demand it (UpdateIR), so there is nothing to start here.
+       Disable is immediate and synchronous so the camera powers down and
+       the axis parks on this edge rather than a tick later; it keys on MCU
+       ownership, not the hint, so clearing the hint mid-session cannot
+       strand a powered camera, and it also stops a bring-up in flight. */
+    if (!enabled && IsIROwningMcu(ctx)) {
         DisableIRSensor(ctx);
     }
 
@@ -3782,6 +4004,8 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             if (ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_SubcommandReply) {
                 if (ctx->m_bNfcActive) {
                     HandleNfcSubcommandReply(ctx, joystick, now, size);
+                } else if (IsIROwningMcu(ctx)) {
+                    HandleIRSubcommandReply(ctx, now, size);
                 }
                 continue;
             }
@@ -3799,33 +4023,31 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
 
                 HandleFullControllerState(joystick, ctx, (SwitchStatePacket_t *)&ctx->m_rgucReadBuffer[1]);
 
-                /* The NFC/IR report's MCU tail: byte 49 = 0x03 marks an IR
-                   image-data fragment (jctool.cpp:1440). The stats header ends
+                /* The NFC/IR report's MCU tail: byte 49 = the MCU report type
+                   (0x01 status, 0x03 IR image data). The IR stats header ends
                    by byte 58, within the 64-byte read buffer even though the
                    full 361-byte report is truncated. */
-                if (ctx->m_bIRSensorActive && size >= 54 &&
-                    ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState &&
-                    ctx->m_rgucReadBuffer[49] == 0x03) {
-                    HandleMcuIRReport(ctx, joystick);
+                if (IsIROwningMcu(ctx) &&
+                    ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState) {
+                    HandleIRMcuReport(ctx, joystick, now, size);
                 }
                 if (ctx->m_bNfcActive &&
                     ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerAndMcuState) {
                     HandleNfcMcuReport(ctx, joystick, now, size);
                 }
-                if (ctx->m_bIRSensorActive &&
+                if (ctx->m_ucIRState == k_eSwitchIRState_Streaming &&
                     ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerState &&
-                    now >= ctx->m_ulIRModeFixTicks + 1000) {
+                    now >= ctx->m_ulIRModeFixTicks + SWITCH_IR_MODE_FIX_PACE_MS) {
                     /* Report-mode watchdog, mirroring the NFC one: a 0x30
                        report while the camera streams means an external
                        raw writer knocked the input mode, and without this
                        the camera strands until reconnect (PadForge#248:
                        its haptic-writer guard has an unavoidable TOCTOU
-                       window). Re-run the bring-up, paced to one attempt
-                       per second; a failed re-enable clears the active
-                       flag and closes this gate on its own. */
+                       window). Restart the bring-up, paced to one attempt
+                       per second; a bring-up that keeps failing lands in
+                       the Failed backoff rather than looping here. */
                     ctx->m_ulIRModeFixTicks = now;
-                    DisableIRSensor(ctx);
-                    EnableIRSensor(ctx);
+                    RestartIR(ctx, now, "input mode knocked to 0x30");
                 }
                 break;
             default:
@@ -3866,6 +4088,7 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             }
         }
 
+        UpdateIR(ctx, joystick, now);
         UpdateNfc(ctx, joystick, now);
 
         if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
@@ -3898,8 +4121,9 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
 
     if (!ctx->m_bInputOnly) {
-        // Power the NFC/IR MCU back down so the camera does not drain the battery
-        if (ctx->m_bIRSensorActive) {
+        // Power the NFC/IR MCU back down so the camera does not drain the
+        // battery, whether it was streaming or still mid-bring-up
+        if (IsIROwningMcu(ctx)) {
             DisableIRSensor(ctx);
             /* If the controller started in full mode, the simple-mode restore
                below will not run, so restore full mode here rather than leave
