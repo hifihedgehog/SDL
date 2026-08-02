@@ -25,6 +25,7 @@
 #include "../../SDL_hints_c.h"
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
+#include "SDL_hidapi_rumble.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_STEAM
 
@@ -290,6 +291,64 @@ static int WriteSegmentToSteamControllerPacketAssembler(SteamControllerPacketAss
 
 #define BLE_MAX_READ_RETRIES 8
 
+/* Serializes BLE segmented feature writes across threads. One logical write is
+   several 0x03-framed feature reports the controller reassembles by segment
+   number, so two writers interleaving segments corrupt both packets. All
+   writers shared the joystick lock until haptic effects moved to the rumble
+   thread (hifihedgehog/SDL#22); this leaf lock is what serializes the queued
+   effect stream against the remaining synchronous writers (sensor toggle,
+   home LED, close-time mode restore). Created on first InitDevice under the
+   joystick lock and never destroyed: the rumble thread can still be inside a
+   queued write during device cleanup, which frees the driver context and
+   closes the handle before the rumble_pending drain, so there is no safe
+   destruction point tied to device lifetime. */
+static SDL_Mutex *s_SegmentedWriteLock;
+
+/* BLE segmented feature write: data[0] is the report number (skipped), the
+   remaining bytes go out as 18-byte payloads in 20-byte 0x03 packets. Runs
+   synchronously for init/config writers via SetFeatureReport, and on the
+   rumble thread for queued haptic effects, so it must not touch
+   dev->context (freed before the rumble_pending drain on cleanup). Matches
+   SDL_HIDAPI_RumbleWriteFunc. */
+static int SteamWriteSegmentedFeatureReport(SDL_HIDAPI_Device *dev, const Uint8 *data, int size)
+{
+    int nRet = -1;
+    int nSegmentNumber = 0;
+    uint8_t uPacketBuffer[MAX_REPORT_SEGMENT_SIZE];
+    const unsigned char *pBufferPtr = data + 1;
+
+    if (size < 1) {
+        return -1;
+    }
+
+    // Skip report number in data
+    size--;
+
+    if (s_SegmentedWriteLock) {
+        SDL_LockMutex(s_SegmentedWriteLock);
+    }
+    while (size > 0) {
+        int nBytesInPacket = size > MAX_REPORT_SEGMENT_PAYLOAD_SIZE ? MAX_REPORT_SEGMENT_PAYLOAD_SIZE : size;
+
+        size -= nBytesInPacket;
+
+        // Construct packet
+        SDL_zeroa(uPacketBuffer);
+        uPacketBuffer[0] = BLE_REPORT_NUMBER;
+        uPacketBuffer[1] = GetSegmentHeader(nSegmentNumber, size == 0);
+        SDL_memcpy(&uPacketBuffer[2], pBufferPtr, nBytesInPacket);
+
+        pBufferPtr += nBytesInPacket;
+        nSegmentNumber++;
+
+        nRet = SDL_hid_send_feature_report(dev->dev, uPacketBuffer, sizeof(uPacketBuffer));
+    }
+    if (s_SegmentedWriteLock) {
+        SDL_UnlockMutex(s_SegmentedWriteLock);
+    }
+    return nRet;
+}
+
 static int SetFeatureReport(SDL_HIDAPI_Device *dev, const unsigned char uBuffer[65], int nActualDataLen)
 {
     int nRet = -1;
@@ -297,33 +356,7 @@ static int SetFeatureReport(SDL_HIDAPI_Device *dev, const unsigned char uBuffer[
     DPRINTF("SetFeatureReport %p %p %d\n", dev, uBuffer, nActualDataLen);
 
     if (dev->is_bluetooth) {
-        int nSegmentNumber = 0;
-        uint8_t uPacketBuffer[MAX_REPORT_SEGMENT_SIZE];
-        const unsigned char *pBufferPtr = uBuffer + 1;
-
-        if (nActualDataLen < 1) {
-            return -1;
-        }
-
-        // Skip report number in data
-        nActualDataLen--;
-
-        while (nActualDataLen > 0) {
-            int nBytesInPacket = nActualDataLen > MAX_REPORT_SEGMENT_PAYLOAD_SIZE ? MAX_REPORT_SEGMENT_PAYLOAD_SIZE : nActualDataLen;
-
-            nActualDataLen -= nBytesInPacket;
-
-            // Construct packet
-            SDL_zeroa(uPacketBuffer);
-            uPacketBuffer[0] = BLE_REPORT_NUMBER;
-            uPacketBuffer[1] = GetSegmentHeader(nSegmentNumber, nActualDataLen == 0);
-            SDL_memcpy(&uPacketBuffer[2], pBufferPtr, nBytesInPacket);
-
-            pBufferPtr += nBytesInPacket;
-            nSegmentNumber++;
-
-            nRet = SDL_hid_send_feature_report(dev->dev, uPacketBuffer, sizeof(uPacketBuffer));
-        }
+        nRet = SteamWriteSegmentedFeatureReport(dev, uBuffer, nActualDataLen);
     } else {
         for (int nRetries = 0; nRetries < RADIO_WORKAROUND_SLEEP_ATTEMPTS; nRetries++) {
             nRet = SDL_hid_send_feature_report(dev->dev, uBuffer, 65);
@@ -1121,6 +1154,12 @@ static bool HIDAPI_DriverSteam_InitDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverSteam_Context *ctx;
 
+    /* InitDevice runs under the joystick lock, so first-call creation is not
+       racy. Deliberately never destroyed; see the declaration comment. */
+    if (!s_SegmentedWriteLock) {
+        s_SegmentedWriteLock = SDL_CreateMutex();
+    }
+
     ctx = (SDL_DriverSteam_Context *)SDL_calloc(1, sizeof(*ctx));
     if (!ctx) {
         return false;
@@ -1305,6 +1344,24 @@ static bool HIDAPI_DriverSteam_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Joy
 static bool HIDAPI_DriverSteam_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
 {
     if (size == 65) {
+        if (device->is_bluetooth) {
+            /* Over BLE this is four segmented synchronous feature writes,
+               each costing at least one connection interval, and this call
+               runs under the global joystick lock, so doing them here stalls
+               input polling 30-60 ms per effect (hifihedgehog/SDL#22,
+               PadForge#260: haptic pulses teleporting a touchpad-driven
+               cursor). Queue the blob as one request instead; the rumble
+               thread runs the segmented write with no joystick lock held.
+               The simple API replace-coalesces, so a flood of pulses
+               collapses to the newest rather than building a stale backlog.
+               The queued send reports success once enqueued. A failed write
+               on the rumble thread is dropped, which is inherent to the
+               async hand-off and acceptable for haptic pulses. */
+            if (SDL_HIDAPI_SendRumbleWithWriteFunc(device, (const Uint8 *)data, size, SteamWriteSegmentedFeatureReport) != size) {
+                return false;
+            }
+            return true;
+        }
         if (SetFeatureReport(device, data, size) < 0) {
             return SDL_SetError("Couldn't write feature report");
         }
