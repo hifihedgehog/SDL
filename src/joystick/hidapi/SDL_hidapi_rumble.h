@@ -35,8 +35,20 @@ typedef void (*SDL_HIDAPI_RumbleSentCallback)(void *userdata);
 int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleSentCallback callback, void *userdata) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
 void SDL_HIDAPI_UnlockRumble(void) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
 
+/* Per-request send override. NULL means SDL_hid_write, the default for every
+   existing caller. A driver passes a function when the transfer is not a plain
+   output report: e.g. the Steam Controller's BLE haptic path, where one queued
+   request becomes four segmented feature writes that must not run under the
+   joystick lock (hifihedgehog/SDL#22). The function runs on the rumble thread
+   after device->dev is checked non-NULL. It must not touch device->context:
+   HIDAPI_CleanupDeviceDriver frees the context and closes the handle BEFORE
+   the rumble_pending drain, so only the device struct itself is guaranteed to
+   outlive an in-flight request. */
+typedef int (*SDL_HIDAPI_RumbleWriteFunc)(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
+
 // Simple API, will replace any pending rumble with the new data
 int SDL_HIDAPI_SendRumble(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
+int SDL_HIDAPI_SendRumbleWithWriteFunc(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleWriteFunc write_func);
 void SDL_HIDAPI_QuitRumble(void);
 
 #endif // SDL_JOYSTICK_HIDAPI
