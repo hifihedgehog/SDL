@@ -220,6 +220,7 @@ typedef struct BLE_Controller
     bool calibrated;
     bool sensors_enabled; // IMU streams only after the enable command is sent
     bool mouse_enabled;   // Joy-Con 2 optical mouse counters stream (hint opt-in)
+    bool magnetometer_enabled; // Switch 2 magnetometer sample stream (hint opt-in)
     bool vertical_mode;   // Joy-Con 2 held upright (SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS)
 
     // Rumble state. The actuator does not latch, so a sustained effect needs a
@@ -1452,19 +1453,31 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         static const Uint8 set_input_mode[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30 };
         BLE_WriteCharacteristic(ctrl->command_char, set_input_mode, (int)sizeof(set_input_mode), false);
 
-        /* Opt-in optical mouse sensor (Joy-Con only, both L and R). Feature
+        /* Opt-in side-channel sensors (Joy-Con only, both L and R). Feature
            flags command 0x0C: subcommand 0x02 (init) then 0x04 (enable), u32 LE
            payload, mouse = bit 4 (controller.py:55-61/370-373, enabled at :268;
            the report 0x05 Mouse Data block is "Activated via feature bit 4",
-           hid_reports.md). The frames use the command channel convention
+           hid_reports.md), magnetometer = bit 7 (windows10-gyro
+           controller.py:713's FEATSEL 0x94 = motion | mouse | magnetometer).
+           Both ride one combined init+enable, the reference's own multi-feature
+           pattern. The frames use the command channel convention
            <cmd> 91 01 <subcmd> 00 <len> 00 00 <payload> that BLE_SendCommand
            also builds; fire-and-forget like the Format-3 write above. */
         if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE, false)) {
-            static const Uint8 mouse_feature_init[] = { 0x0C, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00 };
-            static const Uint8 mouse_feature_enable[] = { 0x0C, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00 };
-            BLE_WriteCharacteristic(ctrl->command_char, mouse_feature_init, (int)sizeof(mouse_feature_init), false);
-            BLE_WriteCharacteristic(ctrl->command_char, mouse_feature_enable, (int)sizeof(mouse_feature_enable), false);
             ctrl->mouse_enabled = true;
+        }
+        if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER, false)) {
+            ctrl->magnetometer_enabled = true;
+        }
+        if (ctrl->mouse_enabled || ctrl->magnetometer_enabled) {
+            Uint8 feature_init[12] = { 0x0C, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            Uint8 feature_enable[12] = { 0x0C, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            Uint8 feature_mask = (Uint8)((ctrl->mouse_enabled ? 0x10 : 0x00) |
+                                         (ctrl->magnetometer_enabled ? 0x80 : 0x00));
+            feature_init[8] = feature_mask;
+            feature_enable[8] = feature_mask;
+            BLE_WriteCharacteristic(ctrl->command_char, feature_init, (int)sizeof(feature_init), false);
+            BLE_WriteCharacteristic(ctrl->command_char, feature_enable, (int)sizeof(feature_enable), false);
         }
     }
 
@@ -1723,6 +1736,33 @@ static void BLE_PostMouseAxes(BLE_Controller *ctrl, SDL_Joystick *joystick, cons
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_COUNT + 1, counter_y);
 }
 
+/* Switch 2 magnetometer: three int16 LE at report offsets 0x16/0x18/0x1A
+   (joycon2cpp README report layout, fork issue #25), streamed when feature
+   bit 7 is enabled (windows10-gyro controller.py:713's FEATSEL 0x94).
+   Raw samples on three dedicated axes, no fusion: the consumer owns
+   orientation math. The axes follow the mouse counters when both are
+   enabled, and the raw axis count is the availability contract
+   (6 = neither, 8 = mouse, 9 = magnetometer, 11 = both). */
+static void BLE_PostMagnetometerAxes(BLE_Controller *ctrl, SDL_Joystick *joystick, const Uint8 *data, int size, Uint64 ts)
+{
+    int base;
+    Sint16 mag[3];
+    int i;
+
+    if (!ctrl->magnetometer_enabled || size < 0x1C) {
+        return;
+    }
+    base = SDL_GAMEPAD_AXIS_COUNT + (ctrl->mouse_enabled ? 2 : 0);
+    mag[0] = (Sint16)(data[0x16] | (data[0x17] << 8));
+    mag[1] = (Sint16)(data[0x18] | (data[0x19] << 8));
+    mag[2] = (Sint16)(data[0x1A] | (data[0x1B] << 8));
+    for (i = 0; i < 3; ++i) {
+        /* Data axes: seed past the analog anti-jitter gate (hifihedgehog/SDL#14) */
+        SDL_SeedJoystickDataAxis(joystick, base + i, mag[i]);
+        SDL_SendJoystickAxis(ts, joystick, base + i, mag[i]);
+    }
+}
+
 static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
 {
     Uint64 ts = SDL_GetTicksNS();
@@ -1763,6 +1803,7 @@ static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, U
         SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), false));
         SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
         BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
+        BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
         return;
     }
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_START, ((data[5] & 0x01) != 0));
@@ -1780,6 +1821,7 @@ static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, U
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), true));
     BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
+    BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
 }
 
 // Standalone (mini) Joy-Con 2 Right, held sideways.
@@ -1812,6 +1854,7 @@ static void BLE_DecodeJoyConRight(BLE_Controller *ctrl, SDL_Joystick *joystick, 
         SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTX, BLE_MapStickAxis(&ctrl->left_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
         SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
         BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
+        BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
         return;
     }
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[4] & 0x01) != 0));
@@ -1829,6 +1872,7 @@ static void BLE_DecodeJoyConRight(BLE_Controller *ctrl, SDL_Joystick *joystick, 
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTX, BLE_MapStickAxis(&ctrl->left_y, (float)((data[14] >> 4) | (data[15] << 4)), false));
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
     BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
+    BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
 }
 
 static void BLE_DecodeReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
@@ -2034,14 +2078,14 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
         joystick->nbuttons = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) ? 15 : 12;
         break;
     }
-    /* A Joy-Con with the optical mouse enabled exposes two extra axes beyond
-       the gamepad axes for the raw absolute counters (axis 6 = X, 7 = Y).
-       Raw axis count 8 is the consumer's availability signal. */
-    if (ctrl->mouse_enabled) {
-        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT + 2;
-    } else {
-        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
-    }
+    /* Extra raw axes beyond the gamepad set, each behind its hint: the
+       optical mouse's absolute counters (axis 6 = X, 7 = Y) and the
+       magnetometer sample (the next three, following whichever of the mouse
+       axes exist). Raw axis count is the consumer's availability contract:
+       6 = neither, 8 = mouse, 9 = magnetometer, 11 = both. */
+    joystick->naxes = SDL_GAMEPAD_AXIS_COUNT +
+                      (ctrl->mouse_enabled ? 2 : 0) +
+                      (ctrl->magnetometer_enabled ? 3 : 0);
     joystick->nhats = 1;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
@@ -2174,12 +2218,15 @@ static bool BLE_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
     // The mask is the union of every feature this driver keeps active: the
     // proven pattern for multiple features is one combined init+enable
     // (windows10-gyro controller.py:802 sends MOTION | MOUSE | MAGNETOMETER in
-    // a single call), so a motion-only toggle must not drop the mouse bit.
+    // a single call), so a motion-only toggle must not drop the mouse or
+    // magnetometer bits.
     Uint8 flags[4] = { 0x00, 0x00, 0x00, 0x00 };
     if (!ctrl) {
         return SDL_SetError("No BLE controller for joystick");
     }
-    flags[0] = (Uint8)((enabled ? 0x04 : 0x00) | (ctrl->mouse_enabled ? 0x10 : 0x00));
+    flags[0] = (Uint8)((enabled ? 0x04 : 0x00) |
+                       (ctrl->mouse_enabled ? 0x10 : 0x00) |
+                       (ctrl->magnetometer_enabled ? 0x80 : 0x00));
     ctrl->sensors_enabled = enabled;
     BLE_SendCommand(ctrl, 0x0c, 0x02, flags, sizeof(flags), NULL, 0);
     BLE_SendCommand(ctrl, 0x0c, 0x04, flags, sizeof(flags), NULL, 0);
