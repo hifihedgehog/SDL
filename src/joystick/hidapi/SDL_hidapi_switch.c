@@ -1634,14 +1634,17 @@ static const char *GetIRStateName(Uint8 ucState)
     return "Unknown";
 }
 
-/* The gating the sync enable used, unchanged (fork #151): opt-in by hint
- * because powering the MCU costs battery, standalone right Joy-Con only
- * because a combined pair's shared joystick has no IR axis to deliver to. */
+/* Opt-in by hint because powering the MCU costs battery (fork #151). The
+ * right Joy-Con qualifies standalone or as the right half of a combined
+ * pair (fork issue #26): a pair's right child runs its own context and
+ * update loop, ctx->joystick is the shared joystick, and the open path
+ * registers the pair's extra IR axis, the same child plumbing that already
+ * carries NFC and the right half's gyro. The Switch 2 family never reports
+ * this controller type, so gen-2 pairs stay excluded here. */
 static bool IsIRSupported(SDL_DriverSwitch_Context *ctx)
 {
     return !ctx->m_bInputOnly &&
-           ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight &&
-           !ctx->device->parent;
+           ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight;
 }
 
 static bool IsIROwningMcu(SDL_DriverSwitch_Context *ctx)
@@ -2885,13 +2888,18 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     } else {
         joystick->nbuttons = SDL_GAMEPAD_NUM_SWITCH_BUTTONS;
     }
-    /* A standalone right Joy-Con exposes one extra axis beyond the gamepad
-       axes for the NIR camera's average-intensity scalar (0 until the camera
-       is enabled via SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR + sensors). */
-    if (ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight &&
-        !device->parent) {
+    /* A right Joy-Con exposes one extra axis beyond the gamepad axes for
+       the NIR camera's average-intensity scalar (0 until the camera is
+       enabled via SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR + sensors),
+       standalone or as the right half of a combined pair (fork issue #26).
+       Both halves of a pair run this open against the one shared joystick,
+       so the sibling's pass must never shrink a count the right half
+       already registered: grow-only, order-proof either way around. The
+       Switch 2 family never reports this controller type, so gen-2 pairs
+       end at the plain count. */
+    if (ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight) {
         joystick->naxes = SDL_GAMEPAD_AXIS_COUNT + 1;
-    } else {
+    } else if (joystick->naxes < SDL_GAMEPAD_AXIS_COUNT) {
         joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     }
     joystick->nhats = 1;
