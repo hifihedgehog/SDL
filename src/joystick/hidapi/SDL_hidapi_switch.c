@@ -323,6 +323,10 @@ typedef struct
     bool m_bEnhancedModeAvailable;
     SwitchCommonOutputPacket_t m_RumblePacket;
     Uint8 m_rgucReadBuffer[k_unSwitchMaxInputPacketLength];
+    // Frequency-shaped rumble (fork issue #25): last target intensities, for
+    // the per-motor attack/decay edges
+    Uint16 m_usShapedPrevLow;
+    Uint16 m_usShapedPrevHigh;
     bool m_bRumbleActive;
     Uint64 m_ulRumbleSent;
     bool m_bRumblePending;
@@ -2903,6 +2907,100 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     return true;
 }
 
+/* Frequency-shaped rumble (fork issue #25, opt-in via
+ * SDL_HINT_JOYSTICK_HIDAPI_SWITCH_SHAPED_RUMBLE, default off): sweep LRA
+ * frequency with intensity instead of holding the fixed carriers, which is
+ * where native HD-rumble texture lives. The constants are ENCODED center
+ * bytes per dekuNukem rumble_data_table.md (freq = 10 * 2^(enc/32) Hz), so a
+ * linear sweep in encoded space is a logarithmic sweep in Hz, matching the
+ * LRA's perceptual scale with no float math. The low motor sweeps the low
+ * band and the high motor the high band. Band edges, the attack boost, and
+ * the decay divisor are bench-tunable; the structure is not. */
+#define SHAPED_RUMBLE_LOW_ENC_MIN  0x41 // ~40.9 Hz
+#define SHAPED_RUMBLE_LOW_ENC_MAX  0x80 // 160 Hz (the fixed low carrier upstream uses)
+#define SHAPED_RUMBLE_HIGH_ENC_MIN 0x80 // 160 Hz
+#define SHAPED_RUMBLE_HIGH_ENC_MAX 0xA0 // 320 Hz (hf 0x0100, the table's canonical row)
+
+static Uint8 ShapedRumbleEncByte(Uint8 ucEncMin, Uint8 ucEncMax, Uint16 usIntensity)
+{
+    return (Uint8)(ucEncMin + (((Uint32)(ucEncMax - ucEncMin) * usIntensity) / 65535));
+}
+
+/* The shaped encode path. Envelopes ride the driver's existing pending
+ * machinery rather than new timers: a rising edge writes one attack frame
+ * (amplitude boosted 1.5x, capped) and schedules the sustain re-encode by
+ * setting the rumble-pending flags, which the update loop flushes one write
+ * window (~30 ms) later. A fall to zero writes one decay frame (half the
+ * previous intensity at the band floor) and schedules the true zero the same
+ * way, so pulsed rumble reads as attack/body/tail texture instead of gated
+ * tone. */
+static bool HIDAPI_DriverSwitch_ShapedRumbleJoystick(SDL_DriverSwitch_Context *ctx, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
+{
+    Uint16 usPrevLow = ctx->m_usShapedPrevLow;
+    Uint16 usPrevHigh = ctx->m_usShapedPrevHigh;
+    Uint16 usAmpLow, usAmpHigh;
+    Uint8 ucLowEnc, ucHighEnc;
+    Uint16 usHighFreq;
+    Uint8 ucLowFreq;
+
+    if (low_frequency_rumble || high_frequency_rumble) {
+        bool bAttack = (low_frequency_rumble && !usPrevLow) || (high_frequency_rumble && !usPrevHigh);
+
+        usAmpLow = low_frequency_rumble;
+        usAmpHigh = high_frequency_rumble;
+        if (low_frequency_rumble && !usPrevLow) {
+            usAmpLow = (Uint16)SDL_min(65535, ((Uint32)low_frequency_rumble * 3) / 2);
+        }
+        if (high_frequency_rumble && !usPrevHigh) {
+            usAmpHigh = (Uint16)SDL_min(65535, ((Uint32)high_frequency_rumble * 3) / 2);
+        }
+        ucLowEnc = ShapedRumbleEncByte(SHAPED_RUMBLE_LOW_ENC_MIN, SHAPED_RUMBLE_LOW_ENC_MAX, low_frequency_rumble);
+        ucHighEnc = ShapedRumbleEncByte(SHAPED_RUMBLE_HIGH_ENC_MIN, SHAPED_RUMBLE_HIGH_ENC_MAX, high_frequency_rumble);
+        if (bAttack) {
+            // Settle to sustain amplitude one write window later
+            Uint32 unRumblePending = ((Uint32)low_frequency_rumble << 16) | high_frequency_rumble;
+            if (unRumblePending > ctx->m_unRumblePending) {
+                ctx->m_unRumblePending = unRumblePending;
+            }
+            ctx->m_bRumblePending = true;
+            ctx->m_bRumbleZeroPending = false;
+        }
+        ctx->m_usShapedPrevLow = low_frequency_rumble;
+        ctx->m_usShapedPrevHigh = high_frequency_rumble;
+        ctx->m_bRumbleActive = true;
+    } else if (usPrevLow || usPrevHigh) {
+        // Decay tail, then the true zero via the zero-pending flag
+        usAmpLow = (Uint16)(usPrevLow / 2);
+        usAmpHigh = (Uint16)(usPrevHigh / 2);
+        ucLowEnc = SHAPED_RUMBLE_LOW_ENC_MIN;
+        ucHighEnc = SHAPED_RUMBLE_HIGH_ENC_MIN;
+        ctx->m_bRumbleZeroPending = true;
+        ctx->m_usShapedPrevLow = 0;
+        ctx->m_usShapedPrevHigh = 0;
+        ctx->m_bRumbleActive = true;
+    } else {
+        SetNeutralRumble(ctx->device, &ctx->m_RumblePacket.rumbleData[0]);
+        SetNeutralRumble(ctx->device, &ctx->m_RumblePacket.rumbleData[1]);
+        ctx->m_bRumbleActive = false;
+        if (!WriteRumble(ctx)) {
+            return SDL_SetError("Couldn't send rumble packet");
+        }
+        return true;
+    }
+
+    // Pack per dekuNukem: high-band 16-bit = (enc - 0x60) << 2, low-band
+    // 8-bit = enc - 0x40 (EncodeRumble borrows the spare bits)
+    ucLowFreq = (Uint8)(ucLowEnc - 0x40);
+    usHighFreq = (Uint16)((ucHighEnc - 0x60) << 2);
+    EncodeRumble(ctx->device, &ctx->m_RumblePacket.rumbleData[0], usHighFreq, EncodeRumbleHighAmplitude(usAmpHigh), ucLowFreq, EncodeRumbleLowAmplitude(usAmpLow));
+    EncodeRumble(ctx->device, &ctx->m_RumblePacket.rumbleData[1], usHighFreq, EncodeRumbleHighAmplitude(usAmpHigh), ucLowFreq, EncodeRumbleLowAmplitude(usAmpLow));
+
+    if (!WriteRumble(ctx)) {
+        return SDL_SetError("Couldn't send rumble packet");
+    }
+    return true;
+}
+
 static bool HIDAPI_DriverSwitch_ActuallyRumbleJoystick(SDL_DriverSwitch_Context *ctx, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
     /* Experimentally determined rumble values. These will only matter on some controllers as tested ones
@@ -2915,6 +3013,15 @@ static bool HIDAPI_DriverSwitch_ActuallyRumbleJoystick(SDL_DriverSwitch_Context 
     const Uint8 k_ucHighFreqAmp = EncodeRumbleHighAmplitude(high_frequency_rumble);
     const Uint8 k_ucLowFreq = 0x3D;
     const Uint16 k_usLowFreqAmp = EncodeRumbleLowAmplitude(low_frequency_rumble);
+
+    /* Shaped mode targets the classic LRA packet only: Switch 2 report
+       encoding is its own path and stays untouched (fork issue #25). */
+    if (!ctx->m_bSwitch2 &&
+        SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_SHAPED_RUMBLE, false)) {
+        return HIDAPI_DriverSwitch_ShapedRumbleJoystick(ctx, low_frequency_rumble, high_frequency_rumble);
+    }
+    ctx->m_usShapedPrevLow = 0;
+    ctx->m_usShapedPrevHigh = 0;
 
     if (low_frequency_rumble || high_frequency_rumble) {
         EncodeRumble(ctx->device, &ctx->m_RumblePacket.rumbleData[0], k_usHighFreq, k_ucHighFreqAmp, k_ucLowFreq, k_usLowFreqAmp);

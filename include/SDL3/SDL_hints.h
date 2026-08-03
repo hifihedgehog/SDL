@@ -2096,6 +2096,27 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED "SDL_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED"
 
 /**
+ * A variable controlling whether standard rumble on Switch controllers is
+ * encoded with frequency shaping.
+ *
+ * This is a PadForge fork addition. The default encoding renders both rumble
+ * motors as fixed-frequency tones at varying loudness. With shaping enabled,
+ * the low motor's intensity sweeps the low LRA band and the high motor's the
+ * high band, with short attack and decay transients, so pulsed rumble reads
+ * as texture the way native HD rumble does.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": fixed-carrier encoding. (default)
+ * - "1": frequency-shaped encoding.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_SHAPED_RUMBLE "SDL_JOYSTICK_HIDAPI_SWITCH_SHAPED_RUMBLE"
+
+/**
  * A variable controlling whether the HIDAPI driver for Nintendo Switch 2
  * controllers should be used.
  *
@@ -2151,6 +2172,27 @@ extern "C" {
  * \since This hint is available since SDL 3.5.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE "SDL_JOYSTICK_BLE_SWITCH2_MOUSE"
+
+/**
+ * A variable controlling whether the Switch 2 magnetometer is enabled by the
+ * BLE driver, exposing its X/Y/Z sample as three extra joystick axes.
+ *
+ * This is a PadForge fork addition. The values are raw int16 samples, no
+ * fusion: the consumer owns orientation math. The three axes follow the
+ * mouse counters when both are enabled, and the raw axis count is the
+ * availability contract: 6 = neither, 8 = mouse, 9 = magnetometer,
+ * 11 = both.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": magnetometer is not enabled. (default)
+ * - "1": magnetometer streams on Joy-Con 2 controllers as extra axes.
+ *
+ * This hint should be set before the controller connects.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER "SDL_JOYSTICK_BLE_SWITCH2_MAGNETOMETER"
 
 /**
  * A variable controlling whether the right Joy-Con's NIR camera is powered
