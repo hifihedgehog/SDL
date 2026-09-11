@@ -26,6 +26,8 @@
 #ifdef SDL_JOYSTICK_XINPUT
 
 #include "../../core/windows/SDL_xinput.h"
+#include "SDL_xinput_paddle_c.h"
+#include "SDL_xinputjoystick_hwdata.h"
 #include "../../core/windows/SDL_gameinput.h"
 #include "../hidapi/SDL_hidapijoystick_c.h"
 
@@ -42,16 +44,6 @@ typedef struct JoyStick_DeviceData
     int steam_virtual_gamepad_slot;
     struct JoyStick_DeviceData *pNext;
 } JoyStick_DeviceData;
-
-// The private structure used to keep track of a joystick
-struct joystick_hwdata
-{
-    SDL_GUID guid;
-    bool bXInputDevice; // true if this device supports using the xinput API rather than DirectInput
-    bool bXInputHaptic; // Supports force feedback via XInput.
-    Uint8 userid;       // XInput userid index for this joystick
-    DWORD dwPacketNumber;
-};
 
 // local variables
 static bool s_bXInputEnabled = false;
@@ -340,6 +332,9 @@ static void XINPUT_JoystickDetect(void)
     while (pCurList) {
         JoyStick_DeviceData *pListNext = NULL;
 
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+        SDL_XINPUT_PaddleRemoved(pCurList->nInstanceID);
+#endif
         SDL_PrivateJoystickRemoved(pCurList->nInstanceID);
 
         pListNext = pCurList->pNext;
@@ -476,6 +471,10 @@ static bool XINPUT_JoystickOpen(SDL_Joystick *joystick, int device_index)
     joystick->nbuttons = SDL_XInputGetSystemButtons ? 12 : 11;
     joystick->nhats = 1;
 
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+    SDL_XINPUT_PaddleOpen(joystick, userId);
+#endif
+
     SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
 
     return true;
@@ -513,6 +512,9 @@ static void XINPUT_JoystickUpdate(SDL_Joystick *joystick)
 
     result = XINPUTGETSTATE(joystick->hwdata->userid, &XInputState);
     if (result == ERROR_DEVICE_NOT_CONNECTED) {
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+        SDL_XINPUT_PaddleRemoved(joystick->instance_id);
+#endif
         s_nLastDetect = 0;
         return;
     }
@@ -545,10 +547,17 @@ static void XINPUT_JoystickUpdate(SDL_Joystick *joystick)
             SDL_SendJoystickButton(SDL_GetTicksNS(), joystick, 11, share_down);
         }
     }
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+    // The supplemental reports have their own sequence, separate from XInput.
+    SDL_XINPUT_PaddleUpdate(joystick);
+#endif
 }
 
 static void XINPUT_JoystickClose(SDL_Joystick *joystick)
 {
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+    SDL_XINPUT_PaddleClose(joystick);
+#endif
     SDL_free(joystick->hwdata);
 }
 
@@ -567,6 +576,9 @@ static void XINPUT_JoystickQuit(void)
     s_nLastDetect = 0;
 
     if (s_bXInputEnabled) {
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+        SDL_XINPUT_PaddleQuit();
+#endif
         s_bXInputEnabled = false;
         WIN_UnloadXInputDLL();
     }
