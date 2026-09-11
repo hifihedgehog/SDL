@@ -35,6 +35,9 @@ extern void SDL_QuitGamepads(void);
 extern void SDL_PrivateGamepadAdded(SDL_JoystickID instance_id);
 extern void SDL_PrivateGamepadRemoved(SDL_JoystickID instance_id);
 
+// Per-instance XInput paddle support. This never changes the GUID mapping cache.
+#define SDL_PROP_JOYSTICK_XINPUT_PADDLE_MASK_NUMBER "SDL.joystick.xinput.paddle_mask"
+
 // Function to return whether a joystick name and GUID is a gamepad
 extern bool SDL_IsGamepadNameAndGUID(const char *name, SDL_GUID guid);
 

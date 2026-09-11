@@ -282,6 +282,19 @@ typedef DWORD(WINAPI *XInputGetSystemButtons_t)(
     XINPUT_SYSTEM_BUTTONS *pSystemButtons,
     PVOID vReserved);
 
+typedef struct
+{
+    DWORD cbSize;
+    DWORD requiredCch;
+    Uint64 generation;
+    DWORD interfaceIndex;
+    DWORD interfaceCount;
+} SDL_XINPUT_DEVICE_IDENTITY_V1;
+
+typedef DWORD(WINAPI *XInputGetDeviceIdentity_t)(
+    DWORD userIndex, SDL_XINPUT_DEVICE_IDENTITY_V1 *identity,
+    WCHAR *path, DWORD capacityCch);
+
 extern bool WIN_LoadXInputDLL(void);
 extern void WIN_UnloadXInputDLL(void);
 
@@ -291,6 +304,7 @@ extern XInputGetCapabilities_t SDL_XInputGetCapabilities;
 extern XInputGetCapabilitiesEx_t SDL_XInputGetCapabilitiesEx;
 extern XInputGetBatteryInformation_t SDL_XInputGetBatteryInformation;
 extern XInputGetSystemButtons_t SDL_XInputGetSystemButtons;
+extern XInputGetDeviceIdentity_t SDL_XInputGetDeviceIdentity;
 
 // Ends C function definitions when using C++
 #ifdef __cplusplus
