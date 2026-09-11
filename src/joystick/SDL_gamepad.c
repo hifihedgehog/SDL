@@ -140,6 +140,7 @@ struct SDL_Gamepad
     SDL_GamepadFaceStyle face_style _guarded;
     GamepadMapping_t *mapping _guarded;
     int num_bindings _guarded;
+    int xinput_paddle_count _guarded;
     SDL_GamepadBinding *bindings _guarded;
     SDL_GamepadBinding **last_match_axis _guarded;
     Uint8 *last_hat_mask _guarded;
@@ -1748,6 +1749,9 @@ static bool SDL_PrivateParseGamepadElement(SDL_Gamepad *gamepad, const char *szG
     if (*szJoystickButton == '+' || *szJoystickButton == '-') {
         half_axis_input = *szJoystickButton++;
     }
+    if (*szJoystickButton == '\0') {
+        return false;
+    }
     if (szJoystickButton[SDL_strlen(szJoystickButton) - 1] == '~') {
         invert_input = true;
     }
@@ -2008,6 +2012,106 @@ static void SDL_FixupHIDAPIMapping(SDL_Gamepad *gamepad)
     }
 }
 
+static const struct
+{
+    const char *name;
+    SDL_GamepadButton button;
+    Uint8 raw_button;
+    Uint8 mask;
+} xinput_paddles[] = {
+    { "paddle1", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, 12, 0x01 },
+    { "paddle2", SDL_GAMEPAD_BUTTON_LEFT_PADDLE1, 14, 0x04 },
+    { "paddle3", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2, 13, 0x02 },
+    { "paddle4", SDL_GAMEPAD_BUTTON_LEFT_PADDLE2, 15, 0x08 }
+};
+
+static bool SDL_MappingHasPaddle(const char *mapping, const char *name)
+{
+    for (const char *field = mapping; field && *field; ) {
+        char field_name[20];
+        size_t length = 0;
+        const char *p = field;
+        // The existing mapping parser discards literal spaces in field names.
+        while (*p && *p != ',' && *p != ':') {
+            if (*p != ' ' && length + 1 < sizeof(field_name)) {
+                field_name[length++] = *p;
+            }
+            ++p;
+        }
+        field_name[length] = '\0';
+        const char *compare_name = field_name;
+        if (*compare_name == '+' || *compare_name == '-') {
+            ++compare_name;
+        }
+        if (*p == ':' && SDL_strcasecmp(compare_name, name) == 0) {
+            return true;
+        }
+        field = SDL_strchr(field, ',');
+        if (field) {
+            ++field;
+        }
+    }
+    return false;
+}
+
+static Uint8 SDL_XInputPaddleMappingMask(SDL_Joystick *joystick, GamepadMapping_t *mapping)
+{
+    Uint8 mask;
+    if (!joystick || joystick->naxes != 6 || joystick->nbuttons < 16 ||
+        !SDL_IsJoystickXInput(joystick->guid)) {
+        return 0;
+    }
+    mask = (Uint8)SDL_GetNumberProperty(joystick->props, SDL_PROP_JOYSTICK_XINPUT_PADDLE_MASK_NUMBER, 0) & 0x0F;
+    for (int i = 0; i < (int)SDL_arraysize(xinput_paddles); ++i) {
+        // Preserve explicit bindings, including an explicitly empty field.
+        if (SDL_MappingHasPaddle(mapping->mapping, xinput_paddles[i].name)) {
+            mask &= ~xinput_paddles[i].mask;
+        }
+    }
+    return mask;
+}
+
+static bool SDL_AppendXInputPaddleBindings(SDL_Gamepad *gamepad)
+{
+    Uint8 mask = SDL_XInputPaddleMappingMask(gamepad->joystick, gamepad->mapping);
+    const int base_count = gamepad->num_bindings;
+    int added = 0;
+
+    SDL_assert(gamepad->xinput_paddle_count == 0);
+    if (!mask) {
+        return true;
+    }
+    for (int i = 0; i < (int)SDL_arraysize(xinput_paddles); ++i) {
+        for (int binding = 0; binding < base_count; ++binding) {
+            if (gamepad->bindings[binding].input_type == SDL_GAMEPAD_BINDTYPE_BUTTON &&
+                gamepad->bindings[binding].input.button == xinput_paddles[i].raw_button) {
+                mask &= ~xinput_paddles[i].mask;
+            }
+        }
+        added += ((mask & xinput_paddles[i].mask) != 0);
+    }
+    if (added) {
+        SDL_GamepadBinding *bindings = (SDL_GamepadBinding *)SDL_realloc(gamepad->bindings, (base_count + added) * sizeof(*bindings));
+        if (!bindings) {
+            return SDL_OutOfMemory();
+        }
+        gamepad->bindings = bindings;
+    }
+    gamepad->num_bindings = base_count;
+    for (int i = 0; i < (int)SDL_arraysize(xinput_paddles); ++i) {
+        if (mask & xinput_paddles[i].mask) {
+            SDL_GamepadBinding *binding = &gamepad->bindings[gamepad->num_bindings++];
+            SDL_zerop(binding);
+            binding->input_type = SDL_GAMEPAD_BINDTYPE_BUTTON;
+            binding->input.button = xinput_paddles[i].raw_button;
+            binding->output_type = SDL_GAMEPAD_BINDTYPE_BUTTON;
+            binding->output.button = xinput_paddles[i].button;
+        }
+    }
+    gamepad->xinput_paddle_count = added;
+    return true;
+}
+
 /*
  * Make a new button mapping struct
  */
@@ -2019,6 +2123,7 @@ static void SDL_PrivateLoadButtonMapping(SDL_Gamepad *gamepad, GamepadMapping_t 
 
     gamepad->name = pGamepadMapping->name;
     gamepad->num_bindings = 0;
+    gamepad->xinput_paddle_count = 0;
     gamepad->mapping = pGamepadMapping;
     if (gamepad->joystick->naxes != 0 && gamepad->last_match_axis) {
         SDL_memset(gamepad->last_match_axis, 0, gamepad->joystick->naxes * sizeof(*gamepad->last_match_axis));
@@ -2032,6 +2137,7 @@ static void SDL_PrivateLoadButtonMapping(SDL_Gamepad *gamepad, GamepadMapping_t 
     if (SDL_IsJoystickHIDAPI(pGamepadMapping->guid)) {
         SDL_FixupHIDAPIMapping(gamepad);
     }
+    SDL_AppendXInputPaddleBindings(gamepad);
 
     // Set the zero point for triggers
     for (i = 0; i < gamepad->num_bindings; ++i) {
@@ -2813,6 +2919,64 @@ static char *CreateMappingString(GamepadMapping_t *mapping, SDL_GUID guid)
     return pMappingString;
 }
 
+static char *CreateMappingStringForJoystick(GamepadMapping_t *mapping, SDL_Joystick *joystick, SDL_GUID guid, bool include_platform)
+{
+    SDL_Gamepad temporary;
+    SDL_Gamepad *gamepad = NULL;
+    GamepadMapping_t effective = *mapping;
+    char *config = NULL;
+    char *result = NULL;
+
+    SDL_zero(temporary);
+    for (gamepad = SDL_gamepads; gamepad; gamepad = gamepad->next) {
+        if (gamepad->joystick == joystick && gamepad->mapping == mapping) {
+            break;
+        }
+    }
+    if (!gamepad && SDL_XInputPaddleMappingMask(joystick, mapping)) {
+        temporary.joystick = joystick;
+        temporary.mapping = mapping;
+        // Reuse the parser for raw-button precedence when only a joystick is open.
+        if (!SDL_PrivateParseGamepadConfigString(&temporary, mapping->mapping) ||
+            !SDL_AppendXInputPaddleBindings(&temporary)) {
+            SDL_free(temporary.bindings);
+            return NULL;
+        }
+        gamepad = &temporary;
+    }
+    if (gamepad && gamepad->xinput_paddle_count) {
+        const size_t capacity = SDL_strlen(mapping->mapping) + 64;
+        config = (char *)SDL_malloc(capacity);
+        if (!config) {
+            SDL_free(temporary.bindings);
+            return NULL;
+        }
+        SDL_strlcpy(config, mapping->mapping, capacity);
+        const size_t length = SDL_strlen(config);
+        if (length && config[length - 1] != ',') {
+            SDL_strlcat(config, ",", capacity);
+        }
+        // Describe installed bindings, including the allocation-failure case.
+        for (int i = gamepad->num_bindings - gamepad->xinput_paddle_count; i < gamepad->num_bindings; ++i) {
+            const SDL_GamepadBinding *binding = &gamepad->bindings[i];
+            char field[24];
+            SDL_snprintf(field, sizeof(field), "%s:b%d,", SDL_GetGamepadStringForButton(binding->output.button), binding->input.button);
+            SDL_strlcat(config, field, capacity);
+        }
+        effective.mapping = config;
+    }
+    if (include_platform) {
+        result = CreateMappingString(&effective, guid);
+    } else {
+        char guid_string[33];
+        SDL_GUIDToString(guid, guid_string, sizeof(guid_string));
+        SDL_asprintf(&result, "%s,%s,%s", guid_string, effective.name, effective.mapping);
+    }
+    SDL_free(config);
+    SDL_free(temporary.bindings);
+    return result;
+}
+
 char **SDL_GetGamepadMappings(int *count)
 {
     int num_mappings = 0;
@@ -2922,7 +3086,7 @@ char *SDL_GetGamepadMapping(SDL_Gamepad *gamepad)
     {
         CHECK_GAMEPAD_MAGIC(gamepad, NULL);
 
-        result = CreateMappingString(gamepad->mapping, gamepad->joystick->guid);
+        result = CreateMappingStringForJoystick(gamepad->mapping, gamepad->joystick, gamepad->joystick->guid, true);
     }
     SDL_UnlockJoysticks();
 
@@ -3212,10 +3376,8 @@ char *SDL_GetGamepadMappingForID(SDL_JoystickID instance_id)
     {
         GamepadMapping_t *mapping = SDL_PrivateGetGamepadMapping(instance_id, true);
         if (mapping) {
-            char pchGUID[33];
             SDL_GUID guid = SDL_GetJoystickGUIDForID(instance_id);
-            SDL_GUIDToString(guid, pchGUID, sizeof(pchGUID));
-            SDL_asprintf(&result, "%s,%s,%s", pchGUID, mapping->name, mapping->mapping);
+            result = CreateMappingStringForJoystick(mapping, SDL_GetJoystickFromID(instance_id), guid, false);
         }
     }
     SDL_UnlockJoysticks();

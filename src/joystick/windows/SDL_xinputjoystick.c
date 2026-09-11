@@ -26,6 +26,7 @@
 
 #include "SDL_windowsjoystick_c.h"
 #include "SDL_xinputjoystick_c.h"
+#include "SDL_xinput_paddle_c.h"
 #include "SDL_rawinputjoystick_c.h"
 #include "../../core/windows/SDL_gameinput.h"
 #include "../hidapi/SDL_hidapijoystick_c.h"
@@ -286,6 +287,10 @@ bool SDL_XINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
     joystick->nbuttons = SDL_XInputGetSystemButtons ? 12 : 11;
     joystick->nhats = 1;
 
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+    SDL_XINPUT_PaddleOpen(joystick, userId);
+#endif
+
     SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
 
     return true;
@@ -399,6 +404,9 @@ void SDL_XINPUT_JoystickUpdate(SDL_Joystick *joystick)
 
     result = XINPUTGETSTATE(joystick->hwdata->userid, &XInputState);
     if (result == ERROR_DEVICE_NOT_CONNECTED) {
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+        SDL_XINPUT_PaddleRemoved(joystick->instance_id);
+#endif
         return;
     }
 
@@ -430,15 +438,25 @@ void SDL_XINPUT_JoystickUpdate(SDL_Joystick *joystick)
             SDL_SendJoystickButton(SDL_GetTicksNS(), joystick, 11, share_down);
         }
     }
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+    // The supplemental reports have their own sequence, separate from XInput.
+    SDL_XINPUT_PaddleUpdate(joystick);
+#endif
 }
 
 void SDL_XINPUT_JoystickClose(SDL_Joystick *joystick)
 {
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+    SDL_XINPUT_PaddleClose(joystick);
+#endif
 }
 
 void SDL_XINPUT_JoystickQuit(void)
 {
     if (s_bXInputEnabled) {
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+        SDL_XINPUT_PaddleQuit();
+#endif
         s_bXInputEnabled = false;
         WIN_UnloadXInputDLL();
     }

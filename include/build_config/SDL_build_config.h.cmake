@@ -326,6 +326,7 @@
 #cmakedefine SDL_JOYSTICK_WGI 1
 #cmakedefine SDL_JOYSTICK_BLE 1
 #cmakedefine SDL_JOYSTICK_XINPUT 1
+#cmakedefine SDL_JOYSTICK_XINPUT_PADDLES 1
 
 #cmakedefine SDL_JOYSTICK_PRIVATE 1
 

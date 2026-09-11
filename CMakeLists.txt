@@ -378,6 +378,7 @@ dep_option(SDL_ROCKCHIP            "Use ROCKCHIP Hardware Acceleration video dri
 dep_option(SDL_COCOA               "Use Cocoa video driver" ON "APPLE" OFF)
 dep_option(SDL_DIRECTX             "Use DirectX for Windows audio/video" ON "SDL_AUDIO OR SDL_VIDEO;WINDOWS OR CYGWIN" OFF)
 dep_option(SDL_XINPUT              "Use Xinput for Windows" ON "WINDOWS OR CYGWIN" OFF)
+dep_option(SDL_XINPUT_PADDLES      "Supplement XInput with Elite paddle reports" ON "WINDOWS;MSVC;NOT USE_CLANG;NOT USE_INTELCC;SDL_CPU_X64;SDL_XINPUT;SDL_JOYSTICK;SDL_LIBC" OFF)
 dep_option(SDL_WASAPI              "Use the Windows WASAPI audio driver" ON "WINDOWS OR CYGWIN;SDL_AUDIO" OFF)
 dep_option(SDL_RENDER_D3D          "Enable the Direct3D 9 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
 dep_option(SDL_RENDER_D3D11        "Enable the Direct3D 11 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
@@ -2565,6 +2566,28 @@ elseif(WINDOWS OR CYGWIN)
     if(HAVE_XINPUT_H)
       set(SDL_JOYSTICK_XINPUT 1)
       set(HAVE_XINPUT TRUE)
+      if(SDL_XINPUT_PADDLES AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        set(SDL_JOYSTICK_XINPUT_PADDLES 1)
+        set(HAVE_XINPUT_PADDLES TRUE)
+        set(xinput_paddle_sources
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_gatt.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_identity.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_reader.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_runtime.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_service.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_trace.cpp"
+          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_wgi.cpp"
+        )
+        sdl_sources(${xinput_paddle_sources})
+        set_source_files_properties(${xinput_paddle_sources} PROPERTIES
+          SKIP_PRECOMPILE_HEADERS ON
+          COMPILE_OPTIONS "/std:c++20;/EHsc;/permissive-"
+        )
+        set_property(SOURCE "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_reader.cpp"
+          APPEND PROPERTY COMPILE_OPTIONS "/volatile:ms")
+        sdl_link_dependency(xinput_paddles LIBS WindowsApp bcrypt cfgmgr32 ole32 advapi32)
+      endif()
     endif()
     if(HAVE_WINDOWS_GAMING_INPUT_H)
       set(SDL_JOYSTICK_WGI 1)

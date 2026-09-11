@@ -33,6 +33,7 @@
  * let it return 0 events. */
 
 #include "../SDL_sysjoystick.h"
+#include "SDL_xinput_paddle_c.h"
 #include "../../thread/SDL_systhread.h"
 #include "../../core/windows/SDL_windows.h"
 #include "../../core/windows/SDL_hid.h"
@@ -426,6 +427,9 @@ void WINDOWS_JoystickDetect(void)
 #endif
 #endif
 
+#ifdef SDL_JOYSTICK_XINPUT_PADDLES
+        SDL_XINPUT_PaddleRemoved(pCurList->nInstanceID);
+#endif
         SDL_PrivateJoystickRemoved(pCurList->nInstanceID);
 
         pListNext = pCurList->pNext;
