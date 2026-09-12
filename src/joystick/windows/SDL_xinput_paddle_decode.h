@@ -25,6 +25,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Normal GIP payload sizes accepted by the decoder and WGI readiness check.
+ * The standard gamepad payload is 14 bytes. Elite firmware adds the known
+ * extensions handled in SDL_hidapi_xboxone.c and xone's gamepad driver.
+ */
+static inline int SDL_XInputPaddleNormalSizeValid(size_t size)
+{
+    return size == 14 || size == 29 || size == 34 || size == 46 || size == 47;
+}
+
 /* Private payload decoder. There are no device, runtime, or output calls.
  * The caller owns one state per controller generation and serializes access.
  * Payload storage must not overlap state. No payload pointer is retained.

@@ -514,6 +514,21 @@ void NativeImplicitResumeOrder() {
     CHECK(sends==1&&Result(s,token,1003).status==Status::Success);
 }
 
+void KnownNormalShapes() {
+    for (UINT32 size : {14u, 29u, 34u, 46u, 47u}) {
+        State s; Counts counts; Attachment a(s,counts,11,false);
+        std::array<BYTE,47> bytes{};
+        Resume(a.inner,100);
+        CHECK(Message(a.inner,101,custom::GipMessageClass_LowLatency,0,1,size,bytes.data())==S_OK);
+        CHECK(Input(s,11).Ready());
+        auto token=Submit(s,11,7,102); CHECK(token);
+        auto job=s.Claim(103); CHECK(job.token==token);
+        unsigned sends=0;
+        Succeed(s,job,104,sends);
+        CHECK(sends==1&&Result(s,token,105).status==Status::Success);
+    }
+}
+
 void ColdStartAndShapes() {
     State s; Counts counts; Attachment cold(s,counts,11,false),peer(s,counts,22);
     std::array<BYTE,47> bytes{};
@@ -521,7 +536,7 @@ void ColdStartAndShapes() {
     CHECK(Message(cold.inner,10,custom::GipMessageClass_Command,0,1,46,bytes.data())==S_OK);
     CHECK(Message(cold.inner,11,custom::GipMessageClass_LowLatency,0x20,1,46,bytes.data())==S_OK);
     CHECK(Message(cold.inner,12,custom::GipMessageClass_LowLatency,0,1,45,bytes.data())==S_OK);
-    CHECK(Message(cold.inner,13,custom::GipMessageClass_LowLatency,0,1,47,bytes.data())==S_OK);
+    CHECK(Message(cold.inner,13,custom::GipMessageClass_LowLatency,0,1,13,bytes.data())==S_OK);
     CHECK(Message(cold.inner,14,custom::GipMessageClass_LowLatency,0,1,46,nullptr)==E_POINTER);
     CHECK(Message(cold.inner,15,custom::GipMessageClass_Command,12,1,17,bytes.data())==S_OK);
     ComPtr<custom::IGipGameControllerInputSink> sink;
@@ -859,6 +874,7 @@ void TraceOverflowAndDisabledReadiness() {
 int main() {
     try {
         Identifiers(); CommandsAndTimeout(); QueuesAndExhaustion(); LateCatalogAndCrossRemoval();
+        KnownNormalShapes();
         OldCleanupAndNewPending(); AggregationAndLimits(); FactoryMetadata(); ApiAndContention();
         CapturedReadinessAndRearm(); NativeImplicitResumeOrder(); ColdStartAndShapes(); SuspendBeforeDispatch();
         ConcurrentRetirement(); ConcurrentRetirement(true); ConcurrentEpochsAndWake();
