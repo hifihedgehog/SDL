@@ -246,6 +246,29 @@ Fake Ble()
     return f;
 }
 
+Fake Radio(unsigned host = 3, unsigned product = 0x0b00, unsigned receiver = 0x02fe,
+           std::uint64_t native = NativeA)
+{
+    auto f = Usb();
+    wchar_t text[128]{};
+    swprintf_s(text, L"HID\\VID_045E&PID_%04X&IG_00\\RADIO_%016llX", product, static_cast<unsigned long long>(native));
+    f.interface = String(text);
+    f.nodes[1][Instance] = f.interface;
+    swprintf_s(text, L"HID\\VID_045E&PID_%04X&IG_00", product);
+    f.nodes[1][Hardware] = List({text});
+    swprintf_s(text, L"USB\\VID_045E&PID_%04X&IG_00\\%02X&00&%016llX", product, host, static_cast<unsigned long long>(native));
+    f.nodes[2][Instance] = String(text);
+    swprintf_s(text, L"USB\\VID_045E&PID_%04X&IG_00", product);
+    f.nodes[2][Hardware] = List({text, L"USB\\VID_045E&PID_02FF&IG_00"});
+    swprintf_s(text, L"USB\\VID_045E&PID_%04X\\RECEIVER_A", receiver);
+    f.nodes[3][Instance] = String(text);
+    swprintf_s(text, L"USB\\VID_045E&PID_%04X", receiver);
+    f.nodes[3][Hardware] = List({text});
+    f.nodes[3][Service] = String(L"mt7612US");
+    f.nodes[3][Container] = Guid(ContainerB);
+    return f;
+}
+
 PhysicalIdentity Run(Fake &f, bool expected, std::uint32_t index = 0, std::uint32_t count = 1,
                      const wchar_t *path = Path, const char *expectedError = nullptr)
 {
@@ -319,7 +342,7 @@ void UsbIdentity()
 void NativeGrammar()
 {
     const std::wstring prefix = L"USB\\VID_045E&PID_02FF&IG_00\\";
-    const wchar_t *bad[] = {L"00&00&0000000000000000", L"01&00&123456789ABCDEF0", L"00&01&123456789ABCDEF0",
+    const wchar_t *bad[] = {L"00&00&0000000000000000", L"08&00&123456789ABCDEF0", L"00&01&123456789ABCDEF0",
                            L"AA&BB&123456789ABCDEF0", L"0&00&123456789ABCDEF0", L"000&00&123456789ABCDEF0",
                            L"00&0&123456789ABCDEF0", L"00&00&123456789ABCDEF", L"00&00&123456789ABCDEF01",
                            L"00&00&+123456789ABCDEF", L"00&00&-123456789ABCDEF", L"00&00&0x3456789ABCDEF0",
@@ -747,11 +770,61 @@ void Equality()
     Check(!ResolvePaddleIdentity(nullptr, 0, 1, out, error), "The public wrapper rejects a null path without PnP reads");
 }
 
+void WirelessHardware()
+{
+    for (unsigned receiver : {0x02e6u, 0x02feu, 0x02f9u, 0x091eu}) {
+        for (unsigned host = 0; host < 8; ++host) {
+            auto f = Radio(host, 0x0b00, receiver);
+            const auto value = Run(f, true);
+            Check(value.transport == PaddleTransport::WirelessGip && value.nativeId == NativeA &&
+                  value.vendor == 0x045e && value.product == 0x0b00,
+                  "Wireless identity comes from the controller, not its receiver");
+            Check(IsEqualGUID(value.container, ContainerA), "Wireless identity keeps the controller container");
+        }
+    }
+    for (unsigned host = 0; host < 8; ++host) {
+        auto f = Usb();
+        wchar_t text[80]{};
+        swprintf_s(text, L"USB\\VID_045E&PID_02FF&IG_00\\%02X&00&%016llX", host, static_cast<unsigned long long>(NativeA));
+        f.nodes[2][Instance] = String(text);
+        Check(Run(f, true).transport == PaddleTransport::UsbGip, "A nonzero host index can be wired");
+    }
+    auto f = Usb();
+    f.nodes[2][Instance] = String(L"USB\\VID_045E&PID_0B00&IG_00\\07&00&123456789ABCDEF0");
+    Check(Run(f, true).transport == PaddleTransport::UsbGip, "Wired metadata can expose the actual controller ID");
+    f.nodes[2][Instance] = String(L"USB\\VID_045E&PID_02E3&IG_00\\07&00&123456789ABCDEF0");
+    Reject(f, "disagrees");
+    for (unsigned host : {8u, 15u, 39u, 255u}) { f = Radio(host); Reject(f, "native GIP ancestor"); }
+    f = Radio(0, 0x02ff); Reject(f, "wireless controller identity");
+    f = Radio(0, 0x0b00, 0xffff); Reject(f, "disagrees");
+    f = Radio(); f.nodes[2][Container] = Guid(ContainerB); Reject(f, "crosses device containers");
+    f = Radio(); f.nodes[3].erase(Filters); Reject(f, "XboxGIP driver binding");
+    f = Radio(); f.nodes[3][Hardware] = List({L"ROOT\\HIDMAESTRO_UDE"}); Reject(f, "excluded");
+    f = Radio(); f.nodes[2][Instance] = String(L"USB\\VID_045E&PID_0B00&IG_00\\03&01&123456789ABCDEF0");
+    Reject(f, "native GIP ancestor");
+
+    auto first = Radio(0);
+    auto second = Radio(1, 0x0b00, 0x02fe, NativeA + 1);
+    const auto a = Run(first, true), b = Run(second, true);
+    Check(!SamePhysicalIdentity(a, b), "Two same-product controllers behind one receiver stay distinct");
+    auto standard = Radio(2, 0x0b13, 0x02fe, NativeA + 2);
+    Check(Run(standard, true).product == 0x0b13, "A standard controller keeps its own product ID");
+    auto replacement = Radio(0, 0x0b00, 0x02fe, NativeA + 3);
+    Check(!SamePhysicalIdentity(a, Run(replacement, true)), "Reusing a host slot does not reuse controller identity");
+    auto moved = Radio(7, 0x0b00, 0x02e6, NativeA);
+    moved.interface = String(L"HID\\VID_045E&PID_0B00&IG_00\\NEW_INSTANCE");
+    moved.nodes[1][Instance] = moved.interface;
+    Check(!SamePhysicalIdentity(a, Run(moved, true)), "A new HID attachment retires the old source");
+    auto wired = Usb();
+    Check(!SamePhysicalIdentity(a, Run(wired, true)), "Wired and wireless attachments have separate lifetimes");
+}
+
 } // namespace
 
 int main()
 {
     const std::pair<const char *, void (*)()> groups[] = {
+        {"wireless hardware", WirelessHardware},
         {"USB identity", UsbIdentity}, {"native grammar", NativeGrammar}, {"containers", Containers},
         {"driver binding", DriverBinding}, {"property bounds", PropertyBounds},
         {"exclusion and channels", ExclusionAndChannels}, {"ancestry bounds", AncestryBounds},

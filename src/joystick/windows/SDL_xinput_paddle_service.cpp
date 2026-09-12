@@ -19,6 +19,7 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 #include "SDL_xinput_paddle_service.h"
+#include "SDL_xinput_paddle_identity.h"
 #include "SDL_xinput_paddle_nt.h"
 
 #include <bcrypt.h>
@@ -307,7 +308,7 @@ bool CaptureIdentity(void* address, std::size_t logical, Identity& output)
 }
 bool Eligible(const DeviceInfo& info)
 {
-    return info.vendor == 0x045E && (info.product == 0x0B00 || info.product == 0x0B05 || info.product == 0x02E3 || info.product == 0x0B22);
+    return IsGipPaddleHardware(info.vendor, info.product);
 }
 bool Budget(std::size_t size, std::size_t total, std::size_t replaced, std::size_t count, bool replacement)
 {
