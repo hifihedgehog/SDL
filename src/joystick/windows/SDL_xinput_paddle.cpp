@@ -70,6 +70,19 @@ constexpr size_t PathLimit = 1024;
 constexpr std::uint64_t IdentityPeriodMs = 1000;
 constexpr std::uint64_t AcquisitionTimeoutMs = 10000;
 constexpr std::uint64_t EnableAdmissionRetryMs = 50;
+// The driver broadcasts a quiesce to every controller when the foreground
+// process changes, and the Elite then stops its separate 0x0C report until the
+// extra-data command is sent again. An elevated WGI client receives no suspend
+// or resume for that switch, so re-arming cannot depend on input epochs.
+// Report pairing is the ground truth: after a completed command the service
+// delivers each 0x0C right after its 0x20 with the same source timestamp.
+constexpr std::uint64_t PairingWindowMs = 50;
+constexpr std::uint64_t ResendIntervalMs = 250;
+// The quiesce is sent synchronously inside the driver's focus callback. A
+// re-send that races it can land first and be undone, so wait briefly after
+// observing the change. The pairing detector remains the fallback either way.
+constexpr std::uint64_t FocusSettleMs = 100;
+enum RearmReason : std::uint8_t { RearmNone = 0, RearmPairing = 1, RearmFocus = 2 };
 
 bool Eligible(std::uint16_t vendor, std::uint16_t product) noexcept
 {
@@ -184,10 +197,12 @@ public:
 struct Diagnostics {
     std::uint64_t normal = 0, separate = 0, gatt = 0;
     std::uint64_t malformed = 0, gaps = 0, overflows = 0, states = 0;
+    std::uint64_t attempt = 0, resends = 0, pairingLosses = 0, focusChanges = 0;
     std::uint32_t enableStatus = 0;
     GipInputState input;
     HRESULT commandError = S_OK;
     bool inputValid = false, commandDispatched = false, admissionExpired = false;
+    bool pairingArmed = false;
     bool failed = false, dataAvailable = false;
     char reason[160]{};
 };
@@ -445,6 +460,11 @@ struct DataRoute {
     std::uint64_t lastReading = 0;
     bool candidate46 = false, haveState = false;
     std::uint8_t latest = 0;
+    // Report pairing. Armed once a command has completed. A 0x20 that no 0x0C
+    // follows before the next 0x20, or within PairingWindowMs of consumption,
+    // means the controller stopped its unmapped-state reporting.
+    bool pairingArmed = false, unpairedNormal = false, pairingLost = false, haveSeparateTime = false;
+    std::uint64_t unpairedSinceMs = 0, lastSeparateTime = 0;
 
     void Start(PaddleTransport transport, std::uint64_t token, std::uint64_t generation = 0) noexcept
     {
@@ -454,15 +474,60 @@ struct DataRoute {
         SDL_XInputPaddleReset(&decoder, transport == PaddleTransport::Bluetooth ?
             SDL_XINPUT_PADDLE_VENDOR_GATT : SDL_XINPUT_PADDLE_SERVICE_GIP, token);
     }
-    void Gap() noexcept
+    // Discard cached values but preserve the learned split-report mode.
+    void Forget() noexcept
     {
-        ++diagnostics.gaps;
         const auto separate = decoder.have_separate;
         SDL_XInputPaddleReset(&decoder, decoder.transport, sourceToken);
         decoder.have_separate = separate;
         latest = 0;
         haveState = false;
         diagnostics.dataAvailable = false;
+    }
+    void Gap() noexcept
+    {
+        ++diagnostics.gaps;
+        Forget();
+        // Lost history can hide the 0x0C that paired a pending 0x20.
+        unpairedNormal = false;
+    }
+    void ArmPairing() noexcept
+    {
+        pairingArmed = diagnostics.pairingArmed = true;
+        unpairedNormal = pairingLost = false;
+    }
+    void DisarmPairing() noexcept
+    {
+        pairingArmed = diagnostics.pairingArmed = false;
+        unpairedNormal = pairingLost = false;
+    }
+    // The separate paddle state is unknown after the mode is lost. Release it
+    // so a paddle held across a focus switch cannot stick until the next 0x0C.
+    void LoseMode() noexcept
+    {
+        Forget();
+        DisarmPairing();
+    }
+    void ObservePairing(std::uint32_t id, size_t size, std::uint64_t sourceTime, std::uint64_t ms) noexcept
+    {
+        if (decoder.transport != SDL_XINPUT_PADDLE_SERVICE_GIP) return;
+        if (id == 0x0C && size == 17) {
+            unpairedNormal = false;
+            lastSeparateTime = sourceTime;
+            haveSeparateTime = true;
+            return;
+        }
+        if (id != 0x20 || !SDL_XInputPaddleNormalSizeValid(size) || !pairingArmed) return;
+        if (unpairedNormal) pairingLost = true;
+        // The service pairs both reports with one source timestamp. A 0x0C that
+        // was consumed first with this same timestamp already pairs this 0x20.
+        if (haveSeparateTime && lastSeparateTime == sourceTime) { unpairedNormal = false; return; }
+        unpairedNormal = true;
+        unpairedSinceMs = ms;
+    }
+    void CheckPairing(std::uint64_t ms) noexcept
+    {
+        if (pairingArmed && unpairedNormal && ms >= unpairedSinceMs + PairingWindowMs) pairingLost = true;
     }
     bool Decode(std::uint32_t id, const std::uint8_t *bytes, size_t size) noexcept
     {
@@ -484,7 +549,7 @@ struct DataRoute {
         return true;
     }
     void Service(Shared &shared, size_t index, const Attachment &attachment,
-                 const std::vector<ServicePacket> &packets, std::uint64_t now) noexcept
+                 const std::vector<ServicePacket> &packets, std::uint64_t now, std::uint64_t ms = 0) noexcept
     {
         std::uint64_t newest = 0, oldest = UINT64_MAX;
         for (const auto &packet : packets) {
@@ -536,6 +601,7 @@ struct DataRoute {
             if (!packet.reading.generation || packet.reading.generation <= lastReading) continue;
             lastReading = packet.reading.generation;
             const bool ready = Decode(packet.reading.reportId, packet.reading.bytes.data(), packet.reading.bytes.size());
+            if (!packet.bootstrap) ObservePairing(packet.reading.reportId, packet.reading.bytes.size(), packet.reading.timestamp, ms);
             shared.CaptureDecoded(index, attachment.token, traceId, lastResult, timestamp);
             if (ready) {
                 if (packet.bootstrap) { bootstrapState = true; bootstrapTrace = traceId; }
@@ -592,10 +658,15 @@ template<class Platform> class Owner {
         std::uint64_t nextIdentity = 0, deadline = 0, enableToken = 0;
         std::uint64_t enableProvider = 0, enableEpoch = 0, nextEnableAdmission = 0;
         std::uint64_t admissionRemaining = AcquisitionTimeoutMs, lastAdmissionCheck = 0;
+        // Attempts number the commands of one (provider, epoch) pair from 1.
+        // nextResend paces dispatches. rearmAt schedules the next attempt.
+        std::uint64_t attempt = 0, nextResend = 0, rearmAt = 0;
         bool selected = false, enableAttempted = false, admissionEligible = false;
+        bool dispatchedInEpoch = false;
     };
     Shared &shared_;
     std::array<Route, RouteLimit> routes_{};
+    std::uint32_t foreground_ = 0;
     // Retained through idle, disconnect, and SDL reinitialization. A second
     // Client object would replace this PID's service connection.
     std::unique_ptr<Service> client_;
@@ -631,12 +702,57 @@ template<class Platform> class Owner {
         route.nextIdentity = ms + IdentityPeriodMs;
         return Active(i);
     }
+    bool CommandCapable(const Route &route) const noexcept
+    {
+        // xone publishes Series 1 paddles from ordinary reports. The 07 00
+        // extra-data command is a Series 2 initializer in xone and xpad.
+        return route.attachment && IsGipTransport(route.attachment->physical.transport) &&
+               route.attachment->physical.product != USB_PRODUCT_XBOX_ONE_ELITE_SERIES_1;
+    }
+    void ResetAttempt(Route &route, std::uint64_t attempt) noexcept
+    {
+        auto &d = route.data.diagnostics;
+        route.attempt = attempt;
+        route.enableToken = 0;
+        route.enableAttempted = route.admissionEligible = false;
+        route.admissionRemaining = AcquisitionTimeoutMs;
+        route.nextEnableAdmission = 0;
+        d.attempt = attempt;
+        d.enableStatus = 0; d.commandError = S_OK;
+        d.commandDispatched = d.admissionExpired = false;
+    }
+    void TraceRearm(const Route &route, trace::Kind kind, std::uint8_t reason) noexcept
+    {
+        if (!route.attachment || !route.data.sourceToken) return;
+        trace::Record record;
+        record.kind = kind; record.nativeId = route.attachment->physical.nativeId;
+        record.attachment = route.data.sourceToken; record.view = route.data.view;
+        record.instance = route.attachment->instanceId;
+        record.provider = route.enableProvider; record.epoch = route.enableEpoch;
+        record.sequence = route.attempt; record.status = reason;
+        trace::Push(record);
+    }
+    // Loss of the separate report, observed or expected. Release the published
+    // paddle state now and schedule another command for this same epoch.
+    void ScheduleRearm(size_t i, std::uint8_t reason, std::uint64_t ms, std::uint64_t now)
+    {
+        auto &route = routes_[i];
+        if (!Active(i) || !CommandCapable(route)) return;
+        auto &d = route.data.diagnostics;
+        if (reason == RearmPairing) ++d.pairingLosses;
+        TraceRearm(route, reason == RearmPairing ? trace::Kind::PairingLost : trace::Kind::FocusChanged, reason);
+        // Before any dispatched command, the pending first attempt covers it.
+        if (!route.dispatchedInEpoch) { route.data.DisarmPairing(); return; }
+        route.data.LoseMode();
+        shared_.Publish(i, route.attachment->token, {now, 0, true});
+        // Zero means no re-arm is scheduled, so a tick-zero request rounds up.
+        const auto at = std::max<std::uint64_t>(ms + (reason == RearmFocus ? FocusSettleMs : 0), 1);
+        route.rearmAt = route.rearmAt ? std::min(route.rearmAt, at) : at;
+    }
     void ObserveEnable(size_t i, std::uint64_t ms, std::uint64_t now)
     {
         auto &route = routes_[i];
-        // xone publishes Series 1 paddles from ordinary reports. The 07 00
-        // extra-data command is a Series 2 initializer in xone and xpad.
-        if (route.attachment->physical.product == USB_PRODUCT_XBOX_ONE_ELITE_SERIES_1) return;
+        if (!CommandCapable(route)) return;
         auto &d = route.data.diagnostics;
         GipInputState input;
         d.inputValid = Platform::InputState(route.attachment->physical.nativeId, input);
@@ -650,12 +766,10 @@ template<class Platform> class Owner {
             (input.provider != route.enableProvider || input.epoch != route.enableEpoch)) {
             route.enableProvider = input.provider;
             route.enableEpoch = input.epoch;
-            route.enableToken = 0;
-            route.enableAttempted = route.admissionEligible = false;
-            route.admissionRemaining = AcquisitionTimeoutMs;
-            route.nextEnableAdmission = 0;
-            d.enableStatus = 0; d.commandError = S_OK;
-            d.commandDispatched = d.admissionExpired = false;
+            route.dispatchedInEpoch = false;
+            route.rearmAt = 0;
+            route.data.DisarmPairing();
+            ResetAttempt(route, 1);
         }
         if (route.enableToken) {
             GipEnableResult result;
@@ -666,6 +780,12 @@ template<class Platform> class Owner {
                     if (result.status != GipEnableStatus::Pending) {
                         d.enableStatus = 3 + static_cast<std::uint32_t>(result.status);
                         route.enableToken = 0;
+                        if (result.dispatched) {
+                            // One native dispatch per ResendIntervalMs at most.
+                            route.dispatchedInEpoch = true;
+                            route.nextResend = ms + ResendIntervalMs;
+                            if (result.status == GipEnableStatus::Success) route.data.ArmPairing();
+                        }
                         // Queue expiry/exhaustion before dispatch did not issue
                         // a native command. Retain the budget and pacing when
                         // reopening admission for this same input epoch.
@@ -682,7 +802,22 @@ template<class Platform> class Owner {
                 }
             }
         }
-        const bool eligible = input.Ready() && !input.busy &&
+        route.data.CheckPairing(ms);
+        if (route.data.pairingLost) ScheduleRearm(i, RearmPairing, ms, now);
+        if (!Active(i)) return;
+        // One command in flight. A scheduled re-send starts the next attempt
+        // once the previous call returned and the pacing interval elapsed.
+        if (route.rearmAt && !route.enableToken && ms >= route.rearmAt && ms >= route.nextResend) {
+            route.rearmAt = 0;
+            ++d.resends;
+            ResetAttempt(route, route.attempt + 1);
+            TraceRearm(route, trace::Kind::CommandRearm, RearmNone);
+        }
+        // A re-send is admitted while this provider is suspended: a background
+        // client's WGI input stops on the same focus switch that quiesced the
+        // controller, and the command still completes from the background.
+        const bool ready = route.attempt > 1 ? input.ResendReady() : input.Ready();
+        const bool eligible = ready && !input.busy &&
             input.provider == route.enableProvider && input.epoch == route.enableEpoch;
         if (!eligible || route.enableAttempted || d.admissionExpired) {
             route.admissionEligible = false;
@@ -712,7 +847,7 @@ template<class Platform> class Owner {
         if (!Active(i)) return;
         // WGI checks the expected pair again at admission and dispatch.
         route.enableToken = Platform::Submit(route.attachment->physical.nativeId,
-            route.data.sourceToken, route.enableProvider, route.enableEpoch);
+            route.data.sourceToken, route.enableProvider, route.enableEpoch, route.attempt);
         route.enableAttempted = (route.enableToken != 0);
         d.enableStatus = route.enableToken ? 1 : 2;
         if (route.enableAttempted) {
@@ -809,6 +944,12 @@ template<class Platform> class Owner {
             return;
         }
         now = Platform::PublicationQpc(now);
+        // The driver switches on the foreground process, not the window. A
+        // change from one known process to another is the earliest signal.
+        // An unknown foreground (none, or a transition) does not count.
+        const auto foreground = Platform::ForegroundProcess();
+        const bool focusChanged = foreground && foreground_ && foreground != foreground_;
+        if (foreground) foreground_ = foreground;
         const auto devices = client_->Devices();
         for (size_t i = 0; i < RouteLimit; ++i) {
             auto &route = routes_[i];
@@ -824,7 +965,7 @@ template<class Platform> class Owner {
                     Fail(i, "Service view changed or became ambiguous.", now);
                     continue;
                 }
-                route.data.Service(shared_, i, *route.attachment, packets, now);
+                route.data.Service(shared_, i, *route.attachment, packets, now, ms);
             } else {
                 if (matches > 1) { Fail(i, "Service native identity is ambiguous.", now); continue; }
                 if (!match) {
@@ -853,6 +994,10 @@ template<class Platform> class Owner {
                 route.data.Service(shared_, i, *route.attachment, bootstrap, Platform::PublicationQpc(now));
             }
             if (!Active(i)) continue;
+            if (focusChanged && CommandCapable(route)) {
+                ++route.data.diagnostics.focusChanges;
+                ScheduleRearm(i, RearmFocus, ms, now);
+            }
             // Passive observation begins as soon as exact service selection has
             // succeeded. Service traffic is not the WGI readiness predicate.
             ObserveEnable(i, ms, now);
@@ -912,9 +1057,17 @@ struct NativePlatform {
     static bool ValidateServer(std::uint32_t pid, std::string &error) { return PaddleValidateServer(pid, error); }
     static std::uint64_t PublicationQpc(std::uint64_t) noexcept { return QpcNow(); }
     static bool InputState(std::uint64_t native, GipInputState &state) noexcept { return QueryGipInputState(native, state); }
-    static std::uint64_t Submit(std::uint64_t native, std::uint64_t token, std::uint64_t provider, std::uint64_t epoch) noexcept
-    { return SubmitGipEnable(native, token, provider, epoch); }
+    static std::uint64_t Submit(std::uint64_t native, std::uint64_t token, std::uint64_t provider,
+                                std::uint64_t epoch, std::uint64_t attempt) noexcept
+    { return SubmitGipEnable(native, token, provider, epoch, attempt); }
     static bool Poll(std::uint64_t token, GipEnableResult &result) noexcept { return PollGipEnable(token, result); }
+    // A global query with no window message. Zero means no foreground window.
+    static std::uint32_t ForegroundProcess() noexcept
+    {
+        DWORD pid = 0;
+        if (const HWND window = GetForegroundWindow()) GetWindowThreadProcessId(window, &pid);
+        return pid;
+    }
     static void RetireEnable(std::uint64_t token) noexcept { RetireGipEnable(token); }
     static unsigned PumpRetired(GattPaddleError &error) noexcept { return GattPaddleClient::PumpRetired(error); }
 };
@@ -1063,14 +1216,21 @@ void Report(Context &context, const Diagnostics &d, Uint64 now)
     SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.command_error", d.commandError);
     SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.command_dispatched", d.commandDispatched);
     SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.admission_expired", d.admissionExpired);
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.command_attempt", static_cast<Sint64>(d.attempt));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.resends", static_cast<Sint64>(d.resends));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.pairing_losses", static_cast<Sint64>(d.pairingLosses));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.focus_changes", static_cast<Sint64>(d.focusChanges));
+    SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.pairing_armed", d.pairingArmed);
     SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.data_available", d.dataAvailable && !d.failed);
     if (d.failed) SDL_SetStringProperty(props, "SDL.joystick.xinput.paddle.error", d.reason);
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
-        "XInput paddles instance=%u received20=%llu received0c=%llu receivedGatt=%llu states=%llu gaps=%llu malformed=%llu enable=%u",
+        "XInput paddles instance=%u received20=%llu received0c=%llu receivedGatt=%llu states=%llu gaps=%llu malformed=%llu enable=%u attempt=%llu resends=%llu pairing_losses=%llu focus_changes=%llu pairing_armed=%d",
         context.attachment->instanceId, static_cast<unsigned long long>(d.normal),
         static_cast<unsigned long long>(d.separate), static_cast<unsigned long long>(d.gatt),
         static_cast<unsigned long long>(d.states), static_cast<unsigned long long>(d.gaps + d.overflows),
-        static_cast<unsigned long long>(d.malformed), d.enableStatus);
+        static_cast<unsigned long long>(d.malformed), d.enableStatus, static_cast<unsigned long long>(d.attempt),
+        static_cast<unsigned long long>(d.resends), static_cast<unsigned long long>(d.pairingLosses),
+        static_cast<unsigned long long>(d.focusChanges), d.pairingArmed);
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
         "XInput paddle readiness instance=%u valid=%d provider=%llu epoch=%llu resumed=%d normal=%d split=%d busy=%d resume_time=%llu normal_time=%llu split_time=%llu wgi_error=%08x command_error=%08x dispatched=%d admission_expired=%d",
         context.attachment->instanceId, d.inputValid, static_cast<unsigned long long>(d.input.provider), static_cast<unsigned long long>(d.input.epoch),

@@ -29,7 +29,8 @@ namespace sdl_paddles::trace {
 
 enum class Kind : std::uint8_t {
     WgiResume, WgiSuspend, WgiMessage, WgiKey, ServicePacket, Decoded, Queued, Drained,
-    CommandQueued, CommandDispatch, CommandComplete, Attachment, Retired
+    CommandQueued, CommandDispatch, CommandComplete, Attachment, Retired,
+    PairingLost, FocusChanged, CommandRearm
 };
 
 struct Record {
