@@ -131,6 +131,9 @@ const char *Name(Kind kind) noexcept
     case Kind::CommandComplete: return "command-complete";
     case Kind::Attachment: return "attachment";
     case Kind::Retired: return "retired";
+    case Kind::PairingLost: return "pairing-lost";
+    case Kind::FocusChanged: return "focus-changed";
+    case Kind::CommandRearm: return "command-rearm";
     }
     return "unknown";
 }
