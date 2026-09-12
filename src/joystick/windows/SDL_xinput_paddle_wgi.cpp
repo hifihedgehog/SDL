@@ -93,13 +93,18 @@ struct CatalogCell {
     unsigned borrowers = 0;
     bool occupied = false, reserved = false, innerAlive = false;
     bool active = false, closing = false, releasing = false;
-    bool lifecycleSeen = false, resumed = false, normalSeen = false, splitSeen = false;
+    bool lifecycleSeen = false, resumed = false, normalSeen = false, splitSeen = false, everReady = false;
+    // Attempt 1 needs this provider's own normal frame in the current epoch.
+    // A re-send needs the provider to have been ready once and its epoch kept.
+    bool Admits(std::uint64_t attempt) const noexcept {
+        return attempt == 1 ? resumed && normalSeen : everReady;
+    }
     custom::IGipGameControllerProvider* provider = nullptr; // Owned, released off the lock.
     IUnknown* identity = nullptr; // Owned controlling identity, not the inner.
 };
 struct Request {
     std::uint64_t token = 0, nativeId = 0, generation = 0, serial = 0, submitted = 0;
-    std::uint64_t epoch = 0;
+    std::uint64_t epoch = 0, attempt = 0;
     GipEnableResult result{Status::Pending, E_PENDING};
     bool working = false;
     bool dispatched = false;
@@ -133,7 +138,7 @@ struct State {
     void InvalidateInput(CatalogCell& cell) noexcept {
         for (auto& r : requests) {
             if (r.token && r.serial == cell.serial &&
-                (!cell.resumed || r.epoch != cell.inputEpoch)) r.result = {Status::Retired, RetiredError};
+                (r.epoch != cell.inputEpoch || !cell.Admits(r.attempt))) r.result = {Status::Retired, RetiredError};
         }
     }
     void Input(Ticket ticket, InputKind kind, UINT64 timestamp, BYTE messageClass = 0,
@@ -173,6 +178,8 @@ struct State {
                 if (c->inputEpoch == UINT64_MAX) c->resumed = false;
                 else ++c->inputEpoch;
                 c->resumeTime = timestamp;
+                // Re-send permission belongs to one epoch. A suspend keeps it.
+                c->everReady = false;
             }
             InvalidateInput(*c);
             record.epoch = c->inputEpoch;
@@ -193,6 +200,7 @@ struct State {
             if (c->resumed) {
                 if (normal) {
                     c->normalSeen = true;
+                    c->everReady = true;
                     c->normalTime = (std::max)(c->normalTime, timestamp);
                 }
                 if (messageClass == custom::GipMessageClass_Command && id == 0x0c && size == 17) {
@@ -218,6 +226,7 @@ struct State {
             result.resumed = c.resumed;
             result.normalSeen = c.normalSeen;
             result.splitSeen = c.splitSeen;
+            result.everReady = c.everReady;
             result.busy = c.borrowers != 0;
         } else if (matches > 1) result.error = HRESULT_FROM_WIN32(ERROR_DUP_NAME);
         else if (registrationDone && FAILED(registrationError)) result.error = registrationError;
@@ -330,14 +339,15 @@ struct State {
         return count;
     }
     std::uint64_t Submit(std::uint64_t id, std::uint64_t generation, std::uint64_t providerEpoch,
-                         std::uint64_t inputEpoch, std::uint64_t now, bool exhausted) noexcept {
-        if (!id || !generation || !providerEpoch || !inputEpoch || !TryAcquireSRWLockExclusive(&lock)) return 0;
+                         std::uint64_t inputEpoch, std::uint64_t attempt, std::uint64_t now, bool exhausted) noexcept {
+        if (!id || !generation || !providerEpoch || !inputEpoch || !attempt || !TryAcquireSRWLockExclusive(&lock)) return 0;
         Expire(now);
         unsigned queued = 0;
         Request* available = nullptr;
         Request* retry = nullptr;
         for (auto& r : requests) {
-            if (r.token && r.nativeId == id && r.generation == generation && r.serial == providerEpoch && r.epoch == inputEpoch) {
+            if (r.token && r.nativeId == id && r.generation == generation && r.serial == providerEpoch &&
+                r.epoch == inputEpoch && r.attempt == attempt) {
                 if (!r.working && !r.dispatched &&
                     (r.result.status == Status::TimedOut || r.result.status == Status::Exhausted)) {
                     retry = &r; // No native attempt occurred in this input epoch.
@@ -355,7 +365,7 @@ struct State {
         const unsigned matches = Matches(id, ticket);
         const auto* current = matches == 1 ? Cell(ticket) : nullptr;
         if (!current || current->serial != providerEpoch || current->inputEpoch != inputEpoch ||
-            !current->resumed || !current->normalSeen || current->borrowers) {
+            !current->Admits(attempt) || current->borrowers) {
             ReleaseSRWLockExclusive(&lock);
             return 0;
         }
@@ -364,6 +374,7 @@ struct State {
         available->nativeId = id;
         available->generation = generation;
         available->epoch = inputEpoch;
+        available->attempt = attempt;
         available->serial = providerEpoch;
         available->submitted = now;
         available->response.fill(0xff);
@@ -373,7 +384,7 @@ struct State {
         trace::Record record;
         record.kind = trace::Kind::CommandQueued;
         record.nativeId = id; record.attachment = generation; record.provider = providerEpoch;
-        record.epoch = inputEpoch; record.command = token;
+        record.epoch = inputEpoch; record.command = token; record.sequence = attempt;
         record.messageClass = custom::GipMessageClass_StandardLatency; record.report = 0x0d;
         trace::Push(record);
         ReleaseSRWLockExclusive(&lock);
@@ -385,7 +396,8 @@ struct State {
         Expire(now);
         bool found = false;
         for (auto& r : requests) if (r.token == token) {
-            result = r.result; result.provider = r.serial; result.epoch = r.epoch; result.dispatched = r.dispatched;
+            result = r.result; result.provider = r.serial; result.epoch = r.epoch; result.attempt = r.attempt;
+            result.dispatched = r.dispatched;
             found = true; break;
         }
         ReleaseSRWLockExclusive(&lock);
@@ -409,7 +421,7 @@ struct State {
             if (matches > 1) { r.result = {Status::Failed,HRESULT_FROM_WIN32(ERROR_DUP_NAME)}; continue; }
             if (!matches) continue;
             const auto& c = catalog[t.index];
-            if (r.serial != t.serial || r.epoch != c.inputEpoch || !c.resumed || !c.normalSeen) {
+            if (r.serial != t.serial || r.epoch != c.inputEpoch || !c.Admits(r.attempt)) {
                 r.result = {Status::Retired,RetiredError}; continue;
             }
             if (c.borrowers) continue;
@@ -431,14 +443,14 @@ struct State {
         const auto* c = Cell(job.catalog);
         Ticket current;
         const bool allowed = r.token == job.token && r.working && !r.dispatched && r.result.status == Status::Pending &&
-               c && c->active && !c->closing && c->resumed && c->normalSeen && c->inputEpoch == job.epoch &&
+               c && c->active && !c->closing && c->Admits(r.attempt) && c->inputEpoch == job.epoch &&
                Matches(r.nativeId,current) == 1 && current.serial == job.catalog.serial;
         if (allowed) {
             r.dispatched = true;
             trace::Record record;
             record.kind = trace::Kind::CommandDispatch;
             record.nativeId = r.nativeId; record.attachment = r.generation; record.provider = r.serial;
-            record.epoch = r.epoch; record.command = r.token; record.sourceTime = c->normalTime;
+            record.epoch = r.epoch; record.command = r.token; record.sequence = r.attempt; record.sourceTime = c->normalTime;
             record.messageClass = custom::GipMessageClass_StandardLatency; record.report = 0x0d;
             trace::Raw(record, r.request.data(), r.request.size());
         }
@@ -452,15 +464,15 @@ struct State {
         if (r.token == job.token) {
             Ticket current;
             if (r.result.status == Status::Pending) {
-                const bool valid = c && c->active && !c->closing && c->resumed && c->inputEpoch == job.epoch &&
-                    Matches(r.nativeId,current) == 1 && current.serial == job.catalog.serial;
+                const bool valid = c && c->active && !c->closing && (r.attempt == 1 ? c->resumed : c->everReady) &&
+                    c->inputEpoch == job.epoch && Matches(r.nativeId,current) == 1 && current.serial == job.catalog.serial;
                 r.result = valid ? GipEnableResult{SUCCEEDED(hr) ? Status::Success : Status::Failed,hr} : GipEnableResult{Status::Retired,RetiredError};
             }
             r.working = false;
             trace::Record record;
             record.kind = trace::Kind::CommandComplete;
             record.nativeId = r.nativeId; record.attachment = r.generation; record.provider = r.serial;
-            record.epoch = r.epoch; record.command = r.token; record.status = hr;
+            record.epoch = r.epoch; record.command = r.token; record.sequence = r.attempt; record.status = hr;
             record.mask = r.dispatched ? 1 : 0;
             trace::Raw(record, r.response.data(), r.response.size());
         }
@@ -774,12 +786,12 @@ bool QueryGipInputState(std::uint64_t nativeId, GipInputState& state) noexcept
 }
 
 std::uint64_t SubmitGipEnable(std::uint64_t nativeId, std::uint64_t generation,
-                             std::uint64_t provider, std::uint64_t epoch) noexcept
+                             std::uint64_t provider, std::uint64_t epoch, std::uint64_t attempt) noexcept
 {
-    if (!nativeId || !generation) return 0;
+    if (!nativeId || !generation || !attempt) return 0;
     auto* b = GetBroker(true);
     const auto now = GetTickCount64();
-    return b ? b->state.Submit(nativeId,generation,provider,epoch,now,b->Exhausted(now)) : 0;
+    return b ? b->state.Submit(nativeId,generation,provider,epoch,attempt,now,b->Exhausted(now)) : 0;
 }
 
 bool PollGipEnable(std::uint64_t token, GipEnableResult& result) noexcept

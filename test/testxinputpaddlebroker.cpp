@@ -23,7 +23,8 @@ struct Injection {
     unsigned rejectedSubmissions = 0, acceptedSubmissions = 0;
     unsigned observations = 0;
     bool queryInput = true, pollInput = true;
-    std::uint64_t nextRequest = 10000, lastRequest = 0;
+    std::uint64_t nextRequest = 10000, lastRequest = 0, lastAttempt = 0;
+    std::uint32_t foreground = 0;
     std::map<std::uint64_t, GipInputState> input;
     std::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> accepted;
     std::map<std::uint64_t, GipEnableResult> replies;
@@ -127,12 +128,14 @@ struct FakePlatform {
         return injection.queryInput;
     }
     static std::uint64_t Submit(std::uint64_t native, std::uint64_t token,
-                               std::uint64_t provider, std::uint64_t epoch) {
+                               std::uint64_t provider, std::uint64_t epoch, std::uint64_t attempt) {
         ++injection.submits;
         injection.lastSource = token;
+        injection.lastAttempt = attempt;
         if (injection.inSubmit) injection.inSubmit();
         const auto &state = injection.input[native];
-        if (!state.Ready() || state.busy || state.provider != provider || state.epoch != epoch) return 0;
+        const bool ready = attempt > 1 ? state.ResendReady() : state.Ready();
+        if (!attempt || !ready || state.busy || state.provider != provider || state.epoch != epoch) return 0;
         if (injection.rejectedSubmissions) { --injection.rejectedSubmissions; return 0; }
         ++injection.acceptedSubmissions;
         injection.lastRequest = ++injection.nextRequest;
@@ -154,6 +157,7 @@ struct FakePlatform {
         return true;
     }
     static void RetireEnable(std::uint64_t token) noexcept { injection.retired.push_back(token); }
+    static std::uint32_t ForegroundProcess() noexcept { return injection.foreground; }
     static unsigned PumpRetired(GattPaddleError &) noexcept { ++injection.orphanPumps; return injection.orphans; }
 };
 
@@ -191,7 +195,7 @@ struct Fixture {
         state = {};
         state.provider = provider ? provider : a.physical.nativeId;
         state.epoch = epoch;
-        state.resumed = state.normalSeen = true;
+        state.resumed = state.normalSeen = state.everReady = true;
         state.resumeTime = epoch * 100;
         state.normalTime = epoch * 100 + 10;
     }
@@ -770,6 +774,298 @@ void ReadinessRaceAtAdmission()
     CHECK(injection.submits == 2 && injection.acceptedSubmissions == 1);
 }
 
+// The service delivers each 0x0C right after its 0x20 with the same timestamp.
+ServicePacket Paired(const Attachment &a, std::uint64_t generation, std::uint8_t mask, std::uint64_t time)
+{
+    auto packet = Packet(a, generation, mask);
+    packet.reading.timestamp = time;
+    return packet;
+}
+ServicePacket Normal(const Attachment &a, std::uint64_t generation, std::uint64_t time)
+{
+    auto packet = Packet(a, generation, 0, false, 0x20, 46);
+    packet.reading.timestamp = time;
+    return packet;
+}
+
+// Bring a route to a completed first command with pairing armed.
+std::uint64_t ArmedRoute(Fixture &f, const Attachment &a)
+{
+    f.Catalog(a); f.Ready(a);
+    injection.result = GipEnableStatus::Success;
+    f.owner.Step(0, 10000);
+    CHECK(injection.acceptedSubmissions == 1 && injection.lastAttempt == 1);
+    f.owner.Step(1, 20000);
+    Diagnostics d;
+    CHECK(f.Drain(a, true, &d).empty() && d.commandDispatched && d.pairingArmed && d.attempt == 1);
+    CHECK(d.resends == 0 && d.pairingLosses == 0 && d.focusChanges == 0);
+    return 1 + ResendIntervalMs; // First ms at which a re-send may dispatch.
+}
+
+void PairingLossRearmsSameEpoch()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    const auto resendAt = ArmedRoute(f, *a);
+    // Paired reports publish state and never count as loss.
+    injection.batches.push_back({Normal(*a, 1, 100), Paired(*a, 2, 4, 100)});
+    f.owner.Step(2, 30000);
+    // The first 46-byte 0x20 still publishes its in-band field before the
+    // split mode is learned. Later 0x20 reports publish nothing.
+    auto edges = f.Drain(*a);
+    CHECK(edges.size() == 2 && edges[0].mask == 0 && edges[1].mask == 4 && !edges[1].release);
+    injection.batches.push_back({Normal(*a, 3, 200), Paired(*a, 4, 4, 200), Normal(*a, 5, 300), Paired(*a, 6, 4, 300)});
+    f.owner.Step(3, 40000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).size() == 2 && d.pairingLosses == 0 && injection.acceptedSubmissions == 1);
+    // A 0x20 followed by another 0x20 without a 0x0C is the loss signal. The
+    // held paddle is released and the same epoch gets attempt 2 after pacing.
+    injection.batches.push_back({Normal(*a, 7, 400), Normal(*a, 8, 410)});
+    f.owner.Step(4, 50000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].mask == 0 && edges[0].release && edges[0].qpc == 50000);
+    CHECK(d.pairingLosses == 1 && !d.pairingArmed && !d.dataAvailable && injection.acceptedSubmissions == 1);
+    f.owner.Step(resendAt - 1, 60000);
+    CHECK(injection.acceptedSubmissions == 1 && injection.submits == 1);
+    f.owner.Step(resendAt, 70000);
+    CHECK(injection.acceptedSubmissions == 2 && injection.lastAttempt == 2);
+    f.Drain(*a, true, &d);
+    CHECK(d.resends == 1 && d.attempt == 2 && d.input.epoch == 1 && injection.retired.empty());
+    // Unpaired 0x20 reports consumed before the re-send completes are not a
+    // second loss. The completion poll in the same tick arms pairing again.
+    injection.batches.push_back({Normal(*a, 9, 500), Normal(*a, 10, 510)});
+    f.owner.Step(resendAt + 1, 80000);
+    CHECK(f.Drain(*a, true, &d).empty() && d.pairingLosses == 1);
+    CHECK(d.commandDispatched && d.pairingArmed && d.commandError == S_OK);
+    f.owner.Step(resendAt + 2, 90000);
+    // The restored stream publishes again, including the 46-byte in-band field
+    // staying suppressed because the split mode was learned before the loss.
+    injection.batches.push_back({Normal(*a, 11, 600), Paired(*a, 12, 2, 600)});
+    f.owner.Step(resendAt + 3, 100000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].mask == 2 && d.dataAvailable && d.normal == 8 && d.separate == 4);
+    CHECK(injection.acceptedSubmissions == 2);
+}
+
+void PairingTimeoutRearms()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    ArmedRoute(f, *a);
+    injection.batches.push_back({Normal(*a, 1, 100), Paired(*a, 2, 8, 100)});
+    f.owner.Step(300, 30000);
+    CHECK(f.Drain(*a).back().mask == 8);
+    // One unpaired 0x20 and then silence: loss after PairingWindowMs.
+    injection.batches.push_back({Normal(*a, 3, 200)});
+    f.owner.Step(400, 40000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).empty() && d.pairingLosses == 0 && d.pairingArmed);
+    f.owner.Step(400 + PairingWindowMs - 1, 50000);
+    CHECK(f.Drain(*a, true, &d).empty() && d.pairingLosses == 0);
+    f.owner.Step(400 + PairingWindowMs, 60000);
+    const auto edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].release && edges[0].mask == 0 && d.pairingLosses == 1);
+    // Pacing already elapsed, so the re-send is admitted on the same tick.
+    CHECK(injection.acceptedSubmissions == 2 && injection.lastAttempt == 2 && d.resends == 1);
+    // A late 0x0C with the pending 0x20's timestamp pairs it instead of
+    // counting a loss when the reports were consumed in reverse order.
+    f.owner.Step(400 + PairingWindowMs + 1, 70000);
+    f.Drain(*a, true, &d);
+    CHECK(d.pairingArmed);
+    injection.batches.push_back({Paired(*a, 4, 1, 900), Normal(*a, 5, 900)});
+    f.owner.Step(1000, 80000);
+    CHECK(f.Drain(*a, true, &d).size() == 1 && d.pairingLosses == 1);
+    f.owner.Step(1000 + PairingWindowMs, 90000);
+    CHECK(f.Drain(*a, true, &d).empty() && d.pairingLosses == 1 && injection.acceptedSubmissions == 2);
+    // A gap discards a pending 0x20 because its 0x0C can be part of the loss.
+    injection.batches.push_back({Normal(*a, 6, 1100)});
+    f.owner.Step(1100, 100000);
+    ServicePacket gap;
+    gap.nativeId = a->physical.nativeId; gap.viewGeneration = 9; gap.gap = true;
+    injection.batches.push_back({gap});
+    f.owner.Step(1101, 110000);
+    f.owner.Step(1100 + PairingWindowMs, 120000);
+    f.Drain(*a, true, &d);
+    CHECK(d.gaps == 1 && d.pairingLosses == 1 && injection.acceptedSubmissions == 2);
+}
+
+void PairingIgnoresUnarmedRoutes()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    f.Catalog(*a); f.Ready(*a);
+    injection.result = GipEnableStatus::Pending;
+    f.owner.Step(0, 10000);
+    injection.batches.push_back({Normal(*a, 1, 100), Normal(*a, 2, 200), Normal(*a, 3, 300)});
+    f.owner.Step(1000, 20000);
+    Diagnostics d;
+    f.Drain(*a, true, &d);
+    // Before any completed command the unpaired stream is expected.
+    CHECK(injection.acceptedSubmissions == 1 && d.pairingLosses == 0 && !d.pairingArmed && d.resends == 0);
+    // A failed dispatched command arms nothing, and no pairing loss can re-send.
+    injection.result = GipEnableStatus::Failed;
+    f.owner.Step(1001, 30000);
+    injection.batches.push_back({Normal(*a, 4, 400), Normal(*a, 5, 500)});
+    f.owner.Step(2000, 40000);
+    f.Drain(*a, true, &d);
+    CHECK(d.commandDispatched && d.commandError == E_FAIL && !d.pairingArmed && d.pairingLosses == 0);
+    CHECK(injection.acceptedSubmissions == 1);
+    // A focus change after a dispatched failure still re-sends once, paced.
+    injection.foreground = 10;
+    f.owner.Step(2001, 50000);
+    injection.foreground = 20;
+    f.owner.Step(2002, 60000);
+    f.owner.Step(2002 + FocusSettleMs, 70000);
+    f.Drain(*a, true, &d);
+    CHECK(d.focusChanges == 1 && injection.acceptedSubmissions == 2 && injection.lastAttempt == 2);
+    // Series 1 never receives a command, so neither trigger applies to it.
+    Fixture g;
+    auto legacy = g.Attach(0);
+    legacy->physical.product = USB_PRODUCT_XBOX_ONE_ELITE_SERIES_1;
+    injection.identities[legacy->path] = legacy->physical;
+    g.Catalog(*legacy); g.Ready(*legacy);
+    injection.foreground = 10;
+    g.owner.Step(0, 10000);
+    injection.foreground = 20;
+    injection.batches.push_back({Packet(*legacy, 1, 2, false, 0x20, 29), Packet(*legacy, 2, 2, false, 0x20, 29)});
+    g.owner.Step(1, 20000);
+    g.owner.Step(1000, 30000);
+    g.Drain(*legacy, true, &d);
+    CHECK(injection.submits == 0 && d.focusChanges == 0 && d.pairingLosses == 0);
+}
+
+void FocusChangeRearms()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    const auto resendAt = ArmedRoute(f, *a);
+    // The first observed foreground is the baseline. Zero never counts.
+    injection.foreground = 10;
+    f.owner.Step(2, 30000);
+    injection.foreground = 0;
+    f.owner.Step(3, 40000);
+    injection.foreground = 10;
+    f.owner.Step(4, 50000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).empty() && d.focusChanges == 0 && d.pairingArmed);
+    injection.batches.push_back({Normal(*a, 1, 100), Paired(*a, 2, 1, 100)});
+    f.owner.Step(5, 60000);
+    CHECK(f.Drain(*a).back().mask == 1);
+    // Another process takes the foreground while paddle 1 is held. The state
+    // is released at once and the re-send waits for the settle interval.
+    injection.foreground = 20;
+    f.owner.Step(6, 70000);
+    auto edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].release && edges[0].mask == 0 && edges[0].qpc == 70000);
+    CHECK(d.focusChanges == 1 && d.pairingLosses == 0 && !d.pairingArmed && injection.acceptedSubmissions == 1);
+    const auto settled = std::max<std::uint64_t>(6 + FocusSettleMs, resendAt);
+    f.owner.Step(settled - 1, 80000);
+    CHECK(injection.acceptedSubmissions == 1);
+    f.owner.Step(settled, 90000);
+    CHECK(injection.acceptedSubmissions == 2 && injection.lastAttempt == 2);
+    f.owner.Step(settled + 1, 100000);
+    f.Drain(*a, true, &d);
+    CHECK(d.resends == 1 && d.pairingArmed && d.commandDispatched);
+    // Returning to the original process is another change and re-arms again.
+    injection.foreground = 10;
+    f.owner.Step(settled + 2, 110000);
+    f.owner.Step(settled + 2 + FocusSettleMs, 120000);
+    f.owner.Step(settled + ResendIntervalMs + 1, 130000);
+    f.Drain(*a, true, &d);
+    CHECK(d.focusChanges == 2 && d.resends == 2 && injection.acceptedSubmissions == 3 && injection.lastAttempt == 3);
+    // The same process switching windows is not a driver focus switch.
+    f.owner.Step(settled + ResendIntervalMs + 2, 140000);
+    f.owner.Step(settled + ResendIntervalMs + 3, 150000);
+    f.Drain(*a, true, &d);
+    CHECK(d.focusChanges == 2 && injection.acceptedSubmissions == 3 && injection.retired.empty());
+}
+
+void RearmWaitsForInFlightAndEpochResets()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    const auto resendAt = ArmedRoute(f, *a);
+    injection.foreground = 10;
+    f.owner.Step(2, 30000);
+    // Loss during the paced interval, then a focus change while the re-send
+    // is in flight: one command at a time, and the second trigger folds into
+    // a single further attempt after that call returns.
+    injection.batches.push_back({Normal(*a, 1, 100), Normal(*a, 2, 110)});
+    f.owner.Step(3, 40000);
+    Diagnostics d;
+    f.Drain(*a, true, &d);
+    CHECK(d.pairingLosses == 1 && injection.acceptedSubmissions == 1);
+    injection.result = GipEnableStatus::Pending;
+    f.owner.Step(resendAt, 50000);
+    CHECK(injection.acceptedSubmissions == 2 && injection.lastAttempt == 2);
+    injection.foreground = 20;
+    f.owner.Step(resendAt + 1, 60000);
+    f.owner.Step(resendAt + 1 + FocusSettleMs, 70000);
+    f.owner.Step(resendAt + ResendIntervalMs + 1, 80000);
+    f.Drain(*a, true, &d);
+    CHECK(d.focusChanges == 1 && injection.acceptedSubmissions == 2 && !d.pairingArmed);
+    injection.result = GipEnableStatus::Success;
+    const auto completed = resendAt + ResendIntervalMs + 2;
+    f.owner.Step(completed, 90000);
+    f.Drain(*a, true, &d);
+    CHECK(d.commandDispatched && d.pairingArmed && injection.acceptedSubmissions == 2);
+    f.owner.Step(completed + ResendIntervalMs - 1, 100000);
+    CHECK(injection.acceptedSubmissions == 2);
+    f.owner.Step(completed + ResendIntervalMs, 110000);
+    CHECK(injection.acceptedSubmissions == 3 && injection.lastAttempt == 3);
+    // A new input epoch restarts at attempt 1 with pairing disarmed.
+    f.Ready(*a, 2);
+    f.owner.Step(completed + ResendIntervalMs + 1, 120000);
+    f.Drain(*a, true, &d);
+    CHECK(injection.acceptedSubmissions == 4 && injection.lastAttempt == 1 && d.attempt == 1 && !d.pairingArmed);
+    CHECK(d.resends == 2 && injection.retired.empty());
+    // Retirement stops everything, including a scheduled re-send.
+    f.owner.Step(completed + ResendIntervalMs + 2, 130000);
+    injection.foreground = 30;
+    f.shared->Detach(0, a->token);
+    f.owner.Step(completed + 2 * ResendIntervalMs + 3, 140000);
+    CHECK(injection.acceptedSubmissions == 4 && injection.retired.size() == 1);
+}
+
+void SuspendedResendGoesOut()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    const auto resendAt = ArmedRoute(f, *a);
+    // The provider is suspended by the focus switch. Its epoch is unchanged.
+    injection.input[a->physical.nativeId].resumed = false;
+    injection.input[a->physical.nativeId].normalSeen = false;
+    injection.batches.push_back({Normal(*a, 1, 100), Normal(*a, 2, 110)});
+    f.owner.Step(2, 30000);
+    Diagnostics d;
+    f.Drain(*a, true, &d);
+    CHECK(d.pairingLosses == 1 && !d.input.Ready() && d.input.ResendReady());
+    f.owner.Step(resendAt, 40000);
+    CHECK(injection.acceptedSubmissions == 2 && injection.lastAttempt == 2);
+    f.owner.Step(resendAt + 1, 50000);
+    f.Drain(*a, true, &d);
+    CHECK(d.commandDispatched && d.pairingArmed && !d.admissionExpired);
+    // The restored stream publishes to the background client.
+    injection.batches.push_back({Normal(*a, 3, 200), Paired(*a, 4, 8, 200)});
+    f.owner.Step(resendAt + 2, 60000);
+    CHECK(f.Drain(*a).back().mask == 8);
+    // A provider that was never ready in this lifetime admits no re-send.
+    injection.input[a->physical.nativeId].everReady = false;
+    injection.batches.push_back({Normal(*a, 5, 300), Normal(*a, 6, 310)});
+    f.owner.Step(resendAt + 3, 70000);
+    f.owner.Step(resendAt + ResendIntervalMs + 3, 80000);
+    f.Drain(*a, true, &d);
+    CHECK(d.pairingLosses == 2 && injection.acceptedSubmissions == 2 && !d.admissionExpired);
+    // The resume starts a new epoch and attempt 1 waits for its normal frame.
+    f.Ready(*a, 2);
+    injection.input[a->physical.nativeId].normalSeen = false;
+    f.owner.Step(resendAt + ResendIntervalMs + 4, 90000);
+    CHECK(injection.acceptedSubmissions == 2);
+    injection.input[a->physical.nativeId].normalSeen = true;
+    f.owner.Step(resendAt + ResendIntervalMs + 5, 100000);
+    CHECK(injection.acceptedSubmissions == 3 && injection.lastAttempt == 1);
+}
+
 void TracePreservesOwnedPayloadAndStages()
 {
     Fixture f;
@@ -1064,6 +1360,12 @@ int main()
         {"busy and contention pause admission", BusyAndContentionPauseAdmission},
         {"busy old epoch and stale completion", BusyOldEpochAndStaleCompletion},
         {"readiness race at admission", ReadinessRaceAtAdmission},
+        {"pairing loss re-sends in the same epoch", PairingLossRearmsSameEpoch},
+        {"pairing timeout re-sends", PairingTimeoutRearms},
+        {"pairing ignores unarmed and Series 1 routes", PairingIgnoresUnarmedRoutes},
+        {"focus change re-sends after settling", FocusChangeRearms},
+        {"re-send waits for the call in flight and epoch resets", RearmWaitsForInFlightAndEpochResets},
+        {"re-send goes out while the provider is suspended", SuspendedResendGoesOut},
         {"owned raw trace through drain", TracePreservesOwnedPayloadAndStages},
         {"view and identity replacement", ViewAndIdentityReplacement}, {"empty failure and allocation", EmptyFailureAndAllocation},
         {"retire during Select", RetireDuringSelect}, {"Quit and GATT cleanup", QuitAndGattCleanup},
