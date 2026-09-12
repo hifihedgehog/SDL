@@ -196,6 +196,7 @@ extern void SDL_SendJoystickButton(Uint64 timestamp, SDL_Joystick *joystick, Uin
 extern void SDL_SendJoystickTouchpad(Uint64 timestamp, SDL_Joystick *joystick, int touchpad, int finger, bool down, float x, float y, float pressure);
 extern void SDL_SendJoystickSensor(Uint64 timestamp, SDL_Joystick *joystick, SDL_SensorType type, Uint64 sensor_timestamp, const float *data, int num_values);
 extern void SDL_SendJoystickCapSense(Uint64 timestamp, SDL_Joystick *joystick, SDL_GamepadCapSenseType type, bool down);
+extern void SDL_SendJoystickNfcTagUid(SDL_Joystick *joystick, const char *uid);
 extern void SDL_SendJoystickPowerInfo(SDL_Joystick *joystick, SDL_PowerState state, int percent);
 
 // Function to get the Steam virtual gamepad info for a joystick
