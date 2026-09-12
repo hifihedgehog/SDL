@@ -48,7 +48,11 @@ using namespace GameInput::STR_JOIN(v, GAMEINPUT_API_VERSION);
 #endif
 
 // Default value for SDL_HINT_JOYSTICK_GAMEINPUT
-#if defined(SDL_PLATFORM_GDK) || (GAMEINPUT_API_VERSION >= 3)
+// PadForge fork: the desktop default stays off regardless of the vendored
+// header's API version. The GameInput paddle rollout was withdrawn, and the
+// backend is enabled only when the application sets the hint.
+// See docs/README-gameinput-paddles.md.
+#if defined(SDL_PLATFORM_GDK)
 #define SDL_GAMEINPUT_DEFAULT true
 #else
 #define SDL_GAMEINPUT_DEFAULT false
