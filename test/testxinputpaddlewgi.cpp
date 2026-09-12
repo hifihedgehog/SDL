@@ -170,9 +170,9 @@ GipInputState Input(State& state, std::uint64_t id) {
 }
 
 std::uint64_t Submit(State& state, std::uint64_t id, std::uint64_t generation,
-                     std::uint64_t now, bool exhausted=false) {
+                     std::uint64_t now, bool exhausted=false, std::uint64_t attempt=1) {
     const auto inputState=Input(state,id);
-    return state.Submit(id,generation,inputState.provider,inputState.epoch,now,exhausted);
+    return state.Submit(id,generation,inputState.provider,inputState.epoch,attempt,now,exhausted);
 }
 
 void Succeed(State& state, const Job& job, std::uint64_t now, unsigned& sends) {
@@ -324,12 +324,12 @@ void OldCleanupAndNewPending() {
     auto token=Submit(s,11,1,0); auto job=s.Claim(1); CHECK(job.token==token);
     old.Remove();
     CHECK(!Input(s,11).provider);
-    CHECK(!s.Submit(11,2,oldInput.provider,oldInput.epoch,2,false));
+    CHECK(!s.Submit(11,2,oldInput.provider,oldInput.epoch,1,2,false));
     s.Complete(job,S_OK,3);
     CHECK(s.CleanupOne());
     Attachment replacement(s,counts,11);
     CHECK(Input(s,11).provider!=oldInput.provider);
-    CHECK(!s.Submit(11,2,oldInput.provider,oldInput.epoch,3,false));
+    CHECK(!s.Submit(11,2,oldInput.provider,oldInput.epoch,1,3,false));
     auto later=Submit(s,11,2,3); CHECK(later);
     job=s.Claim(4); CHECK(job.token==later);
     unsigned sends=0; Succeed(s,job,5,sends);
@@ -428,17 +428,18 @@ void ApiAndContention() {
         CHECK(QueryGipInputState(123,inputState)&&!inputState.provider&&!inputState.Ready());
         Attachment a(s,counts,123,false);
         CHECK(QueryGipInputState(123,inputState)&&inputState.provider&&!inputState.Ready());
-        CHECK(!SubmitGipEnable(123,4,inputState.provider,inputState.epoch));
+        CHECK(!SubmitGipEnable(123,4,inputState.provider,inputState.epoch,1));
         Resume(a.inner,1); Normal(a.inner,2);
         CHECK(QueryGipInputState(123,inputState)&&inputState.Ready());
-        CHECK(!SubmitGipEnable(0,1,1,1)&&!SubmitGipEnable(1,0,1,1));
-        CHECK(!SubmitGipEnable(123,4,0,inputState.epoch)&&!SubmitGipEnable(123,4,inputState.provider,0));
-        auto t=SubmitGipEnable(123,4,inputState.provider,inputState.epoch); CHECK(t);
+        CHECK(!SubmitGipEnable(0,1,1,1,1)&&!SubmitGipEnable(1,0,1,1,1));
+        CHECK(!SubmitGipEnable(123,4,0,inputState.epoch,1)&&!SubmitGipEnable(123,4,inputState.provider,0,1));
+        CHECK(!SubmitGipEnable(123,4,inputState.provider,inputState.epoch,0));
+        auto t=SubmitGipEnable(123,4,inputState.provider,inputState.epoch,1); CHECK(t);
         GipEnableResult result;
         CHECK(PollGipEnable(t,result)&&result.status==Status::Pending&&!result.dispatched);
         CHECK(result.provider==inputState.provider&&result.epoch==inputState.epoch);
         AcquireSRWLockExclusive(&s.lock);
-        const bool submitBlocked=!SubmitGipEnable(123,5,inputState.provider,inputState.epoch);
+        const bool submitBlocked=!SubmitGipEnable(123,5,inputState.provider,inputState.epoch,1);
         const bool pollBlocked=!PollGipEnable(t,result);
         const bool queryBlocked=!QueryGipInputState(123,inputState);
         ReleaseSRWLockExclusive(&s.lock);
@@ -449,7 +450,7 @@ void ApiAndContention() {
     }
     GipInputState inputState;
     CHECK(!QueryGipInputState(123,inputState));
-    CHECK(!SubmitGipEnable(123,1,1,1)); // Offline startup cannot activate WGI.
+    CHECK(!SubmitGipEnable(123,1,1,1,1)); // Offline startup cannot activate WGI.
 }
 
 void CapturedReadinessAndRearm() {
@@ -458,7 +459,7 @@ void CapturedReadinessAndRearm() {
     // wgi-usb-combined-66644-158953984.log:24-26 sent before any own input.
     auto inputState=Input(s,11);
     CHECK(!inputState.Ready()&&!inputState.epoch);
-    CHECK(!s.Submit(11,7,inputState.provider,inputState.epoch,158954156,false));
+    CHECK(!s.Submit(11,7,inputState.provider,inputState.epoch,1,158954156,false));
     CHECK(!s.Claim(158954171).token&&sends==0);
     // wgi-usb-active-47744-159649937.log:40,44,47,55. These are SDK
     // callback timestamps. The command runner's host tick has a separate clock.
@@ -489,13 +490,73 @@ void CapturedReadinessAndRearm() {
     const auto second=Input(s,11);
     CHECK(second.epoch==inputState.epoch+1&&!second.Ready());
     CHECK(Result(s,token,159894066).status==Status::Retired);
-    CHECK(s.Submit(11,7,inputState.provider,inputState.epoch,159894067,false)==token);
+    CHECK(s.Submit(11,7,inputState.provider,inputState.epoch,1,159894067,false)==token);
     CHECK(!s.Claim(159894067).token);
     Normal(a.inner,normal);
     CHECK(Input(s,11).Ready()&&Input(s,11).normalTime==normal);
     auto next=Submit(s,11,7,159894068); CHECK(next&&next!=token);
     job=s.Claim(159894069); Succeed(s,job,159894070,sends);
     CHECK(sends==2&&Result(s,next,159894071).epoch==second.epoch);
+}
+
+// The driver quiesces every controller on a foreground process change and the
+// Elite drops its 0x0C report. An elevated client sees no suspend or resume, so
+// a later attempt in the same pair must be admissible without a new epoch.
+void RepeatedAttemptsInOneEpoch() {
+    State s; Counts counts; Attachment a(s,counts,11);
+    unsigned sends=0;
+    const auto first=Submit(s,11,1,100); CHECK(first);
+    CHECK(Submit(s,11,1,101)==first);
+    CHECK(!Submit(s,11,1,101,false,0));
+    // A second attempt queues behind the unfinished first call and cannot be
+    // dispatched to the leased provider until that call returns.
+    const auto second=Submit(s,11,1,102,false,2); CHECK(second&&second!=first);
+    CHECK(Submit(s,11,1,103,false,2)==second);
+    auto job=s.Claim(104); CHECK(job.token==first);
+    CHECK(!s.Claim(105).token);
+    Succeed(s,job,106,sends);
+    CHECK(sends==1&&Result(s,first,107).status==Status::Success&&Result(s,first,107).attempt==1);
+    CHECK(Result(s,second,107).status==Status::Pending&&Result(s,second,107).attempt==2);
+    // No resume or new normal frame precedes the re-send. The pair's readiness
+    // from its first normal frame still admits and authorizes it.
+    job=s.Claim(108); CHECK(job.token==second);
+    Succeed(s,job,109,sends);
+    const auto result=Result(s,second,110);
+    CHECK(sends==2&&result.status==Status::Success&&result.dispatched&&result.attempt==2);
+    CHECK(result.provider==Result(s,first,110).provider&&result.epoch==Result(s,first,110).epoch);
+    CHECK(Input(s,11).epoch==result.epoch&&Input(s,11).Ready());
+    // Dispatched attempts stay terminal. A third attempt is a new request.
+    CHECK(Submit(s,11,1,111,false,1)==first&&Submit(s,11,1,111,false,2)==second);
+    const auto third=Submit(s,11,1,112,false,3); CHECK(third&&third!=second);
+    job=s.Claim(113); CHECK(job.token==third);
+    Succeed(s,job,114,sends);
+    CHECK(sends==3&&Result(s,third,115).attempt==3);
+    // A suspend keeps the queued re-send: the background client's WGI input
+    // stops on the same focus switch that quiesced the controller, and the
+    // prototype's command probe completed from a provider that never resumed.
+    const auto fourth=Submit(s,11,1,116,false,4); CHECK(fourth);
+    Suspend(a.inner,50);
+    CHECK(!Input(s,11).resumed&&Input(s,11).everReady&&Input(s,11).ResendReady()&&!Input(s,11).Ready());
+    CHECK(Result(s,fourth,117).status==Status::Pending);
+    job=s.Claim(118); CHECK(job.token==fourth);
+    Succeed(s,job,119,sends);
+    CHECK(sends==4&&Result(s,fourth,120).status==Status::Success&&Result(s,fourth,120).dispatched);
+    // While suspended, another re-send is admitted but attempt 1 is not.
+    const auto fifth=Submit(s,11,1,121,false,5); CHECK(fifth);
+    CHECK(!Submit(s,11,1,122,false,1)||Submit(s,11,1,122,false,1)==first);
+    // A resume starts a new epoch, retires the queued re-send, and requires
+    // attempt 1 after this provider's own normal frame again.
+    Resume(a.inner,60);
+    CHECK(Result(s,fifth,123).status==Status::Retired);
+    CHECK(!Submit(s,11,1,124,false,2));
+    Normal(a.inner,61);
+    const auto again=Submit(s,11,1,125,false,1); CHECK(again&&again!=first);
+    CHECK(Result(s,again,126).epoch==Input(s,11).epoch&&Result(s,again,126).attempt==1);
+    s.Retire(1);
+    CHECK(Result(s,again,127).status==Status::Retired);
+    // A provider that was never ready admits no re-send either.
+    Attachment cold(s,counts,12,false);
+    CHECK(!Input(s,12).everReady&&!Submit(s,12,2,130,false,2)&&!Submit(s,12,2,130,false,1));
 }
 
 void NativeImplicitResumeOrder() {
@@ -778,7 +839,7 @@ void ConcurrentEpochsAndWake() {
     CHECK(latest.Ready()&&!latest.busy&&latest.epoch==5);
     auto result=Result(s,token,201);
     CHECK(result.status==Status::Retired&&result.provider==old.provider&&result.epoch==old.epoch);
-    CHECK(s.Submit(11,7,old.provider,old.epoch,202,false)==token);
+    CHECK(s.Submit(11,7,old.provider,old.epoch,1,202,false)==token);
     CHECK(!s.Claim(202).token);
     auto next=Submit(s,11,7,202); CHECK(next&&next!=token);
     auto nextJob=s.Claim(203); CHECK(nextJob.token==next);
@@ -876,7 +937,7 @@ int main() {
         Identifiers(); CommandsAndTimeout(); QueuesAndExhaustion(); LateCatalogAndCrossRemoval();
         KnownNormalShapes();
         OldCleanupAndNewPending(); AggregationAndLimits(); FactoryMetadata(); ApiAndContention();
-        CapturedReadinessAndRearm(); NativeImplicitResumeOrder(); ColdStartAndShapes(); SuspendBeforeDispatch();
+        CapturedReadinessAndRearm(); RepeatedAttemptsInOneEpoch(); NativeImplicitResumeOrder(); ColdStartAndShapes(); SuspendBeforeDispatch();
         ConcurrentRetirement(); ConcurrentRetirement(true); ConcurrentEpochsAndWake();
         EpochSaturation(); QueuedGenerationsShareProvider(); UndispatchedResourceRecovery();
         ResourceRetryRespectsQueueLimit(); PassiveRawReplay(); TraceOverflowAndDisabledReadiness();

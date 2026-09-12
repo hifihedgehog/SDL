@@ -32,7 +32,7 @@ enum class GipEnableStatus : std::uint8_t {
 struct GipEnableResult {
     GipEnableStatus status = GipEnableStatus::Failed;
     HRESULT hresult = E_INVALIDARG;
-    std::uint64_t provider = 0, epoch = 0;
+    std::uint64_t provider = 0, epoch = 0, attempt = 0;
     bool dispatched = false;
 };
 
@@ -40,8 +40,14 @@ struct GipInputState {
     std::uint64_t provider = 0, epoch = 0;
     std::uint64_t resumeTime = 0, normalTime = 0, splitTime = 0;
     bool resumed = false, normalSeen = false, splitSeen = false, busy = false;
+    // This provider has been Ready() at least once in its current input epoch.
+    // A suspend keeps it and a resume clears it. A re-send needs only this:
+    // WGI accepts the command from a suspended or background provider, and
+    // the driver's focus quiesce is what the re-send undoes.
+    bool everReady = false;
     HRESULT error = S_OK;
     bool Ready() const noexcept { return provider && epoch && resumed && normalSeen && SUCCEEDED(error); }
+    bool ResendReady() const noexcept { return provider && epoch && everReady && SUCCEEDED(error); }
 };
 
 // The caller must qualify the WGI/service images and exact physical association
@@ -69,20 +75,31 @@ bool QueryGipInputState(std::uint64_t nativeId, GipInputState &state) noexcept;
 // a native call. Its worker, buffers, and provider lease remain until return.
 // No replacement workers are created. Initialization can consume a worker too.
 //
-// A dispatched terminal result ends this (attachment, provider, input epoch)
-// attempt. Repeated submissions return its retained token. An undispatched
-// timeout or exhausted request can be admitted again once its worker is free.
-// Do not resubmit a dispatched key after token eviction. A new resume permits a new
-// attempt after its own normal input. In-flight calls retain their buffers and
-// provider lease, and prevent another dispatch to that provider until return.
-// A successful HRESULT does not establish that split input was received.
+// A dispatched terminal result ends this (attachment, provider, input epoch,
+// attempt) request. Repeated submissions of the same key return its retained
+// token. An undispatched timeout or exhausted request can be admitted again
+// once its worker is free. Do not resubmit a dispatched key after token
+// eviction. A new resume permits attempt 1 again after its own normal input.
+// The caller numbers attempts from 1 within one (provider, input epoch) pair.
+// A later attempt in the same pair is a deliberate re-send: the driver quiesces
+// every controller on a foreground process change and the Elite then stops its
+// separate paddle report. An elevated client gets no suspend or resume for
+// that switch. A background client can be suspended by it. A re-send is
+// admitted, dispatched, and completed while suspended, as long as the provider
+// was Ready() once in its current input epoch. A resume starts a new epoch,
+// retires queued re-sends, and requires attempt 1 after its own normal frame
+// before any further re-send.
+// In-flight calls retain their buffers and provider lease, and prevent another
+// dispatch to that provider until return. A successful HRESULT does not
+// establish that split input was received.
 //
 // Zero means no request was admitted. Readiness changes, contention, invalid
 // input, startup failure, and a full queue can produce this result.
 std::uint64_t SubmitGipEnable(std::uint64_t nativeId,
                               std::uint64_t attachmentGeneration,
                               std::uint64_t expectedProvider,
-                              std::uint64_t expectedEpoch) noexcept;
+                              std::uint64_t expectedEpoch,
+                              std::uint64_t attempt) noexcept;
 
 // Nonconsuming lookup. Completed cells can be reused by later submissions.
 // False means invalid/expired token or brief lock contention. Retry a known

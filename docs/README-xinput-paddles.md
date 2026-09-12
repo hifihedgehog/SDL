@@ -70,6 +70,25 @@ is recorded separately from report receipt. The decoder accepts the known 29-, 3
 and 47-byte in-band layouts and the separate 17-byte `0x0C` report. Once a
 separate report arrives, ordinary reports cannot replace its paddle state.
 
+The command is re-sent inside the same input epoch when the separate report
+stops. XboxGIP broadcasts a quiesce to every controller whenever the
+foreground process changes, and the Elite then stops its `0x0C` report. An
+elevated WGI client receives no suspend or resume for that switch, so the
+epoch never changes. Report pairing is the ground truth: after a completed
+command the service delivers each `0x0C` right after its `0x20` with the same
+source timestamp. A `0x20` that no `0x0C` follows before the next `0x20`, or
+within 50 ms, releases the paddle state and schedules the next attempt. A
+foreground process change observed from the owner thread schedules one sooner,
+after a 100 ms settle, because the driver's quiesce is sent inside its own
+focus callback. Re-sends keep one command in flight and at most one dispatch
+per 250 ms. Each attempt within an epoch is numbered. There is no foreground
+requirement and no periodic timer: the service publishes both reports to a
+background client, and a re-send from the background restores them. A
+background client whose provider is suspended by the same switch can still
+re-send, because the command needs only a provider that was ready once. A
+resume starts a new epoch and the first command again follows that provider's
+own normal frame.
+
 The private GIP layout is qualified against the complete file profile in
 `SDL_xinput_paddle_runtime.cpp`: the service executable, inbox and redistributable
 GameInput DLLs, WGI DLL, and XboxGIP driver. File identities and digests are
@@ -106,14 +125,16 @@ storage is bounded and retained for calls whose completion is still unknown.
 Close and Quit retire delivery without waiting under SDL's joystick lock.
 
 Joystick properties under `SDL.joystick.xinput.paddle.` expose `received_20`,
-`received_0c`, `received_gatt`, `gaps`, `enable_status`, `data_available`, and
-`error`. The private `SDL.joystick.xinput.paddle_mask` property describes
+`received_0c`, `received_gatt`, `gaps`, `enable_status`, `command_attempt`,
+`resends`, `pairing_losses`, `focus_changes`, `pairing_armed`, `data_available`,
+and `error`. The private `SDL.joystick.xinput.paddle_mask` property describes
 capability. These properties are diagnostic, not a public SDL API contract.
 
 Set `SDL_JOYSTICK_XINPUT_PADDLE_TRACE` to `1` before Open and enable input debug
 logging for bounded passive traces. Records include WGI resume/suspend and raw
 messages, service reading generations and raw sequences, payload bytes, decoded
-masks, queue/drain transitions, and command times and HRESULTs. The library
+masks, queue/drain transitions, command times and HRESULTs, pairing loss,
+foreground changes, and re-arm decisions with their attempt numbers. The library
 keeps owned bounded records and logs them on SDL's thread. It writes no files.
 Overflow is reported. Source timestamps and host QPC values are separate fields.
 
