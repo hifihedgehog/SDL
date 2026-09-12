@@ -115,6 +115,8 @@ struct SDL_Joystick
     int ncapsenses _guarded;                      // Number of capsense sources on the joystick
     SDL_JoystickCapSenseInfo *capsenses _guarded; // Current capsense states
 
+    char nfc_tag_uid[21] _guarded; // Current NFC tag UID as lowercase hex (up to 10 bytes), empty when none
+
     Uint16 low_frequency_rumble _guarded;
     Uint16 high_frequency_rumble _guarded;
     Uint64 rumble_expiration _guarded;
