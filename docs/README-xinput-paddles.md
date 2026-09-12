@@ -10,6 +10,12 @@ USB eligibility uses the physical parent's VID/PID. Windows can expose an
 Elite through the generic `045E:02FF` XUSB identity. That published SDL identity
 is preserved.
 
+Xbox Wireless Adapter eligibility uses the controller's primary synthetic
+device instance. The receiver's VID/PID identifies the transport, not the
+controller model. The controller and receiver can have different containers.
+The native controller ID joins the XInput attachment to its GIP provider and
+service view. The host index in the device path is not used as controller identity.
+
 The build option `SDL_XINPUT_PADDLES` enables the supplement on native MSVC x64
 Windows builds with XInput and the C runtime enabled. Set the private hint
 `SDL_JOYSTICK_XINPUT_PADDLES` to `0` before opening the joystick to disable it.
@@ -49,31 +55,37 @@ byte 16 is opaque. Endpoint association uses checked Windows device metadata.
 Cleanup restores a CCCD value changed by this client after checking its current
 value.
 
-USB uses one process-level client of the existing input service. Each selected
+USB and Xbox Wireless Adapter connections use one process-level client of the
+existing input service. Each selected
 device has a separate view generation and owned copies of its input packets.
 The WGI provider with the same native GIP ID must supply its own input-readiness
 observation before it receives the existing extra-data command. Its normal
-callback is LowLatency class 1, message 0, length 46. A service report alone
+callback is LowLatency class 1, message 0, with a known normal payload length
+of 14, 29, 34, 46, or 47 bytes. A service report alone
 does not satisfy that precondition. Resume starts a new input epoch. Suspend
 invalidates pending command readiness, while the service remains the USB input
-publisher. A new epoch can rearm after its own normal frame. A completed command
+publisher. A new epoch can rearm after its own normal frame. Series 1 paddles
+use ordinary reports and do not receive the Series 2 extra-data command. A completed command
 is recorded separately from report receipt. The decoder accepts the known 29-, 34-, 46-,
 and 47-byte in-band layouts and the separate 17-byte `0x0C` report. Once a
 separate report arrives, ordinary reports cannot replace its paddle state.
 
-The private USB layout is qualified against the complete file profile in
+The private GIP layout is qualified against the complete file profile in
 `SDL_xinput_paddle_runtime.cpp`: the service executable, inbox and redistributable
 GameInput DLLs, WGI DLL, and XboxGIP driver. File identities and digests are
 checked together. A missing file, including an absent redistributable DLL,
-or an unknown or changing profile disables this USB supplement.
+or an unknown or changing profile disables this GIP supplement.
 The check assumes Windows loaded a member of that supported family. It does
 not establish the exact bytes already mapped in the service process.
 
 The service connection also checks its peer against the service manager's
 session child. Every view is bounded and its native ID must agree with its
 provider string. Descriptor metadata alone does not establish received input.
-Delivery through the Xbox Wireless Adapter and firmware 5.23.6.0 remain
-separate coverage targets.
+The adapter path supports the Microsoft receiver IDs `02E6`, `02FE`, `02F9`,
+and `091E` with a qualified XboxGIP binding. Device-ID construction and the
+XInput interface count were checked against the Windows driver instructions.
+Offline instruction replay and controller-association tests cover the adapter
+path. Physical adapter receipt and firmware 5.23.6.0 are not hardware-tested.
 
 The September 11, 2026 hardware test passed on an Elite Series 2 over USB and
 Bluetooth. Both runs recorded all four raw and mapped paddle presses and

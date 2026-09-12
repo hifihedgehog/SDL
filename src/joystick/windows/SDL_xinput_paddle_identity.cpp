@@ -49,8 +49,7 @@ constexpr size_t MaxPropertyChars = 4096;
 constexpr size_t MaxParents = 16;
 constexpr size_t MaxChildren = 256;
 constexpr GUID SystemContainer = {0, 0, 0, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
-constexpr std::wstring_view SyntheticPrefix = L"USB\\VID_045E&PID_02FF&IG_00\\";
-constexpr std::wstring_view SyntheticFamily = L"USB\\VID_045E&PID_02FF&IG_";
+constexpr std::wstring_view SyntheticFamily = L"USB\\VID_045E&PID_";
 constexpr std::wstring_view BleHidId = L"BTHLEDEVICE\\{00001812-0000-1000-8000-00805F9B34FB}";
 
 bool EqualText(std::wstring_view a, std::wstring_view b) noexcept
@@ -300,16 +299,44 @@ int HexDigit(wchar_t c) noexcept
     return -1;
 }
 
-bool ParseNative(std::wstring_view instance, std::uint64_t &nativeId) noexcept
+bool UsbIds(std::wstring_view instance, std::uint16_t &vendor, std::uint16_t &product) noexcept
+{
+    if (!StartsWith(instance, L"USB\\VID_") || instance.size() < 21 ||
+        !EqualText(instance.substr(12, 5), L"&PID_")) return false;
+    std::uint16_t parsedVendor = 0, parsedProduct = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        const int v = HexDigit(instance[8 + i]);
+        const int p = HexDigit(instance[17 + i]);
+        if (v < 0 || p < 0) return false;
+        parsedVendor = static_cast<std::uint16_t>((parsedVendor << 4) | v);
+        parsedProduct = static_cast<std::uint16_t>((parsedProduct << 4) | p);
+    }
+    vendor = parsedVendor;
+    product = parsedProduct;
+    return true;
+}
+
+bool SyntheticNode(std::wstring_view instance) noexcept
+{
+    return StartsWith(instance, SyntheticFamily) && instance.size() >= 25 &&
+           EqualText(instance.substr(21, 4), L"&IG_");
+}
+
+bool ParseNative(std::wstring_view instance, std::uint64_t &nativeId,
+                 std::uint16_t &vendor, std::uint16_t &product) noexcept
 {
     nativeId = 0;
-    if (!StartsWith(instance, SyntheticPrefix) || instance.size() != SyntheticPrefix.size() + 22) {
+    constexpr size_t prefixLength = 28;
+    if (instance.size() != prefixLength + 22 || !UsbIds(instance, vendor, product) ||
+        vendor != 0x045e || !EqualText(instance.substr(21, 7), L"&IG_00\\")) {
         return false;
     }
-    const auto suffix = instance.substr(SyntheticPrefix.size());
-    // The inspected builder emits AA&BB&16hex. Only the observed USB channel
-    // 00&00 is qualified. Adapter and multiplexed channels need their own proof.
-    if (suffix.substr(0, 6) != L"00&00&") {
+    const auto suffix = instance.substr(prefixLength);
+    // xboxgip!gipAddDevice assigns hardware contexts 0-7 and software contexts
+    // 8-39. gipHidAddDevice formats host index, GIP subclient, and native ID.
+    // The primary gamepad is subclient zero. The host index is not an identity.
+    if (suffix[0] != L'0' || suffix[1] < L'0' || suffix[1] > L'7' ||
+        suffix.substr(2, 4) != L"&00&") {
         return false;
     }
     std::uint64_t value = 0;
@@ -326,24 +353,14 @@ bool ParseNative(std::wstring_view instance, std::uint64_t &nativeId) noexcept
 
 bool PhysicalUsb(std::wstring_view instance, std::uint16_t &vendor, std::uint16_t &product) noexcept
 {
-    constexpr std::wstring_view prefix = L"USB\\VID_";
-    if (!StartsWith(instance, prefix) || instance.size() <= 22 ||
-        !EqualText(instance.substr(12, 5), L"&PID_") || instance[21] != L'\\') {
-        return false;
-    }
-    std::uint16_t parsedVendor = 0, parsedProduct = 0;
-    for (size_t i = 0; i < 4; ++i) {
-        const int v = HexDigit(instance[8 + i]);
-        const int p = HexDigit(instance[17 + i]);
-        if (v < 0 || p < 0) {
-            return false;
-        }
-        parsedVendor = static_cast<std::uint16_t>((parsedVendor << 4) | v);
-        parsedProduct = static_cast<std::uint16_t>((parsedProduct << 4) | p);
-    }
-    vendor = parsedVendor;
-    product = parsedProduct;
-    return true;
+    return instance.size() > 22 && instance[21] == L'\\' && UsbIds(instance, vendor, product);
+}
+
+bool WirelessReceiver(std::uint16_t vendor, std::uint16_t product) noexcept
+{
+    // Microsoft receiver IDs from xone's transport/dongle.c device table.
+    return vendor == 0x045e && (product == 0x02e6 || product == 0x02fe ||
+                              product == 0x02f9 || product == 0x091e);
 }
 
 bool HasExact(const std::vector<std::wstring> &values, std::wstring_view text) noexcept
@@ -506,9 +523,11 @@ bool ResolveCore(MetadataSource &source, const wchar_t *path, std::uint32_t inde
     size_t synthetic = nodes.size();
     size_t ble = nodes.size();
     std::uint64_t nativeId = 0;
+    std::uint16_t controllerVendor = 0, controllerProduct = 0;
     for (size_t i = 0; i < nodes.size(); ++i) {
-        if (StartsWith(nodes[i].instance, SyntheticFamily)) {
-            if (synthetic != nodes.size() || i == 0 || !ParseNative(nodes[i].instance, nativeId)) {
+        if (SyntheticNode(nodes[i].instance)) {
+            if (synthetic != nodes.size() || i == 0 ||
+                !ParseNative(nodes[i].instance, nativeId, controllerVendor, controllerProduct)) {
                 return fail("The native GIP ancestor is ambiguous or unqualified.");
             }
             synthetic = i;
@@ -518,6 +537,7 @@ bool ResolveCore(MetadataSource &source, const wchar_t *path, std::uint32_t inde
         }
     }
     size_t lastPhysical = 0;
+    size_t lastContainer = 0;
     std::uint16_t hardwareVendor = 0, hardwareProduct = 0;
     PaddleTransport transport = PaddleTransport::None;
     if (synthetic != nodes.size()) {
@@ -531,14 +551,32 @@ bool ResolveCore(MetadataSource &source, const wchar_t *path, std::uint32_t inde
             !QualifiedDriver(source)) {
             return fail("The physical USB parent has no qualified XboxGIP driver binding.");
         }
-        transport = PaddleTransport::UsbGip;
+        if (WirelessReceiver(hardwareVendor, hardwareProduct)) {
+            // Wireless HID PDOs use the controller's Hello VID/PID. The 02FF
+            // hardware-ID alias is separate. Read the primary instance ID.
+            if (controllerProduct == 0x02ff) return fail("The wireless controller identity is not qualified.");
+            hardwareVendor = controllerVendor;
+            hardwareProduct = controllerProduct;
+            lastContainer = synthetic;
+            transport = PaddleTransport::WirelessGip;
+        } else {
+            // Wired PDOs can use either the 02FF alias or their actual VID/PID,
+            // depending on their metadata flags. Both must name this parent.
+            if (controllerProduct != 0x02ff &&
+                (controllerVendor != hardwareVendor || controllerProduct != hardwareProduct)) {
+                return fail("The wired controller identity disagrees with its physical parent.");
+            }
+            lastContainer = lastPhysical;
+            transport = PaddleTransport::UsbGip;
+        }
     } else if (ble != nodes.size()) {
         lastPhysical = ble;
+        lastContainer = lastPhysical;
         transport = PaddleTransport::Bluetooth;
     } else {
         return fail("The device transport is not qualified.");
     }
-    for (size_t i = 0; i <= lastPhysical; ++i) {
+    for (size_t i = 0; i <= lastContainer; ++i) {
         if (!nodes[i].hasContainer || !IsEqualGUID(nodes[i].container, leaf.container)) {
             return fail("The physical ancestry crosses device containers.");
         }
@@ -564,7 +602,7 @@ bool ResolveCore(MetadataSource &source, const wchar_t *path, std::uint32_t inde
     Node finalLeaf;
     if (!InterfaceNode(source, interfacePath.c_str(), current, instance) || current != leaf.id ||
         !EqualText(instance, leaf.instance) || !ReadNode(source, current, finalLeaf) ||
-        !SameNode(leaf, finalLeaf) || (transport == PaddleTransport::UsbGip && !QualifiedDriver(source))) {
+        !SameNode(leaf, finalLeaf) || (IsGipTransport(transport) && !QualifiedDriver(source))) {
         return fail("The interface or driver binding changed during resolution.");
     }
     result.transport = transport;
@@ -628,7 +666,7 @@ bool SamePhysicalIdentity(const PhysicalIdentity &a, const PhysicalIdentity &b) 
     if (a.transport == PaddleTransport::Bluetooth) {
         return a.nativeId == 0 && b.nativeId == 0;
     }
-    return a.transport == PaddleTransport::UsbGip && a.nativeId != 0 && a.nativeId == b.nativeId;
+    return IsGipTransport(a.transport) && a.nativeId != 0 && a.nativeId == b.nativeId;
 }
 
 } // namespace sdl_paddles
