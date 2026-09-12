@@ -5111,6 +5111,19 @@ static void SDL_IgnoreJoystickHintUpdated(void)
     SDL_RequestJoystickDeviceUpdate(true);
 }
 
+/* Store the gamepad's current NFC tag UID (lowercase hex), or clear it with
+   NULL or an empty string. Read by SDL_GetGamepadNfcTagUid. */
+void SDL_SendJoystickNfcTagUid(SDL_Joystick *joystick, const char *uid)
+{
+    SDL_AssertJoysticksLocked();
+
+    if (uid) {
+        SDL_strlcpy(joystick->nfc_tag_uid, uid, sizeof(joystick->nfc_tag_uid));
+    } else {
+        joystick->nfc_tag_uid[0] = '\0';
+    }
+}
+
 static void SDL_LoadVIDPIDListFromHint(const char *hint, int *num_entries, int *max_entries, Uint32 **entries)
 {
     Uint32 entry;
