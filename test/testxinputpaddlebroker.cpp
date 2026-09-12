@@ -171,8 +171,8 @@ struct Fixture {
         a->path = L"interface" + std::to_wstring(n);
         a->physical.transport = transport;
         a->physical.container.Data1 = 100 + n;
-        a->physical.nativeId = transport == PaddleTransport::UsbGip ? 1000 + n : 0;
-        if (transport == PaddleTransport::UsbGip) { a->physical.vendor = 0x045e; a->physical.product = 0x0b00; }
+        a->physical.nativeId = IsGipTransport(transport) ? 1000 + n : 0;
+        if (IsGipTransport(transport)) { a->physical.vendor = 0x045e; a->physical.product = 0x0b00; }
         a->physical.instance = L"HID\\VID_045E&PID_0B00&IG_00\\" + std::to_wstring(n);
         injection.identities[a->path] = a->physical;
         CHECK(shared->Attach(a) == n);
@@ -182,8 +182,8 @@ struct Fixture {
         ServiceDevice device;
         device.nativeId = a.physical.nativeId;
         device.viewGeneration = view;
-        device.vendor = 0x045e;
-        device.product = 0x0b00;
+        device.vendor = a.physical.vendor;
+        device.product = a.physical.product;
         injection.catalog.push_back(device);
     }
     void Ready(const Attachment &a, std::uint64_t epoch = 1, std::uint64_t provider = 0) {
@@ -900,6 +900,117 @@ void PhysicalEligibility()
     CHECK(!EligiblePhysical(0x045e, 0x02ff, physical));
     physical.transport = PaddleTransport::None;
     CHECK(!EligiblePhysical(0x045e, 0x0b22, physical));
+    physical.transport = PaddleTransport::WirelessGip;
+    physical.vendor = 0x045e;
+    physical.product = 0x0b00;
+    CHECK(EligiblePhysical(0x045e, 0x0b00, physical));
+    physical.product = 0x02fe;
+    CHECK(!EligiblePhysical(0x045e, 0x0b00, physical));
+    physical.product = 0x0b13;
+    CHECK(!EligiblePhysical(0x045e, 0x02ff, physical));
+    for (auto transport : {PaddleTransport::UsbGip, PaddleTransport::WirelessGip}) {
+        physical.transport = transport;
+        for (std::uint16_t product : {std::uint16_t{0x0b05}, std::uint16_t{0x0b22}}) {
+            physical.product = product;
+            CHECK(!EligiblePhysical(0x045e, product, physical));
+        }
+    }
+}
+
+void WirelessSharedService()
+{
+    Fixture f;
+    auto a = f.Attach(0, PaddleTransport::WirelessGip);
+    auto b = f.Attach(1, PaddleTransport::WirelessGip);
+    b->physical.nativeId = a->physical.nativeId ^ (std::uint64_t{1} << 48);
+    injection.identities[b->path] = b->physical;
+    auto standard = f.Attach(2, PaddleTransport::WirelessGip);
+    standard->physical.product = 0x0b13;
+    injection.identities[standard->path] = standard->physical;
+    CHECK(!EligiblePhysical(0x045e, 0x0b13, standard->physical));
+    auto wired = f.Attach(3);
+    f.Catalog(*a); f.Catalog(*b); f.Catalog(*standard); f.Catalog(*wired);
+    std::reverse(injection.catalog.begin(), injection.catalog.end());
+    f.Ready(*a); f.Ready(*b); f.Ready(*wired);
+    f.owner.Step(0, 10000);
+    CHECK(injection.constructs == 1 && injection.connects == 1 && injection.selects == 3);
+    CHECK(injection.acceptedSubmissions == 3 && injection.gattStarts == 0);
+    CHECK(!f.shared->Active(2, standard->token));
+    injection.batches.push_back({Packet(*b, 1, 8), Packet(*a, 1, 1),
+                                 Packet(*standard, 1, 15), Packet(*wired, 1, 4), Packet(*b, 2, 0)});
+    f.owner.Step(1, 20000);
+    auto av = f.Drain(*a), bv = f.Drain(*b), wv = f.Drain(*wired);
+    CHECK(av.size() == 1 && av[0].mask == 1);
+    CHECK(bv.size() == 2 && bv[0].mask == 8 && bv[1].mask == 0);
+    CHECK(wv.size() == 1 && wv[0].mask == 4);
+    f.shared->Detach(3, wired->token);
+    f.owner.Step(2, 30000);
+    CHECK(injection.disconnects == 0); // Wireless routes keep the shared service alive.
+    injection.catalog.erase(std::remove_if(injection.catalog.begin(), injection.catalog.end(),
+        [&](const ServiceDevice &device) { return device.nativeId == a->physical.nativeId; }), injection.catalog.end());
+    f.owner.Step(3, 40000);
+    av = f.Drain(*a);
+    CHECK(av.size() == 1 && av[0].release && av[0].mask == 0);
+    CHECK(f.shared->Active(1, b->token) && injection.disconnects == 0);
+
+    f.shared->Detach(0, a->token);
+    auto replacement = f.Attach(0, PaddleTransport::WirelessGip);
+    replacement->generation += 100;
+    f.Catalog(*replacement, 19);
+    f.Ready(*replacement, 2);
+    f.owner.Step(4, 50000);
+    CHECK(injection.connects == 1 && replacement->token != a->token);
+    injection.batches.push_back({Packet(*a, 3, 15), Packet(*replacement, 1, 2, false, 0x0c, 17, 19), Packet(*b, 3, 4)});
+    f.owner.Step(5, 60000);
+    av = f.Drain(*replacement); bv = f.Drain(*b);
+    CHECK(av.size() == 1 && av[0].mask == 2);
+    CHECK(bv.size() == 1 && bv[0].mask == 4);
+    f.shared->Publish(0, a->token, {70000, 15, false});
+    CHECK(f.Drain(*replacement).empty());
+
+    injection.pump = false;
+    f.owner.Step(6, 80000);
+    av = f.Drain(*replacement); bv = f.Drain(*b);
+    CHECK(av.size() == 1 && av[0].release && av[0].mask == 0);
+    CHECK(bv.size() == 1 && bv[0].release && bv[0].mask == 0);
+    CHECK(!f.shared->Active(0, replacement->token) && !f.shared->Active(1, b->token));
+    CHECK(injection.disconnects == 1);
+}
+
+void CatalogIdentityAgreement()
+{
+    for (auto transport : {PaddleTransport::UsbGip, PaddleTransport::WirelessGip}) {
+        for (bool afterSelect : {false, true}) {
+            Fixture f;
+            auto a = f.Attach(0, transport);
+            f.Catalog(*a);
+            if (afterSelect) f.owner.Step(0, 10000);
+            injection.catalog[0].product = 0x02e3; // Another Elite is still the wrong controller identity.
+            injection.batches.push_back({Packet(*a, 1, 15)});
+            f.owner.Step(1, 20000);
+            CHECK(!f.shared->Active(0, a->token));
+            const auto edges = f.Drain(*a);
+            CHECK(edges.size() == 1 && edges[0].release && edges[0].mask == 0);
+            CHECK(injection.acceptedSubmissions == 0);
+            CHECK(injection.selects == (afterSelect ? 1u : 0u));
+        }
+    }
+}
+
+void LegacyWirelessPaddles()
+{
+    Fixture f;
+    auto a = f.Attach(0, PaddleTransport::WirelessGip);
+    a->physical.product = 0x02e3;
+    injection.identities[a->path] = a->physical;
+    f.Catalog(*a); f.Ready(*a);
+    f.owner.Step(0, 10000);
+    CHECK(injection.selects == 1 && injection.observations == 0 && injection.submits == 0);
+    injection.batches.push_back({Packet(*a, 1, 2, false, 0x20, 29), Packet(*a, 2, 0, false, 0x20, 29)});
+    f.owner.Step(1, 20000);
+    const auto edges = f.Drain(*a);
+    CHECK(edges.size() == 2 && edges[0].mask == 1 && edges[1].mask == 0);
+    CHECK(injection.observations == 0 && injection.submits == 0);
 }
 
 void TimestampBoundaries()
@@ -957,6 +1068,9 @@ int main()
         {"view and identity replacement", ViewAndIdentityReplacement}, {"empty failure and allocation", EmptyFailureAndAllocation},
         {"retire during Select", RetireDuringSelect}, {"Quit and GATT cleanup", QuitAndGattCleanup},
         {"startup and missing view", StartupAndMissingView}, {"physical USB eligibility behind synthetic XInput ID", PhysicalEligibility},
+        {"wireless and wired controllers share one service", WirelessSharedService},
+        {"catalog and physical identity agreement", CatalogIdentityAgreement},
+        {"legacy wireless paddles need no Series 2 command", LegacyWirelessPaddles},
         {"timestamp boundaries", TimestampBoundaries},
         {"concurrent publication and retirement", ConcurrentQueueAndRetirement}
     };

@@ -83,8 +83,8 @@ bool Eligible(std::uint16_t vendor, std::uint16_t product) noexcept
 bool EligiblePhysical(std::uint16_t vendor, std::uint16_t product,
                       const PhysicalIdentity &identity) noexcept
 {
-    if (identity.transport == PaddleTransport::UsbGip) {
-        return Eligible(identity.vendor, identity.product);
+    if (IsGipTransport(identity.transport)) {
+        return IsGipPaddleHardware(identity.vendor, identity.product);
     }
     return identity.transport == PaddleTransport::Bluetooth && Eligible(vendor, product);
 }
@@ -610,10 +610,10 @@ template<class Platform> class Owner {
     {
         if (routes_[i].attachment) shared_.Fail(i, routes_[i].attachment->token, reason, now);
     }
-    void FailUsb(const char *reason, std::uint64_t now) noexcept
+    void FailGip(const char *reason, std::uint64_t now) noexcept
     {
         for (size_t i = 0; i < RouteLimit; ++i) {
-            if (routes_[i].attachment && routes_[i].attachment->physical.transport == PaddleTransport::UsbGip) Fail(i, reason, now);
+            if (routes_[i].attachment && IsGipTransport(routes_[i].attachment->physical.transport)) Fail(i, reason, now);
         }
     }
     bool Revalidate(size_t i, std::uint64_t ms, std::uint64_t now)
@@ -634,6 +634,9 @@ template<class Platform> class Owner {
     void ObserveEnable(size_t i, std::uint64_t ms, std::uint64_t now)
     {
         auto &route = routes_[i];
+        // xone publishes Series 1 paddles from ordinary reports. The 07 00
+        // extra-data command is a Series 2 initializer in xone and xpad.
+        if (route.attachment->physical.product == USB_PRODUCT_XBOX_ONE_ELITE_SERIES_1) return;
         auto &d = route.data.diagnostics;
         GipInputState input;
         d.inputValid = Platform::InputState(route.attachment->physical.nativeId, input);
@@ -703,7 +706,7 @@ template<class Platform> class Owner {
         if (!Revalidate(i, ms, now)) return;
         std::string error;
         if (!Platform::ValidateServer(client_->ServerPid(), error)) {
-            FailUsb(error.c_str(), now);
+            FailGip(error.c_str(), now);
             return;
         }
         if (!Active(i)) return;
@@ -773,11 +776,11 @@ template<class Platform> class Owner {
             }
         }
     }
-    void Usb(std::uint64_t ms, std::uint64_t now)
+    void Gip(std::uint64_t ms, std::uint64_t now)
     {
         bool any = false;
         for (size_t i = 0; i < RouteLimit; ++i) {
-            if (Active(i) && routes_[i].attachment->physical.transport == PaddleTransport::UsbGip) any = true;
+            if (Active(i) && IsGipTransport(routes_[i].attachment->physical.transport)) any = true;
         }
         if (!any) {
             if (connected_) { client_->Disconnect(); connected_ = false; }
@@ -785,12 +788,12 @@ template<class Platform> class Owner {
         }
         std::string error;
         if (!connected_) {
-            if (!Platform::RuntimeAvailable(error)) { FailUsb(error.c_str(), now); return; }
+            if (!Platform::RuntimeAvailable(error)) { FailGip(error.c_str(), now); return; }
             if (!client_) client_ = std::make_unique<Service>();
-            if (!client_->Connect(error)) { FailUsb(error.c_str(), now); return; }
+            if (!client_->Connect(error)) { FailGip(error.c_str(), now); return; }
             connected_ = true;
             if (!Platform::ValidateServer(client_->ServerPid(), error)) {
-                FailUsb(error.c_str(), now);
+                FailGip(error.c_str(), now);
                 client_->Disconnect();
                 connected_ = false;
                 return;
@@ -800,7 +803,7 @@ template<class Platform> class Owner {
         if (!client_->Pump(packets, error)) {
             // False retires all routes even if an allocation failure prevented
             // the service from emitting its individual retirement markers.
-            FailUsb(error.c_str(), now);
+            FailGip(error.c_str(), now);
             client_->Disconnect();
             connected_ = false;
             return;
@@ -809,14 +812,15 @@ template<class Platform> class Owner {
         const auto devices = client_->Devices();
         for (size_t i = 0; i < RouteLimit; ++i) {
             auto &route = routes_[i];
-            if (!Active(i) || route.attachment->physical.transport != PaddleTransport::UsbGip) continue;
+            if (!Active(i) || !IsGipTransport(route.attachment->physical.transport)) continue;
             const ServiceDevice *match = nullptr;
             unsigned matches = 0;
             for (const auto &device : devices) {
                 if (device.nativeId == route.attachment->physical.nativeId) { match = &device; ++matches; }
             }
             if (route.selected) {
-                if (matches != 1 || !match->viewGeneration || match->viewGeneration != route.data.view) {
+                if (matches != 1 || !match->viewGeneration || match->viewGeneration != route.data.view ||
+                    match->vendor != route.attachment->physical.vendor || match->product != route.attachment->physical.product) {
                     Fail(i, "Service view changed or became ambiguous.", now);
                     continue;
                 }
@@ -827,12 +831,13 @@ template<class Platform> class Owner {
                     if (ms >= route.deadline) Fail(i, "No matching service view arrived.", now);
                     continue;
                 }
-                if (!match->viewGeneration || !Eligible(match->vendor, match->product)) {
+                if (!match->viewGeneration || !IsGipPaddleHardware(match->vendor, match->product) ||
+                    match->vendor != route.attachment->physical.vendor || match->product != route.attachment->physical.product) {
                     Fail(i, "Service catalog entry is not qualified.", now);
                     continue;
                 }
                 if (!Revalidate(i, ms, now)) continue;
-                if (!Platform::ValidateServer(client_->ServerPid(), error)) { FailUsb(error.c_str(), now); break; }
+                if (!Platform::ValidateServer(client_->ServerPid(), error)) { FailGip(error.c_str(), now); break; }
                 if (!Active(i)) continue;
                 const auto token = shared_.NewToken();
                 if (!token) { Fail(i, "Source tokens exhausted.", now); continue; }
@@ -843,7 +848,7 @@ template<class Platform> class Owner {
                     continue;
                 }
                 route.selected = true;
-                route.data.Start(PaddleTransport::UsbGip, token, match->viewGeneration);
+                route.data.Start(route.attachment->physical.transport, token, match->viewGeneration);
                 TraceAttachment(route, trace::Kind::Attachment);
                 route.data.Service(shared_, i, *route.attachment, bootstrap, Platform::PublicationQpc(now));
             }
@@ -861,7 +866,7 @@ public:
     {
         try {
             Reconcile(ms, now);
-            Usb(ms, now);
+            Gip(ms, now);
             for (size_t i = 0; i < RouteLimit; ++i) {
                 auto &route = routes_[i];
                 if (!Active(i) || !route.gatt) continue;
@@ -880,11 +885,11 @@ public:
             if (!Active(i)) Drop(routes_[i]);
             else active = true;
         }
-        bool usb = false;
+        bool gip = false;
         for (const auto &route : routes_) {
-            if (route.attachment && route.attachment->physical.transport == PaddleTransport::UsbGip) usb = true;
+            if (route.attachment && IsGipTransport(route.attachment->physical.transport)) gip = true;
         }
-        if (!usb && connected_) { client_->Disconnect(); connected_ = false; }
+        if (!gip && connected_) { client_->Disconnect(); connected_ = false; }
         // An unsuccessful initial RoInitialize has no GATT objects to pump.
         if (failed_) return INFINITE;
         GattPaddleError cleanup;
@@ -1158,13 +1163,13 @@ extern "C" void SDL_XINPUT_PaddleOpen(SDL_Joystick *joystick, Uint8 user)
         std::string error;
         if (!ResolvePaddleIdentity(attachment->path.c_str(), attachment->index, attachment->count, attachment->physical, error)) return;
         if (!EligiblePhysical(vendor, product, attachment->physical)) return;
-        if (attachment->physical.transport == PaddleTransport::UsbGip && !PaddleUsbRuntimeAvailable(error)) {
+        if (IsGipTransport(attachment->physical.transport) && !PaddleUsbRuntimeAvailable(error)) {
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "XInput paddles runtime unavailable: %s", error.c_str());
             return;
         }
         // GATT uses the public Windows 10 WinRT contract. No private service or
         // loaded-image inference is needed for this transport.
-        if (attachment->physical.transport != PaddleTransport::UsbGip && attachment->physical.transport != PaddleTransport::Bluetooth) return;
+        if (!IsGipTransport(attachment->physical.transport) && attachment->physical.transport != PaddleTransport::Bluetooth) return;
         Query recheck;
         if (QuerySlotAtOpen(joystick, user, recheck, "recheck") != ERROR_SUCCESS || !Matches(*attachment, recheck)) return;
         auto context = std::make_unique<Context>();

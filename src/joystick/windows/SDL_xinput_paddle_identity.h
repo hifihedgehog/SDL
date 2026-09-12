@@ -27,15 +27,28 @@
 
 namespace sdl_paddles {
 
-enum class PaddleTransport { None, Bluetooth, UsbGip };
+enum class PaddleTransport { None, Bluetooth, UsbGip, WirelessGip };
+
+constexpr bool IsGipTransport(PaddleTransport transport) noexcept
+{
+    return transport == PaddleTransport::UsbGip || transport == PaddleTransport::WirelessGip;
+}
+
+constexpr bool IsGipPaddleHardware(std::uint16_t vendor, std::uint16_t product) noexcept
+{
+    // GIP Hello identities for Elite Series 1 and 2. The 0B05 and 0B22 IDs
+    // describe Bluetooth presentations and do not qualify a GIP initializer.
+    return vendor == 0x045e && (product == 0x02e3 || product == 0x0b00);
+}
 
 struct PhysicalIdentity {
     PaddleTransport transport = PaddleTransport::None;
     GUID container{};
     std::uint64_t nativeId = 0;
     std::wstring instance;
-    // USB hardware identity comes from the verified physical parent. XUSB can
-    // expose Microsoft's generic 02FF product in its public slot metadata.
+    // Wired identity comes from the physical controller parent. Wireless GIP
+    // uses the controller child, never the receiver's VID/PID. XUSB can expose
+    // Microsoft's generic 02FF product in its public slot metadata.
     std::uint16_t vendor = 0, product = 0;
 };
 
