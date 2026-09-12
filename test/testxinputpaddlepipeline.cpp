@@ -121,9 +121,10 @@ struct TraceCapture {
     ~TraceCapture() { trace::SetEnabled(false); }
 };
 
-static void Replay(bool gatt)
+static void Replay(bool gatt, PaddleTransport gipTransport = PaddleTransport::UsbGip)
 {
-    stage = gatt ? "GATT captured payload path" : "ServicePacket captured payload path";
+    stage = gatt ? "GATT captured payload path" : gipTransport == PaddleTransport::WirelessGip ?
+        "Wireless GIP shared payload replay" : "ServicePacket captured payload path";
     TraceCapture capture;
     CHECK(trace::Enabled());
     auto shared = std::make_unique<Shared>();
@@ -135,7 +136,7 @@ static void Replay(bool gatt)
     attachment->user = 0;
     attachment->count = 1;
     attachment->trace = true;
-    attachment->physical.transport = gatt ? PaddleTransport::Bluetooth : PaddleTransport::UsbGip;
+    attachment->physical.transport = gatt ? PaddleTransport::Bluetooth : gipTransport;
     attachment->physical.nativeId = gatt ? 0 : 0x1234;
     attachment->physical.container.Data1 = 1;
     attachment->physical.instance = L"offline captured pipeline fixture";
@@ -260,9 +261,10 @@ int main()
         CHECK(std::size(cases) == 14);
         Replay(false);
         Replay(true);
+        Replay(false, PaddleTransport::WirelessGip);
         CORE(PaddlePipelineFailures() == 0);
         PaddlePipelineQuit();
-        std::printf("PASS 14 captured ServicePacket cases plus releases, 7 captured GATT cases plus releases; checks=%u core_checks=%u\n",
+        std::printf("PASS USB and wireless GIP replay of 14 saved cases plus releases, 7 GATT cases plus releases, checks=%u core_checks=%u\n",
             checks, PaddlePipelineChecks());
         return 0;
     } catch (const std::exception &error) {

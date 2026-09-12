@@ -23,6 +23,7 @@
 #endif
 #include "SDL_xinput_paddle_wgi.h"
 #include "SDL_xinput_paddle_trace.h"
+#include "SDL_xinput_paddle_decode.h"
 #include <windows.gaming.input.h>
 #include <windows.gaming.input.custom.h>
 #include <windows.gaming.input.preview.h>
@@ -177,7 +178,8 @@ struct State {
             record.epoch = c->inputEpoch;
             trace::Push(record);
         } else if (kind == InputKind::Message && bytes) {
-            const bool normal = messageClass == custom::GipMessageClass_LowLatency && id == 0 && size == 46;
+            const bool normal = messageClass == custom::GipMessageClass_LowLatency && id == 0 &&
+                                SDL_XInputPaddleNormalSizeValid(size);
             // The proven initializer requires this provider's own normal frame.
             // It also covers initial delivery when no resume callback preceded it.
             if (normal && !c->lifecycleSeen && !c->inputEpoch) {

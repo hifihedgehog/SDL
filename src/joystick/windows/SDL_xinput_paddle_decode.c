@@ -75,6 +75,9 @@ SDL_XInputPaddleResult SDL_XInputPaddleDecode(SDL_XInputPaddleState *state,
                 result.sample.digital_comparison = SDL_XInputPaddleCompare(data, state->normal);
             }
         } else if (report_id == 0x20) {
+            if (!SDL_XInputPaddleNormalSizeValid(size)) {
+                return result;
+            }
             /* SDL_hidapi_xboxone.c:1119-1180 defines these payload layouts.
              * xpad.c:1256-1288 and xone gamepad.c:430-462 agree on the
              * Series 1 / 4.x / early 5.x fields and physical bit order.
