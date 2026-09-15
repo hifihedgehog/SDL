@@ -451,6 +451,8 @@ void ApiAndContention() {
     GipInputState inputState;
     CHECK(!QueryGipInputState(123,inputState));
     CHECK(!SubmitGipEnable(123,1,1,1,1)); // Offline startup cannot activate WGI.
+    GipInputPacket packet; std::size_t count=1; bool gap=true;
+    CHECK(DrainGipInput(123,&packet,1,count,gap)&&count==0&&!gap); // No broker, nothing queued.
 }
 
 void CapturedReadinessAndRearm() {
@@ -557,6 +559,54 @@ void RepeatedAttemptsInOneEpoch() {
     // A provider that was never ready admits no re-send either.
     Attachment cold(s,counts,12,false);
     CHECK(!Input(s,12).everReady&&!Submit(s,12,2,130,false,2)&&!Submit(s,12,2,130,false,1));
+}
+
+// The provider's own reports feed the broker's provider source while the input
+// service publishes nothing for the same device.
+void ProviderRingDrain() {
+    State s; Counts counts; Attachment a(s,counts,11);
+    std::array<GipInputPacket,80> out{};
+    std::size_t count=0; bool gap=false;
+    // The ready attachment already delivered one 46-byte normal frame.
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==1&&!gap);
+    CHECK(out[0].messageClass==custom::GipMessageClass_LowLatency&&out[0].id==0&&out[0].size==46);
+    CHECK(out[0].provider==a.ticket.serial&&out[0].epoch==1&&out[0].sourceTime==2&&out[0].receivedQpc);
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==0&&!gap);
+    // Separate 17-byte reports and normal frames keep their bytes and order.
+    const auto split=Hex<17>("1000000000007bfeaefd5fff5afc0f0000");
+    CHECK(Message(a.inner,300,custom::GipMessageClass_Command,0x0c,5,17,split.data())==S_OK);
+    std::array<BYTE,46> normal{}; normal[0]=0x10; normal[45]=0x2a;
+    CHECK(Message(a.inner,301,custom::GipMessageClass_LowLatency,0,6,46,normal.data())==S_OK);
+    // Unknown shapes are not queued: a 16-byte 0x0c, a 20-byte normal, a key.
+    CHECK(Message(a.inner,302,custom::GipMessageClass_Command,0x0c,7,16,split.data())==S_OK);
+    CHECK(Message(a.inner,303,custom::GipMessageClass_LowLatency,0,8,20,normal.data())==S_OK);
+    CHECK(Message(a.inner,304,custom::GipMessageClass_Command,0x07,9,17,split.data())==S_OK);
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==2&&!gap);
+    CHECK(out[0].id==0x0c&&out[0].size==17&&out[0].sequence==5&&std::memcmp(out[0].bytes.data(),split.data(),17)==0&&out[0].bytes[14]==0x0f);
+    CHECK(out[1].id==0&&out[1].size==46&&out[1].sequence==6&&out[1].bytes[0]==0x10&&out[1].bytes[45]==0x2a&&out[1].sourceTime==301);
+    // Reports queue while suspended, so a background client keeps its source.
+    Suspend(a.inner,400);
+    CHECK(Message(a.inner,401,custom::GipMessageClass_Command,0x0c,10,17,split.data())==S_OK);
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==1&&out[0].sourceTime==401&&out[0].epoch==1);
+    Resume(a.inner,402);
+    // Overflow drops the oldest and reports one gap.
+    for(unsigned i=0;i<65;++i) { normal[1]=static_cast<BYTE>(i); CHECK(Message(a.inner,1000+i,custom::GipMessageClass_LowLatency,0,static_cast<BYTE>(i),46,normal.data())==S_OK); }
+    CHECK(s.DrainInput(11,out.data(),10,count,gap)&&count==10&&gap);
+    CHECK(out[0].sourceTime==1001&&out[0].bytes[1]==1&&out[9].sourceTime==1010);
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==54&&!gap&&out[0].sourceTime==1011&&out[53].sourceTime==1064);
+    // Contention and invalid ids report false, not an empty drain.
+    AcquireSRWLockExclusive(&s.lock);
+    const bool blocked=!s.DrainInput(11,out.data(),out.size(),count,gap);
+    ReleaseSRWLockExclusive(&s.lock);
+    CHECK(blocked&&!s.DrainInput(0,out.data(),out.size(),count,gap)&&!s.DrainInput(11,nullptr,out.size(),count,gap));
+    // A duplicate native id drains nothing, and so does a closing cell.
+    Normal(a.inner,2000);
+    { Attachment duplicate(s,counts,11,false);
+      CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==0); }
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==1&&out[0].sourceTime==2000);
+    Normal(a.inner,2001);
+    a.Remove();
+    CHECK(s.DrainInput(11,out.data(),out.size(),count,gap)&&count==0);
 }
 
 void NativeImplicitResumeOrder() {
@@ -937,7 +987,7 @@ int main() {
         Identifiers(); CommandsAndTimeout(); QueuesAndExhaustion(); LateCatalogAndCrossRemoval();
         KnownNormalShapes();
         OldCleanupAndNewPending(); AggregationAndLimits(); FactoryMetadata(); ApiAndContention();
-        CapturedReadinessAndRearm(); RepeatedAttemptsInOneEpoch(); NativeImplicitResumeOrder(); ColdStartAndShapes(); SuspendBeforeDispatch();
+        CapturedReadinessAndRearm(); RepeatedAttemptsInOneEpoch(); ProviderRingDrain(); NativeImplicitResumeOrder(); ColdStartAndShapes(); SuspendBeforeDispatch();
         ConcurrentRetirement(); ConcurrentRetirement(true); ConcurrentEpochsAndWake();
         EpochSaturation(); QueuedGenerationsShareProvider(); UndispatchedResourceRecovery();
         ResourceRetryRespectsQueueLimit(); PassiveRawReplay(); TraceOverflowAndDisabledReadiness();

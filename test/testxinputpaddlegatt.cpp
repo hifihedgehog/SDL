@@ -426,9 +426,12 @@ int main()
     test("retire every phase cancels once and waits for terminal", [] {
         for (auto phase : {Phase::Idle, Phase::Discover, Phase::Open, Phase::Verify, Phase::Services,
                 Phase::ServicesUncached, Phase::Characteristics, Phase::CharacteristicsUncached,
-                Phase::ReadOriginal, Phase::WriteNotify, Phase::Streaming, Phase::ReadRestore, Phase::WriteRestore, Phase::Done}) {
+                Phase::ReadOriginal, Phase::WriteNone, Phase::WriteNotify, Phase::Streaming, Phase::ReadRestore, Phase::WriteRestore, Phase::Done}) {
             Fixture f;
             f.stats->emptyServices = f.stats->emptyCharacteristics = true;
+            // WriteNone exists only for an inherited Notify, which then reads
+            // back unchanged at retirement and needs no restore write.
+            if (phase == Phase::WriteNone) { f.stats->original = Cccd::Notify; }
             if (phase == Phase::ReadRestore || phase == Phase::WriteRestore || phase == Phase::Done) {
                 f.Reach(Phase::Streaming); f.Retire();
                 f.Pump();
@@ -485,13 +488,42 @@ int main()
         CHECK(packets[0].attachmentGeneration == 77);
         f.Complete(AsyncStatus::Canceled); f.Finish();
     });
-    test("preexisting notify and indicate subscriptions are preserved", [] {
-        for (auto original : {Cccd::Notify, Cccd::Indicate, static_cast<Cccd>(3)}) {
+    test("preexisting notify runs a none-then-notify transition", [] {
+        // A subscribed client can be silent while Windows reports Notify from
+        // its bond cache. Only a real transition reaches the controller.
+        Fixture f; f.stats->original = Cccd::Notify; f.Reach(Phase::ReadOriginal); f.Complete();
+        CHECK(f.machine.phase == Phase::ReadOriginal && !f.stats->pending && f.stats->subscribed);
+        f.Pump();
+        CHECK(f.machine.phase == Phase::WriteNone && f.stats->pending);
+        f.Complete(); f.Pump();
+        CHECK(f.machine.phase == Phase::WriteNotify && f.stats->pending);
+        f.Complete();
+        CHECK(f.machine.phase == Phase::Streaming && f.gate->active.load());
+        CHECK(f.stats->Count(Phase::WriteNone) == 1 && f.stats->Count(Phase::WriteNotify) == 1);
+        // The descriptor reads back as found, so nothing is restored.
+        f.Retire(); f.Finish();
+        CHECK(f.stats->Count(Phase::ReadRestore) == 1 && f.stats->Count(Phase::WriteRestore) == 0);
+    });
+    test("retirement between the two writes restores the original notify", [] {
+        for (auto readBack : {Cccd::None, Cccd::Notify}) {
+            Fixture f; f.stats->original = Cccd::Notify; f.stats->current = readBack;
+            f.Reach(Phase::WriteNone); f.Retire(); f.Complete(); f.Finish();
+            CHECK(f.stats->Count(Phase::WriteNotify) == 0 && f.stats->Count(Phase::ReadRestore) == 1);
+            CHECK(f.stats->Count(Phase::WriteRestore) == (readBack == Cccd::None ? 1u : 0u));
+        }
+        // A None original that reads back None after the Notify write also
+        // needs no restore, and a Notify read-back does.
+        for (auto readBack : {Cccd::None, Cccd::Notify}) {
+            Fixture f; f.stats->current = readBack; f.Reach(Phase::Streaming); f.Retire(); f.Finish();
+            CHECK(f.stats->Count(Phase::WriteRestore) == (readBack == Cccd::Notify ? 1u : 0u));
+        }
+    });
+    test("indicate and combined subscriptions are rejected", [] {
+        for (auto original : {Cccd::Indicate, static_cast<Cccd>(3)}) {
             Fixture f; f.stats->original = original; f.Reach(Phase::ReadOriginal); f.Complete();
-            if (original == Cccd::Notify) { CHECK(f.machine.phase == Phase::Streaming); }
-            else { CHECK(f.machine.retired && f.machine.error.code == Code::Unsupported); }
+            CHECK(f.machine.retired && f.machine.error.code == Code::Unsupported);
             f.Retire(); f.Finish();
-            CHECK(f.stats->Count(Phase::WriteNotify) == 0 && f.stats->Count(Phase::ReadRestore) == 0);
+            CHECK(f.stats->Count(Phase::WriteNone) == 0 && f.stats->Count(Phase::WriteNotify) == 0 && f.stats->Count(Phase::ReadRestore) == 0);
         }
     });
     test("later CCCD policy change skips restore", [] {
