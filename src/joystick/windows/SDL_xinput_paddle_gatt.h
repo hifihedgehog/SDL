@@ -43,10 +43,14 @@ struct GattPaddlePacket {
     bool retired = false;
 };
 
+// After ReadOriginal, a descriptor already at Notify is written to None and
+// then back to Notify. Windows caches the descriptor per bond and can satisfy
+// a same-value write from that cache, so only a real transition reaches the
+// controller. A silent subscribed client is revived by this transition.
 enum class GattPaddlePhase {
     Idle, Discover, Open, Verify, Services, ServicesUncached,
     Characteristics, CharacteristicsUncached,
-    ReadOriginal, WriteNotify, Streaming, ReadRestore, WriteRestore, Done
+    ReadOriginal, WriteNone, WriteNotify, Streaming, ReadRestore, WriteRestore, Done
 };
 
 enum class GattPaddleErrorCode {
@@ -94,6 +98,11 @@ public:
     void Retire() noexcept;
     bool Finished() const noexcept;
     std::uint64_t BluetoothAddress() const noexcept;
+    // Owner thread only. Streaming means the handler is attached and both
+    // descriptor writes completed. It does not establish that payloads arrive.
+    bool Streaming() const noexcept;
+    GattPaddleError LastError() const noexcept;
+    GattPaddlePhase Phase() const noexcept;
 
     // Prefer Retire + Pump until Finished before destruction. Early destruction
     // transfers cleanup to a bounded orphan slot. Call this on the SAME owner

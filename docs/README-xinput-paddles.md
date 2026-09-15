@@ -55,6 +55,23 @@ byte 16 is opaque. Endpoint association uses checked Windows device metadata.
 Cleanup restores a CCCD value changed by this client after checking its current
 value.
 
+The client never trusts an inherited Notify. Windows caches the descriptor per
+bond and can satisfy a same-value write from that cache, and a subscribed
+client can then receive nothing while the descriptor still reads Notify. After
+reading the descriptor, the client writes None and then Notify, so the
+controller sees a real transition. Retirement restores the value it found when
+the descriptor holds None or Notify, and leaves any other value alone.
+
+A transient failure (the service still held by a killed process, a lost link,
+a timeout, a cleanup or resource error) does not retire the route. The client
+is recreated after a backoff that starts at 1 s, doubles, caps at 8 s, and
+resets once a client delivers. Identity, contract, thread, and apartment
+failures stay permanent. Only SDL sees the ordinary XInput state, so it
+requests a new client when the state has changed for 1 s with no vendor
+payload while the client reports streaming. That request recreates the client
+at once, at most once per 3 s, and the new client's transition revives the
+stream. An idle controller never trips it.
+
 USB and Xbox Wireless Adapter connections use one process-level client of the
 existing input service. Each selected
 device has a separate view generation and owned copies of its input packets.
@@ -88,6 +105,18 @@ background client whose provider is suspended by the same switch can still
 re-send, because the command needs only a provider that was ready once. A
 resume starts a new epoch and the first command again follows that provider's
 own normal frame.
+
+The input service can stop publishing readings to every client after standby
+while the WGI provider in the same process still receives every normal frame
+and every `0x0C`. The WGI module keeps a bounded copy of the provider's own
+reports, 64 per provider. The route publishes from those copies once the
+provider has delivered 16 normal frames with no service reading for 250 ms,
+and it switches back on the first live service reading, releasing the paddle
+state at each switch. The service is preferred because it keeps delivering to
+a background client whose provider WGI has suspended. A device the service
+never lists starts in provider mode at the 10 s deadline when the provider has
+delivered 16 normal frames, and adopts the view if it appears later. Pairing
+detection, the focus poll, and the re-send run in both modes.
 
 The private GIP layout is qualified against the complete file profile in
 `SDL_xinput_paddle_runtime.cpp`: the service executable, inbox and redistributable
@@ -126,9 +155,14 @@ Close and Quit retire delivery without waiting under SDL's joystick lock.
 
 Joystick properties under `SDL.joystick.xinput.paddle.` expose `received_20`,
 `received_0c`, `received_gatt`, `gaps`, `enable_status`, `command_attempt`,
-`resends`, `pairing_losses`, `focus_changes`, `pairing_armed`, `data_available`,
-and `error`. The private `SDL.joystick.xinput.paddle_mask` property describes
-capability. These properties are diagnostic, not a public SDL API contract.
+`resends`, `pairing_losses`, `focus_changes`, `pairing_armed`, `source` (0 none,
+1 service, 2 provider), `provider_20`, `provider_0c`, `provider_discarded`,
+`source_switches`, `gatt_phase`, `gatt_streaming`, `gatt_error`, `gatt_hresult`,
+`gatt_retries`, `gatt_rearms`, `data_available`, and `error`. The private
+`SDL.joystick.xinput.paddle_mask` property describes capability. These
+properties are diagnostic, not a public SDL API contract. Trace records add
+`source-changed`, `gatt-retry`, and `gatt-rearm`, and raw records carry their
+origin: `service`, `wgi`, or `gatt`.
 
 Set `SDL_JOYSTICK_XINPUT_PADDLE_TRACE` to `1` before Open and enable input debug
 logging for bounded passive traces. Records include WGI resume/suspend and raw

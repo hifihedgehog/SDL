@@ -40,6 +40,12 @@ struct Injection {
     std::vector<std::uint64_t> retired;
     std::vector<std::string> calls;
     std::function<void()> inSelect;
+    // Bluetooth client behavior and the provider drain.
+    GattPaddleError gattError;
+    bool gattStreaming = true, drainInput = true, providerGap = false;
+    GattPaddlePhase gattPhase = GattPaddlePhase::Streaming;
+    std::map<std::uint64_t, std::deque<std::vector<GipInputPacket>>> providerBatches;
+    unsigned drains = 0;
 } injection;
 
 struct FakeService {
@@ -83,17 +89,25 @@ struct FakeGatt {
     bool retired = false;
     FakeGatt(GUID, std::uint64_t generation) noexcept : token(generation) { injection.lastSource = generation; }
     ~FakeGatt() { if (retired) ++injection.orphans; }
-    bool Start(GattPaddleError &) noexcept { ++injection.gattStarts; return injection.gattStart; }
-    bool Pump(std::vector<GattPaddlePacket> &packets, GattPaddleError &) {
+    bool Start(GattPaddleError &error) noexcept {
+        ++injection.gattStarts;
+        error = injection.gattStart ? GattPaddleError{} : injection.gattError;
+        return injection.gattStart;
+    }
+    bool Pump(std::vector<GattPaddlePacket> &packets, GattPaddleError &error) {
         packets.clear();
         if (!injection.gattBatches.empty()) {
             packets = std::move(injection.gattBatches.front());
             injection.gattBatches.pop_front();
             for (auto &packet : packets) if (!packet.attachmentGeneration) packet.attachmentGeneration = token;
         }
+        error = injection.gattPump ? GattPaddleError{} : injection.gattError;
         return injection.gattPump;
     }
     void Retire() noexcept { retired = true; ++injection.gattRetires; }
+    bool Streaming() const noexcept { return !retired && injection.gattStreaming; }
+    GattPaddlePhase Phase() const noexcept { return injection.gattPhase; }
+    GattPaddleError LastError() const noexcept { return injection.gattError; }
 };
 
 struct FakePlatform {
@@ -158,6 +172,19 @@ struct FakePlatform {
     }
     static void RetireEnable(std::uint64_t token) noexcept { injection.retired.push_back(token); }
     static std::uint32_t ForegroundProcess() noexcept { return injection.foreground; }
+    static bool DrainInput(std::uint64_t native, GipInputPacket *out, std::size_t capacity, std::size_t &count, bool &gap) noexcept {
+        ++injection.drains;
+        count = 0; gap = false;
+        if (!injection.drainInput) return false;
+        auto &queue = injection.providerBatches[native];
+        if (!queue.empty()) {
+            const auto &batch = queue.front();
+            for (const auto &packet : batch) if (count < capacity) out[count++] = packet;
+            queue.pop_front();
+        }
+        gap = std::exchange(injection.providerGap, false);
+        return true;
+    }
     static unsigned PumpRetired(GattPaddleError &) noexcept { ++injection.orphanPumps; return injection.orphans; }
 };
 
@@ -452,9 +479,268 @@ void GattMarkers()
     packet.hasPayload = false;
     packet.retired = true;
     data.Gatt(*f.shared, 0, *a, {packet}, 40000);
-    CHECK(!f.shared->Active(0, a->token));
+    // A retired client releases the state. The owner decides between a new
+    // client and a route failure from the client's error.
+    CHECK(f.shared->Active(0, a->token));
     values = f.Drain(*a);
-    CHECK(values.size() == 1 && values[0].release && values[0].mask == 0);
+    CHECK(values.size() == 1 && values[0].release && values[0].mask == 0 && values[0].qpc == 40000);
+}
+
+// Provider copies as the WGI module queues them: class 1 id 0 normal frames
+// and class 0 id 0x0C separate reports.
+GipInputPacket ProviderNormal(std::uint64_t time, std::uint8_t sequence, std::uint8_t byte18 = 0)
+{
+    GipInputPacket packet;
+    packet.provider = 1; packet.epoch = 1; packet.sourceTime = time; packet.receivedQpc = time * 10;
+    packet.messageClass = 1; packet.id = 0; packet.sequence = sequence; packet.size = 46;
+    packet.bytes[18] = byte18;
+    return packet;
+}
+GipInputPacket ProviderSplit(std::uint64_t time, std::uint8_t sequence, std::uint8_t mask)
+{
+    GipInputPacket packet;
+    packet.provider = 1; packet.epoch = 1; packet.sourceTime = time; packet.receivedQpc = time * 10;
+    packet.messageClass = 0; packet.id = 0x0C; packet.sequence = sequence; packet.size = 17;
+    packet.bytes[14] = mask;
+    return packet;
+}
+std::vector<GipInputPacket> ProviderPairs(std::uint64_t firstTime, unsigned pairs, std::uint8_t mask)
+{
+    std::vector<GipInputPacket> batch;
+    for (unsigned i = 0; i < pairs; ++i) {
+        batch.push_back(ProviderNormal(firstTime + i * 10, static_cast<std::uint8_t>(2 * i)));
+        batch.push_back(ProviderSplit(firstTime + i * 10 + 1, static_cast<std::uint8_t>(2 * i + 1), mask));
+    }
+    return batch;
+}
+
+std::uint64_t ArmedRoute(Fixture &f, const Attachment &a);
+
+void GattRetryBackoff()
+{
+    Fixture f;
+    auto a = f.Attach(0, PaddleTransport::Bluetooth);
+    injection.gattStart = false;
+    injection.gattError = {GattPaddleErrorCode::NotConnected, GattPaddlePhase::Open, static_cast<std::int32_t>(HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED))};
+    // A transient start failure keeps the route, releases the state, and
+    // schedules a new client at 1 s, then 3 s, then 7 s.
+    CHECK(f.owner.Step(0, 10000) == 2);
+    Diagnostics d;
+    auto edges = f.Drain(*a, true, &d);
+    CHECK(f.shared->Active(0, a->token) && injection.gattStarts == 1 && injection.gattRetires == 1);
+    CHECK(edges.size() == 1 && edges[0].release && d.gattRetries == 1 && !d.failed);
+    CHECK(d.gattErrorCode == static_cast<std::uint32_t>(GattPaddleErrorCode::NotConnected));
+    f.owner.Step(999, 20000);
+    CHECK(injection.gattStarts == 1);
+    f.owner.Step(1000, 30000);
+    CHECK(injection.gattStarts == 2);
+    f.owner.Step(2999, 40000);
+    CHECK(injection.gattStarts == 2);
+    f.owner.Step(3000, 50000);
+    CHECK(injection.gattStarts == 3);
+    f.owner.Step(6999, 60000);
+    CHECK(injection.gattStarts == 3);
+    f.owner.Step(7000, 70000);
+    CHECK(injection.gattStarts == 4);
+    f.Drain(*a, true, &d);
+    CHECK(d.gattRetries == 4 && f.shared->Active(0, a->token));
+    // The backoff caps at 8 s: 7000 + 8000 = 15000.
+    f.owner.Step(14999, 80000);
+    CHECK(injection.gattStarts == 4);
+    f.owner.Step(15000, 90000);
+    CHECK(injection.gattStarts == 5);
+    f.owner.Step(22999, 100000);
+    CHECK(injection.gattStarts == 5);
+    // A client that starts and then delivers resets the backoff to 1 s.
+    injection.gattStart = true;
+    f.owner.Step(23000, 110000);
+    CHECK(injection.gattStarts == 6);
+    GattPaddlePacket packet;
+    packet.hasPayload = true;
+    packet.bytes[14] = 4;
+    injection.gattBatches.push_back({packet});
+    f.owner.Step(23001, 120000);
+    CHECK(f.Drain(*a, true, &d).back().mask == 4 && d.gattStreaming);
+    injection.gattPump = false;
+    injection.gattError = {GattPaddleErrorCode::Timeout, GattPaddlePhase::Streaming, static_cast<std::int32_t>(HRESULT_FROM_WIN32(ERROR_TIMEOUT))};
+    f.owner.Step(23002, 130000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].release && d.gattRetries == 6 && !d.gattStreaming && injection.gattStarts == 6);
+    injection.gattPump = true;
+    f.owner.Step(24001, 140000);
+    CHECK(injection.gattStarts == 6);
+    f.owner.Step(24002, 150000);
+    CHECK(injection.gattStarts == 7 && f.shared->Active(0, a->token));
+    // An identity failure is permanent.
+    injection.gattStart = false;
+    injection.gattError = {GattPaddleErrorCode::IdentityMismatch, GattPaddlePhase::Verify, E_FAIL};
+    injection.gattPump = false;
+    f.owner.Step(24003, 160000);
+    f.Drain(*a, true, &d);
+    CHECK(!f.shared->Active(0, a->token) && d.failed);
+}
+
+void GattRearmRequests()
+{
+    Fixture f;
+    auto a = f.Attach(0, PaddleTransport::Bluetooth);
+    f.owner.Step(0, 10000);
+    GattPaddlePacket packet;
+    packet.hasPayload = true;
+    packet.bytes[14] = 1;
+    injection.gattBatches.push_back({packet});
+    f.owner.Step(1, 20000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).back().mask == 1 && injection.gattStarts == 1 && d.gattStreaming);
+    const auto firstSource = injection.lastSource;
+    // A request tears the client down at once and starts a new one with a
+    // fresh generation. The held paddle is released.
+    f.shared->Rearm(0, a->token);
+    f.owner.Step(2, 30000);
+    auto edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].release && edges[0].qpc == 30000);
+    CHECK(injection.gattRetires == 1 && injection.gattStarts == 1 && !d.gattStreaming);
+    CHECK(d.gattRearms == 1 && d.gattRetries == 0 && f.shared->Active(0, a->token));
+    // The replacement is created on the next pass, with no backoff.
+    f.owner.Step(3, 35000);
+    CHECK(injection.gattStarts == 2 && injection.lastSource != firstSource);
+    // Old-generation packets are ignored, new-generation packets publish.
+    GattPaddlePacket stale = packet;
+    stale.attachmentGeneration = firstSource;
+    injection.gattBatches.push_back({stale});
+    f.owner.Step(4, 40000);
+    CHECK(f.Drain(*a).empty());
+    packet.bytes[14] = 8;
+    injection.gattBatches.push_back({packet});
+    f.owner.Step(5, 50000);
+    CHECK(f.Drain(*a, true, &d).back().mask == 8 && d.gatt == 2 && d.gattStreaming);
+    // A second request inside the interval is dropped.
+    f.shared->Rearm(0, a->token);
+    f.owner.Step(6, 60000);
+    f.owner.Step(2999, 70000);
+    f.Drain(*a, true, &d);
+    CHECK(injection.gattStarts == 2 && d.gattRearms == 1);
+    f.shared->Rearm(0, a->token);
+    f.owner.Step(3002, 80000);
+    f.owner.Step(3003, 85000);
+    f.Drain(*a, true, &d);
+    CHECK(injection.gattStarts == 3 && d.gattRearms == 2);
+    // A request for the wrong token is ignored.
+    f.shared->Rearm(0, a->token + 1);
+    f.owner.Step(7000, 90000);
+    CHECK(injection.gattStarts == 3);
+}
+
+// The service publishes nothing while the provider delivers every frame.
+void ServiceSilentProviderSwitch()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    ArmedRoute(f, *a);
+    const auto native = a->physical.nativeId;
+    // Fifteen pairs while the service is still counted as live are discarded.
+    injection.providerBatches[native].push_back(ProviderPairs(1000, 15, 2));
+    f.owner.Step(300, 30000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).empty());
+    CHECK(d.source == Source::Service && d.providerNormal == 15 && d.providerSeparate == 15 && d.providerDiscarded == 30);
+    // The sixteenth normal frame after 250 ms of service silence switches.
+    injection.providerBatches[native].push_back(ProviderPairs(1150, 1, 2));
+    f.owner.Step(301, 40000);
+    auto edges = f.Drain(*a, true, &d);
+    CHECK(d.source == Source::Provider && d.sourceSwitches == 1 && d.providerDiscarded == 30);
+    CHECK(edges.size() == 3 && edges[0].release && edges[0].mask == 0 && edges[0].qpc == 40000);
+    CHECK(edges[1].mask == 0 && !edges[1].release && edges[2].mask == 2 && !edges[2].release);
+    CHECK(d.normal == 0 && d.separate == 0 && d.providerNormal == 16 && d.providerSeparate == 16 && d.dataAvailable);
+    // Provider frames keep publishing and keep the pairing armed.
+    injection.providerBatches[native].push_back(ProviderPairs(1200, 3, 6));
+    f.owner.Step(302, 50000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 3 && edges.back().mask == 6 && d.pairingArmed && d.pairingLosses == 0);
+    // One live service reading switches back with a release, and later
+    // provider frames are discarded again.
+    injection.batches.push_back({Packet(*a, 1, 4)});
+    f.owner.Step(303, 60000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(d.source == Source::Service && d.sourceSwitches == 2);
+    CHECK(edges.size() == 2 && edges[0].release && edges[0].qpc == 60000 && edges[1].mask == 4);
+    injection.providerBatches[native].push_back(ProviderPairs(1300, 2, 8));
+    f.owner.Step(304, 70000);
+    CHECK(f.Drain(*a, true, &d).empty() && d.providerDiscarded == 34 && d.separate == 1);
+}
+
+void ProviderPairingLossAndGap()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    const auto resendAt = ArmedRoute(f, *a);
+    const auto native = a->physical.nativeId;
+    injection.providerBatches[native].push_back(ProviderPairs(1000, 16, 1));
+    f.owner.Step(300, 30000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).back().mask == 1 && d.source == Source::Provider);
+    // Two provider normals without a 0x0C between them: the same re-send.
+    injection.providerBatches[native].push_back({ProviderNormal(2000, 40), ProviderNormal(2010, 41)});
+    f.owner.Step(301, 40000);
+    auto edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 1 && edges[0].release && d.pairingLosses == 1 && d.source == Source::Provider);
+    f.owner.Step(resendAt + 301, 50000);
+    CHECK(injection.acceptedSubmissions == 2 && injection.lastAttempt == 2);
+    f.owner.Step(resendAt + 302, 60000);
+    f.Drain(*a, true, &d);
+    CHECK(d.pairingArmed && d.source == Source::Provider);
+    // A ring overflow releases the state before the frames that follow.
+    injection.providerGap = true;
+    injection.providerBatches[native].push_back(ProviderPairs(3000, 1, 9));
+    f.owner.Step(resendAt + 303, 70000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(edges.size() == 2 && edges[0].release && edges[0].qpc == 70000 && edges.back().mask == 9 && d.gaps == 1);
+}
+
+// The service never lists the device, but the provider delivers its frames.
+void NoViewProviderMode()
+{
+    Fixture f;
+    auto a = f.Attach(0);
+    const auto native = a->physical.nativeId;
+    f.owner.Step(0, 10000);
+    injection.providerBatches[native].push_back(ProviderPairs(1000, 8, 3));
+    f.owner.Step(1, 20000);
+    injection.providerBatches[native].push_back(ProviderPairs(2000, 8, 3));
+    f.owner.Step(2, 30000);
+    Diagnostics d;
+    CHECK(f.Drain(*a, true, &d).empty() && d.source == Source::None && injection.selects == 0);
+    // At the deadline the route starts in provider mode instead of failing.
+    injection.providerBatches[native].push_back(ProviderPairs(3000, 2, 5));
+    f.Ready(*a);
+    injection.result = GipEnableStatus::Success;
+    f.owner.Step(AcquisitionTimeoutMs, 40000);
+    auto edges = f.Drain(*a, true, &d);
+    CHECK(f.shared->Active(0, a->token) && d.source == Source::Provider && !d.failed);
+    CHECK(edges.size() == 3 && edges.back().mask == 5 && d.providerNormal == 2 && d.providerSeparate == 2);
+    // The enable command still goes out in provider mode.
+    CHECK(injection.acceptedSubmissions == 1 && injection.lastAttempt == 1);
+    f.owner.Step(AcquisitionTimeoutMs + 1, 50000);
+    f.Drain(*a, true, &d);
+    CHECK(d.commandDispatched && d.pairingArmed);
+    // The view appears later. Selection adopts it and the first live reading
+    // switches the source back to the service.
+    f.Catalog(*a);
+    injection.bootstrap[native] = {Packet(*a, 1, 0, true, 0x20, 46)};
+    f.owner.Step(AcquisitionTimeoutMs + 2, 60000);
+    f.Drain(*a, true, &d);
+    CHECK(injection.selects == 1 && d.source == Source::Provider && d.sourceSwitches == 0);
+    injection.batches.push_back({Packet(*a, 2, 12)});
+    f.owner.Step(AcquisitionTimeoutMs + 3, 70000);
+    edges = f.Drain(*a, true, &d);
+    CHECK(d.source == Source::Service && d.sourceSwitches == 1 && edges.size() == 2 && edges[0].release && edges[1].mask == 12);
+    // Without provider frames the deadline still fails the route.
+    Fixture g;
+    auto b = g.Attach(0);
+    g.owner.Step(0, 10000);
+    injection.providerBatches[b->physical.nativeId].push_back(ProviderPairs(100, 15, 1));
+    g.owner.Step(1, 20000);
+    CHECK(g.owner.Step(AcquisitionTimeoutMs, 30000) == INFINITE && !g.shared->Active(0, b->token));
 }
 
 void OwnerSingleClientAndEnable()
@@ -1348,6 +1634,11 @@ int main()
         {"held retired SDL contexts release routes", HeldRetiredContexts}, {"Open-only bounded busy retry", OpenOnlyBusyRetry},
         {"bootstrap and live edges", BootstrapAndLiveEdges}, {"gap preserves split mode", GapPreservesSeparateMode},
         {"layouts and 46-byte candidate", KnownLayoutsAndCandidate}, {"GATT markers", GattMarkers},
+        {"GATT retry backoff and permanent failure", GattRetryBackoff},
+        {"GATT re-arm requests", GattRearmRequests},
+        {"silent service switches to the provider and back", ServiceSilentProviderSwitch},
+        {"provider pairing loss and gap", ProviderPairingLossAndGap},
+        {"no service view enters provider mode", NoViewProviderMode},
         {"legacy 46-byte edges and separate authority", Legacy46ThenSeparate},
         {"single client and enable sequencing", OwnerSingleClientAndEnable}, {"qualification rejection", QualificationFailures},
         {"WGI admission retry and terminal results", WgiAdmissionRetry}, {"WGI admission deadline", WgiAdmissionDeadline},

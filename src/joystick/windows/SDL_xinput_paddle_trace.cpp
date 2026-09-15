@@ -134,6 +134,9 @@ const char *Name(Kind kind) noexcept
     case Kind::PairingLost: return "pairing-lost";
     case Kind::FocusChanged: return "focus-changed";
     case Kind::CommandRearm: return "command-rearm";
+    case Kind::SourceChanged: return "source-changed";
+    case Kind::GattRetry: return "gatt-retry";
+    case Kind::GattRearm: return "gatt-rearm";
     }
     return "unknown";
 }
