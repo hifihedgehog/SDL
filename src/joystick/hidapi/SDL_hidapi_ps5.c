@@ -259,6 +259,9 @@ typedef struct
     EDS5LEDResetState led_reset_state;
     Uint64 sensor_ticks;
     Uint32 last_tick;
+    // Last published value of the eight status bytes at payload offset 40
+    // (hifihedgehog/SDL#28 follow-up, PadForge#433).
+    Uint64 status_bytes;
     union
     {
         PS5SimpleStatePacket_t simple;
@@ -1461,6 +1464,27 @@ static void HIDAPI_DriverPS5_HandleStatePacket(SDL_Joystick *joystick, SDL_hid_d
     }
 
     HIDAPI_DriverPS5_HandleStatePacketCommon(joystick, dev, ctx, (PS5StatePacketCommon_t *)packet, timestamp);
+
+    {
+        // Payload bytes 40..47 are what a game with adaptive triggers reads
+        // back: the touch timestamp, the right and left trigger feedback
+        // (stop-location nibble, status nibble), the host timestamp echo,
+        // and the active trigger effect modes (right low nibble, left high
+        // nibble). dualsense-tester offset.util.ts atStatus0/atStatus1/
+        // hostTimestamp/atStatus2 and DS4Windows e9eaef8 DS4State.cs
+        // DualSenseRawInputStatus.TryRead read the same range. An app that
+        // presents a virtual DualSense stamps them into its own report.
+        // Byte 40 is bits 0..7 and byte 47 is bits 56..63.
+        Uint64 status = 0;
+        int i;
+        for (i = 0; i < 8; ++i) {
+            status |= ((Uint64)packet->rgucUnknown1[i]) << (8 * i);
+        }
+        if (status != ctx->status_bytes) {
+            ctx->status_bytes = status;
+            SDL_SetNumberProperty(SDL_GetJoystickProperties(joystick), "SDL.joystick.hidapi.ps5.status_bytes", (Sint64)status);
+        }
+    }
 
     SDL_memcpy(&ctx->last_state, packet, sizeof(ctx->last_state));
 }
