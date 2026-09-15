@@ -83,6 +83,37 @@ constexpr std::uint64_t ResendIntervalMs = 250;
 // observing the change. The pairing detector remains the fallback either way.
 constexpr std::uint64_t FocusSettleMs = 100;
 enum RearmReason : std::uint8_t { RearmNone = 0, RearmPairing = 1, RearmFocus = 2 };
+// A GATT client that fails for a transient reason (the service still held by
+// a killed process, a lost link, a timeout) is recreated with backoff. One that
+// is subscribed and silent while the ordinary state changes is recreated at
+// once, and the new client's None-then-Notify transition revives the stream.
+constexpr std::uint64_t GattBackoffMinMs = 1000;
+constexpr std::uint64_t GattBackoffMaxMs = 8000;
+constexpr std::uint64_t GattRearmIntervalMs = 3000;
+// The WGI provider in the same process receives every normal frame and every
+// 0x0C. When the input service has published nothing for a device while the
+// provider delivered this many normal frames over this much time, the route
+// publishes from the provider until the service delivers again.
+constexpr unsigned ProviderSwitchFrames = 16;
+constexpr std::uint64_t ProviderSwitchSilenceMs = 250;
+constexpr std::size_t ProviderDrainLimit = 64;
+enum class Source : std::uint8_t { None = 0, Service = 1, Provider = 2 };
+enum class Origin : std::uint8_t { Service = 0, Wgi = 1, Gatt = 2 };
+
+bool PermanentGattFailure(GattPaddleErrorCode code) noexcept
+{
+    switch (code) {
+    case GattPaddleErrorCode::InvalidIdentity:
+    case GattPaddleErrorCode::IdentityMismatch:
+    case GattPaddleErrorCode::AmbiguousIdentity:
+    case GattPaddleErrorCode::Unsupported:
+    case GattPaddleErrorCode::WrongThread:
+    case GattPaddleErrorCode::WrongApartment:
+        return true;
+    default:
+        return false;
+    }
+}
 
 bool Eligible(std::uint16_t vendor, std::uint16_t product) noexcept
 {
@@ -149,6 +180,7 @@ struct TraceRecord {
     size_t size = 0, copied = 0;
     std::uint8_t rawMask = 0, mask = 0, profile = 0;
     bool gatt = false, bootstrap = false, gap = false;
+    Origin origin = Origin::Service;
     std::array<std::uint8_t, 64> bytes{};
 };
 
@@ -198,11 +230,16 @@ struct Diagnostics {
     std::uint64_t normal = 0, separate = 0, gatt = 0;
     std::uint64_t malformed = 0, gaps = 0, overflows = 0, states = 0;
     std::uint64_t attempt = 0, resends = 0, pairingLosses = 0, focusChanges = 0;
+    std::uint64_t providerNormal = 0, providerSeparate = 0, providerDiscarded = 0, sourceSwitches = 0;
+    std::uint64_t gattRetries = 0, gattRearms = 0;
     std::uint32_t enableStatus = 0;
+    std::uint32_t gattPhase = 0, gattErrorCode = 0;
+    std::int32_t gattHresult = 0;
+    Source source = Source::None;
     GipInputState input;
     HRESULT commandError = S_OK;
     bool inputValid = false, commandDispatched = false, admissionExpired = false;
-    bool pairingArmed = false;
+    bool pairingArmed = false, gattStreaming = false;
     bool failed = false, dataAvailable = false;
     char reason[160]{};
 };
@@ -240,6 +277,9 @@ class Shared {
         std::shared_ptr<const Attachment> wanted;
         EventQueue queue;
         Diagnostics diagnostics;
+        // SDL-side requests to recreate a silent GATT client. The owner acts
+        // on a changed count, at most once per GattRearmIntervalMs.
+        std::uint64_t rearmRequests = 0;
     };
     SRWLOCK lock_ = SRWLOCK_INIT;
     std::array<Slot, RouteLimit> slots_{};
@@ -297,10 +337,26 @@ public:
                 slot.wanted = std::move(attachment);
                 slot.queue.Clear();
                 slot.diagnostics = {};
+                slot.rearmRequests = 0;
             }
         }
         Signal();
         return free;
+    }
+    void Rearm(size_t index, std::uint64_t token) noexcept
+    {
+        {
+            Lock lock(lock_);
+            if (index >= RouteLimit || slots_[index].token != token || !slots_[index].wanted) return;
+            ++slots_[index].rearmRequests;
+        }
+        Signal();
+    }
+    std::uint64_t RearmRequests(size_t index, std::uint64_t token) noexcept
+    {
+        Lock lock(lock_);
+        if (index >= RouteLimit || slots_[index].token != token) return 0;
+        return slots_[index].rearmRequests;
     }
     std::array<std::shared_ptr<const Attachment>, RouteLimit> Wanted() noexcept
     {
@@ -465,14 +521,51 @@ struct DataRoute {
     // means the controller stopped its unmapped-state reporting.
     bool pairingArmed = false, unpairedNormal = false, pairingLost = false, haveSeparateTime = false;
     std::uint64_t unpairedSinceMs = 0, lastSeparateTime = 0;
+    // The service is the preferred GIP source because it keeps delivering to
+    // a background client whose provider WGI has suspended. The provider takes
+    // over only after ProviderSwitchFrames normal frames with the service silent
+    // for ProviderSwitchSilenceMs, and the first live service reading switches back.
+    Source source = Source::None;
+    std::uint64_t lastServiceMs = 0;
+    unsigned providerFramesSinceService = 0;
 
-    void Start(PaddleTransport transport, std::uint64_t token, std::uint64_t generation = 0) noexcept
+    void Start(PaddleTransport transport, std::uint64_t token, std::uint64_t generation = 0, std::uint64_t ms = 0) noexcept
     {
         *this = {};
         sourceToken = token;
         view = generation;
+        lastServiceMs = ms;
         SDL_XInputPaddleReset(&decoder, transport == PaddleTransport::Bluetooth ?
             SDL_XINPUT_PADDLE_VENDOR_GATT : SDL_XINPUT_PADDLE_SERVICE_GIP, token);
+        if (transport != PaddleTransport::Bluetooth) SetSource(Source::Service);
+    }
+    // A recreated GATT client gets a fresh generation. Counters survive.
+    void Restart(std::uint64_t token) noexcept
+    {
+        const auto kept = diagnostics;
+        const auto transport = decoder.transport;
+        sourceToken = token;
+        SDL_XInputPaddleReset(&decoder, transport, token);
+        latest = 0;
+        haveState = false;
+        candidate46 = false;
+        lastReading = 0;
+        DisarmPairing();
+        diagnostics = kept;
+        diagnostics.dataAvailable = false;
+    }
+    // A service view that appears after the provider took over keeps the route
+    // and its decoder. The first live reading switches the source back.
+    void AdoptView(std::uint64_t generation, std::uint64_t ms) noexcept
+    {
+        view = generation;
+        lastServiceMs = ms;
+        lastReading = 0;
+    }
+    void SetSource(Source value) noexcept
+    {
+        source = value;
+        diagnostics.source = value;
     }
     // Discard cached values but preserve the learned split-report mode.
     void Forget() noexcept
@@ -529,9 +622,12 @@ struct DataRoute {
     {
         if (pairingArmed && unpairedNormal && ms >= unpairedSinceMs + PairingWindowMs) pairingLost = true;
     }
-    bool Decode(std::uint32_t id, const std::uint8_t *bytes, size_t size) noexcept
+    // received_20 and received_0c count service readings only. Provider frames
+    // have their own counters so a silent service stays visible.
+    bool Decode(std::uint32_t id, const std::uint8_t *bytes, size_t size, Origin origin = Origin::Service) noexcept
     {
         if (decoder.transport == SDL_XINPUT_PADDLE_VENDOR_GATT) ++diagnostics.gatt;
+        else if (origin == Origin::Wgi) { /* counted by Provider() */ }
         else if (id == 0x20) ++diagnostics.normal;
         else if (id == 0x0C) ++diagnostics.separate;
         const auto result = SDL_XInputPaddleDecode(&decoder, decoder.transport, sourceToken, id, bytes, size);
@@ -600,6 +696,11 @@ struct DataRoute {
             // readings can leave holes, so only duplicates/backward IDs reject.
             if (!packet.reading.generation || packet.reading.generation <= lastReading) continue;
             lastReading = packet.reading.generation;
+            if (!packet.bootstrap) {
+                lastServiceMs = ms;
+                providerFramesSinceService = 0;
+                if (source == Source::Provider) SwitchSource(shared, index, attachment, Source::Service, now);
+            }
             const bool ready = Decode(packet.reading.reportId, packet.reading.bytes.data(), packet.reading.bytes.size());
             if (!packet.bootstrap) ObservePairing(packet.reading.reportId, packet.reading.bytes.size(), packet.reading.timestamp, ms);
             shared.CaptureDecoded(index, attachment.token, traceId, lastResult, timestamp);
@@ -611,14 +712,80 @@ struct DataRoute {
         if (bootstrap && bootstrapState) shared.Publish(index, attachment.token, {now, latest, false, bootstrapTrace});
         shared.Report(index, attachment.token, diagnostics);
     }
+    // Switching sources releases the published state, because the two sources
+    // have independent caches and the last sample of one cannot be trusted
+    // against the next sample of the other.
+    void SwitchSource(Shared &shared, size_t index, const Attachment &attachment, Source value, std::uint64_t now) noexcept
+    {
+        Forget();
+        // The pairing detector stays armed across sources. Only the pending
+        // normal frame from the previous source is dropped.
+        unpairedNormal = pairingLost = false;
+        SetSource(value);
+        ++diagnostics.sourceSwitches;
+        shared.Publish(index, attachment.token, {now, 0, true});
+        trace::Record record;
+        record.kind = trace::Kind::SourceChanged; record.nativeId = attachment.physical.nativeId;
+        record.attachment = sourceToken; record.view = view; record.instance = attachment.instanceId;
+        record.status = static_cast<std::int32_t>(value); record.sequence = diagnostics.sourceSwitches;
+        trace::Push(record);
+    }
+    // The provider's own copies of the normal and 0x0C reports. While the
+    // service delivers, they only count. After ProviderSwitchFrames normal
+    // frames with the service silent for ProviderSwitchSilenceMs, they publish.
+    void Provider(Shared &shared, size_t index, const Attachment &attachment,
+                  const GipInputPacket *packets, size_t count, bool gap, std::uint64_t now, std::uint64_t ms) noexcept
+    {
+        if (decoder.transport != SDL_XINPUT_PADDLE_SERVICE_GIP || !sourceToken) return;
+        if (gap && source == Source::Provider) {
+            Gap();
+            shared.Publish(index, attachment.token, {now, 0, true});
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const auto &packet = packets[i];
+            const bool normal = packet.messageClass == 1 && packet.id == 0 && SDL_XInputPaddleNormalSizeValid(packet.size);
+            const bool split = packet.messageClass == 0 && packet.id == 0x0C && packet.size == 17;
+            if (!normal && !split) continue;
+            if (normal) ++diagnostics.providerNormal; else ++diagnostics.providerSeparate;
+            if (source != Source::Provider) {
+                if (normal) ++providerFramesSinceService;
+                if (providerFramesSinceService >= ProviderSwitchFrames && ms >= lastServiceMs + ProviderSwitchSilenceMs) {
+                    SwitchSource(shared, index, attachment, Source::Provider, now);
+                } else {
+                    ++diagnostics.providerDiscarded;
+                    continue;
+                }
+            }
+            const std::uint32_t id = normal ? 0x20 : 0x0C;
+            const auto size = static_cast<size_t>(std::min<std::uint32_t>(packet.size, static_cast<std::uint32_t>(packet.bytes.size())));
+            const auto timestamp = packet.receivedQpc ? std::min(now, packet.receivedQpc) : now;
+            std::uint64_t traceId = 0;
+            if (attachment.trace) {
+                TraceRecord raw;
+                raw.origin = Origin::Wgi; raw.source = sourceToken; raw.view = view; raw.nativeId = attachment.physical.nativeId;
+                raw.sequence = packet.sequence; raw.sourceTime = packet.sourceTime; raw.qpc = timestamp; raw.report = id;
+                raw.size = packet.size; raw.copied = size;
+                if (size) std::memcpy(raw.bytes.data(), packet.bytes.data(), size);
+                traceId = shared.CaptureRaw(index, attachment.token, raw);
+            }
+            const bool ready = Decode(id, packet.bytes.data(), size, Origin::Wgi);
+            ObservePairing(id, size, packet.sourceTime, ms);
+            shared.CaptureDecoded(index, attachment.token, traceId, lastResult, timestamp);
+            if (ready) shared.Publish(index, attachment.token, {timestamp, latest, false, traceId});
+        }
+        shared.Report(index, attachment.token, diagnostics);
+    }
     void Gatt(Shared &shared, size_t index, const Attachment &attachment,
               const std::vector<GattPaddlePacket> &packets, std::uint64_t now) noexcept
     {
         for (const auto &packet : packets) {
             if (packet.attachmentGeneration != sourceToken) continue;
             if (packet.retired) {
+                // The owner decides between retry and failure from the client's
+                // error. Here the cached state is released either way.
+                Forget();
+                shared.Publish(index, attachment.token, {now, 0, true});
                 shared.Report(index, attachment.token, diagnostics);
-                shared.Fail(index, attachment.token, "GATT source retired.", now);
                 return;
             }
             const auto timestamp = packet.receivedQpc > 0 ?
@@ -631,7 +798,7 @@ struct DataRoute {
                 std::uint64_t traceId = 0;
                 if (attachment.trace) {
                     TraceRecord raw;
-                    raw.gatt = true; raw.source = sourceToken; raw.qpc = timestamp;
+                    raw.gatt = true; raw.origin = Origin::Gatt; raw.source = sourceToken; raw.qpc = timestamp;
                     raw.sourceTime = static_cast<std::uint64_t>(std::max<std::int64_t>(packet.receivedQpc, 0));
                     raw.gap = packet.gap; raw.size = raw.copied = packet.bytes.size();
                     std::memcpy(raw.bytes.data(), packet.bytes.data(), raw.copied);
@@ -663,6 +830,11 @@ template<class Platform> class Owner {
         std::uint64_t attempt = 0, nextResend = 0, rearmAt = 0;
         bool selected = false, enableAttempted = false, admissionEligible = false;
         bool dispatchedInEpoch = false;
+        // Bluetooth client recreation: transient failures back off, SDL-side
+        // re-arm requests act at once but no more than once per interval.
+        std::uint64_t gattRetryAt = 0, gattBackoff = GattBackoffMinMs, nextRearmMs = 0, rearmSeen = 0;
+        // Provider normal frames seen before any service view existed.
+        unsigned providerSeenWithoutView = 0;
     };
     Shared &shared_;
     std::array<Route, RouteLimit> routes_{};
@@ -887,6 +1059,59 @@ template<class Platform> class Owner {
         }
         route = {};
     }
+    void TraceGatt(const Route &route, trace::Kind kind, const GattPaddleError &error) noexcept
+    {
+        if (!route.attachment || !route.data.sourceToken) return;
+        trace::Record record;
+        record.kind = kind; record.nativeId = route.attachment->physical.nativeId;
+        record.attachment = route.data.sourceToken; record.instance = route.attachment->instanceId;
+        record.status = error.hresult; record.report = static_cast<std::uint32_t>(error.code);
+        record.messageClass = static_cast<std::uint8_t>(error.phase);
+        record.sequence = kind == trace::Kind::GattRearm ? route.data.diagnostics.gattRearms : route.data.diagnostics.gattRetries;
+        trace::Push(record);
+    }
+    // Tear the Bluetooth client down and schedule a new one. A retry backs
+    // off after each failure. A re-arm recreates it now, and the new client's
+    // None-then-Notify transition is what revives a silent controller.
+    void RecreateGatt(size_t i, const GattPaddleError &error, bool rearm, std::uint64_t ms, std::uint64_t now) noexcept
+    {
+        auto &route = routes_[i];
+        auto &d = route.data.diagnostics;
+        d.gattErrorCode = static_cast<std::uint32_t>(error.code);
+        d.gattHresult = error.hresult;
+        d.gattStreaming = false;
+        if (route.gatt) {
+            route.gatt->Retire();
+            route.gatt.reset();
+        }
+        route.data.Forget();
+        route.data.DisarmPairing();
+        if (route.attachment) shared_.Publish(i, route.attachment->token, {now, 0, true});
+        if (rearm) {
+            ++d.gattRearms;
+            route.gattRetryAt = ms;
+            route.nextRearmMs = ms + GattRearmIntervalMs;
+            TraceGatt(route, trace::Kind::GattRearm, error);
+        } else {
+            ++d.gattRetries;
+            route.gattRetryAt = ms + route.gattBackoff;
+            route.gattBackoff = std::min(route.gattBackoff * 2, GattBackoffMaxMs);
+            TraceGatt(route, trace::Kind::GattRetry, error);
+        }
+        if (route.attachment) shared_.Report(i, route.attachment->token, d);
+    }
+    void GattFailed(size_t i, const GattPaddleError &error, std::uint64_t ms, std::uint64_t now) noexcept
+    {
+        if (PermanentGattFailure(error.code)) {
+            auto &route = routes_[i];
+            route.data.diagnostics.gattErrorCode = static_cast<std::uint32_t>(error.code);
+            route.data.diagnostics.gattHresult = error.hresult;
+            if (route.attachment) shared_.Report(i, route.attachment->token, route.data.diagnostics);
+            Fail(i, "GATT acquisition failed on identity or contract.", now);
+            return;
+        }
+        RecreateGatt(i, error, false, ms, now);
+    }
     void Reconcile(std::uint64_t ms, std::uint64_t now)
     {
         const auto wanted = shared_.Wanted();
@@ -900,14 +1125,15 @@ template<class Platform> class Owner {
             if (!Active(i)) continue;
             if (failed_) { Fail(i, "The broker owner could not start.", now); continue; }
             if (ms >= route.nextIdentity && !Revalidate(i, ms, now)) continue;
-            if (route.attachment->physical.transport == PaddleTransport::Bluetooth && !route.gatt) {
+            if (route.attachment->physical.transport == PaddleTransport::Bluetooth && !route.gatt && ms >= route.gattRetryAt) {
                 const auto token = shared_.NewToken();
                 if (!token) { Fail(i, "Source tokens exhausted.", now); continue; }
-                route.data.Start(PaddleTransport::Bluetooth, token);
+                if (route.data.sourceToken) route.data.Restart(token);
+                else route.data.Start(PaddleTransport::Bluetooth, token, 0, ms);
                 TraceAttachment(route, trace::Kind::Attachment);
                 route.gatt = std::make_unique<Gatt>(route.attachment->physical.container, token);
                 GattPaddleError error;
-                if (!route.gatt->Start(error)) Fail(i, "GATT acquisition could not start.", now);
+                if (!route.gatt->Start(error)) GattFailed(i, error, ms, now);
             }
         }
     }
@@ -959,6 +1185,10 @@ template<class Platform> class Owner {
             for (const auto &device : devices) {
                 if (device.nativeId == route.attachment->physical.nativeId) { match = &device; ++matches; }
             }
+            std::array<GipInputPacket, ProviderDrainLimit> provided{};
+            size_t providedCount = 0;
+            bool providedGap = false;
+            const bool drained = Platform::DrainInput(route.attachment->physical.nativeId, provided.data(), provided.size(), providedCount, providedGap);
             if (route.selected) {
                 if (matches != 1 || !match->viewGeneration || match->viewGeneration != route.data.view ||
                     match->vendor != route.attachment->physical.vendor || match->product != route.attachment->physical.product) {
@@ -966,32 +1196,62 @@ template<class Platform> class Owner {
                     continue;
                 }
                 route.data.Service(shared_, i, *route.attachment, packets, now, ms);
+                if (drained) route.data.Provider(shared_, i, *route.attachment, provided.data(), providedCount, providedGap, now, ms);
             } else {
                 if (matches > 1) { Fail(i, "Service native identity is ambiguous.", now); continue; }
                 if (!match) {
-                    if (ms >= route.deadline) Fail(i, "No matching service view arrived.", now);
-                    continue;
+                    if (route.data.sourceToken) {
+                        // Provider mode without a view. Keep polling the catalog.
+                        if (drained) route.data.Provider(shared_, i, *route.attachment, provided.data(), providedCount, providedGap, now, ms);
+                    } else {
+                        if (drained) {
+                            for (size_t p = 0; p < providedCount; ++p) {
+                                if (provided[p].messageClass == 1 && provided[p].id == 0 && SDL_XInputPaddleNormalSizeValid(provided[p].size)) ++route.providerSeenWithoutView;
+                            }
+                        }
+                        if (ms < route.deadline) continue;
+                        // The service never showed this device, but the provider
+                        // delivers its frames. Publish from the provider and
+                        // keep looking for the view.
+                        if (route.providerSeenWithoutView < ProviderSwitchFrames) { Fail(i, "No matching service view arrived.", now); continue; }
+                        const auto token = shared_.NewToken();
+                        if (!token) { Fail(i, "Source tokens exhausted.", now); continue; }
+                        route.data.Start(route.attachment->physical.transport, token, 0, ms);
+                        route.data.SetSource(Source::Provider);
+                        TraceAttachment(route, trace::Kind::Attachment);
+                        if (drained) route.data.Provider(shared_, i, *route.attachment, provided.data(), providedCount, providedGap, now, ms);
+                    }
+                } else {
+                    if (!match->viewGeneration || !IsGipPaddleHardware(match->vendor, match->product) ||
+                        match->vendor != route.attachment->physical.vendor || match->product != route.attachment->physical.product) {
+                        Fail(i, "Service catalog entry is not qualified.", now);
+                        continue;
+                    }
+                    if (!Revalidate(i, ms, now)) continue;
+                    if (!Platform::ValidateServer(client_->ServerPid(), error)) { FailGip(error.c_str(), now); break; }
+                    if (!Active(i)) continue;
+                    std::uint64_t token = route.data.sourceToken;
+                    if (!token) token = shared_.NewToken();
+                    if (!token) { Fail(i, "Source tokens exhausted.", now); continue; }
+                    std::vector<ServicePacket> bootstrap;
+                    if (!client_->Select(match->nativeId, match->viewGeneration, true, bootstrap, error)) {
+                        if (error.rfind("retry:", 0) == 0 && ms < route.deadline) continue;
+                        if (route.data.sourceToken) {
+                            // Provider mode stays up. Try the view again next tick.
+                            if (drained) route.data.Provider(shared_, i, *route.attachment, provided.data(), providedCount, providedGap, now, ms);
+                        } else {
+                            Fail(i, error.c_str(), now);
+                            continue;
+                        }
+                    } else {
+                        route.selected = true;
+                        if (route.data.sourceToken) route.data.AdoptView(match->viewGeneration, ms);
+                        else route.data.Start(route.attachment->physical.transport, token, match->viewGeneration, ms);
+                        TraceAttachment(route, trace::Kind::Attachment);
+                        route.data.Service(shared_, i, *route.attachment, bootstrap, Platform::PublicationQpc(now), ms);
+                        if (drained) route.data.Provider(shared_, i, *route.attachment, provided.data(), providedCount, providedGap, now, ms);
+                    }
                 }
-                if (!match->viewGeneration || !IsGipPaddleHardware(match->vendor, match->product) ||
-                    match->vendor != route.attachment->physical.vendor || match->product != route.attachment->physical.product) {
-                    Fail(i, "Service catalog entry is not qualified.", now);
-                    continue;
-                }
-                if (!Revalidate(i, ms, now)) continue;
-                if (!Platform::ValidateServer(client_->ServerPid(), error)) { FailGip(error.c_str(), now); break; }
-                if (!Active(i)) continue;
-                const auto token = shared_.NewToken();
-                if (!token) { Fail(i, "Source tokens exhausted.", now); continue; }
-                std::vector<ServicePacket> bootstrap;
-                if (!client_->Select(match->nativeId, match->viewGeneration, true, bootstrap, error)) {
-                    if (error.rfind("retry:", 0) == 0 && ms < route.deadline) continue;
-                    Fail(i, error.c_str(), now);
-                    continue;
-                }
-                route.selected = true;
-                route.data.Start(route.attachment->physical.transport, token, match->viewGeneration);
-                TraceAttachment(route, trace::Kind::Attachment);
-                route.data.Service(shared_, i, *route.attachment, bootstrap, Platform::PublicationQpc(now));
             }
             if (!Active(i)) continue;
             if (focusChanged && CommandCapable(route)) {
@@ -1018,8 +1278,25 @@ public:
                 std::vector<GattPaddlePacket> packets;
                 GattPaddleError error;
                 const bool ok = route.gatt->Pump(packets, error);
+                bool delivered = false;
+                for (const auto &packet : packets) if (packet.hasPayload && packet.attachmentGeneration == route.data.sourceToken) delivered = true;
                 route.data.Gatt(shared_, i, *route.attachment, packets, Platform::PublicationQpc(now));
-                if (!ok) Fail(i, "GATT acquisition failed or retired.", now);
+                auto &d = route.data.diagnostics;
+                d.gattPhase = static_cast<std::uint32_t>(route.gatt->Phase());
+                d.gattStreaming = route.gatt->Streaming();
+                if (delivered) route.gattBackoff = GattBackoffMinMs;
+                if (!ok) {
+                    if (error.code == GattPaddleErrorCode::None) error = route.gatt->LastError();
+                    GattFailed(i, error, ms, now);
+                    continue;
+                }
+                const auto requests = shared_.RearmRequests(i, route.attachment->token);
+                if (requests != route.rearmSeen) {
+                    route.rearmSeen = requests;
+                    if (ms >= route.nextRearmMs) RecreateGatt(i, GattPaddleError{}, true, ms, now);
+                } else {
+                    shared_.Report(i, route.attachment->token, d);
+                }
             }
         } catch (...) {
             for (size_t i = 0; i < RouteLimit; ++i) Fail(i, "Broker allocation or source operation failed.", now);
@@ -1061,6 +1338,8 @@ struct NativePlatform {
                                 std::uint64_t epoch, std::uint64_t attempt) noexcept
     { return SubmitGipEnable(native, token, provider, epoch, attempt); }
     static bool Poll(std::uint64_t token, GipEnableResult &result) noexcept { return PollGipEnable(token, result); }
+    static bool DrainInput(std::uint64_t native, GipInputPacket *out, std::size_t capacity, std::size_t &count, bool &gap) noexcept
+    { return DrainGipInput(native, out, capacity, count, gap); }
     // A global query with no window message. Zero means no foreground window.
     static std::uint32_t ForegroundProcess() noexcept
     {
@@ -1132,7 +1411,18 @@ struct Context : SDLRoute {
     std::shared_ptr<const Attachment> attachment;
     bool startupUpdate = true;
     Uint64 nextDiagnostic = 0, lastTimestamp = 0;
+    // Bluetooth silence detector. Only SDL sees the ordinary XInput state, so
+    // it compares packet changes against vendor payload arrivals.
+    DWORD lastPacket = 0;
+    Uint64 lastActivityNs = 0, lastGattNs = 0, nextRearmNs = 0;
+    Sint64 lastGattCount = 0;
+    bool wasStreaming = false;
+    Source lastSource = Source::None;
+    std::uint64_t lastGattRetries = 0, lastGattRearms = 0;
 };
+constexpr Uint64 GattSilenceNs = SDL_NS_PER_SECOND;
+constexpr Uint64 GattActivityWindowNs = 2 * SDL_NS_PER_SECOND;
+constexpr Uint64 GattRearmRequestIntervalNs = 3 * SDL_NS_PER_SECOND;
 Context *contexts = nullptr;
 
 struct Query {
@@ -1221,16 +1511,30 @@ void Report(Context &context, const Diagnostics &d, Uint64 now)
     SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.pairing_losses", static_cast<Sint64>(d.pairingLosses));
     SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.focus_changes", static_cast<Sint64>(d.focusChanges));
     SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.pairing_armed", d.pairingArmed);
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.source", static_cast<Sint64>(d.source));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.provider_20", static_cast<Sint64>(d.providerNormal));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.provider_0c", static_cast<Sint64>(d.providerSeparate));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.provider_discarded", static_cast<Sint64>(d.providerDiscarded));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.source_switches", static_cast<Sint64>(d.sourceSwitches));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.gatt_phase", d.gattPhase);
+    SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.gatt_streaming", d.gattStreaming);
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.gatt_error", d.gattErrorCode);
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.gatt_hresult", d.gattHresult);
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.gatt_retries", static_cast<Sint64>(d.gattRetries));
+    SDL_SetNumberProperty(props, "SDL.joystick.xinput.paddle.gatt_rearms", static_cast<Sint64>(d.gattRearms));
     SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.data_available", d.dataAvailable && !d.failed);
     if (d.failed) SDL_SetStringProperty(props, "SDL.joystick.xinput.paddle.error", d.reason);
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
-        "XInput paddles instance=%u received20=%llu received0c=%llu receivedGatt=%llu states=%llu gaps=%llu malformed=%llu enable=%u attempt=%llu resends=%llu pairing_losses=%llu focus_changes=%llu pairing_armed=%d",
+        "XInput paddles instance=%u received20=%llu received0c=%llu receivedGatt=%llu states=%llu gaps=%llu malformed=%llu enable=%u attempt=%llu resends=%llu pairing_losses=%llu focus_changes=%llu pairing_armed=%d source=%u provider20=%llu provider0c=%llu switches=%llu gatt_phase=%u gatt_streaming=%d gatt_retries=%llu gatt_rearms=%llu",
         context.attachment->instanceId, static_cast<unsigned long long>(d.normal),
         static_cast<unsigned long long>(d.separate), static_cast<unsigned long long>(d.gatt),
         static_cast<unsigned long long>(d.states), static_cast<unsigned long long>(d.gaps + d.overflows),
         static_cast<unsigned long long>(d.malformed), d.enableStatus, static_cast<unsigned long long>(d.attempt),
         static_cast<unsigned long long>(d.resends), static_cast<unsigned long long>(d.pairingLosses),
-        static_cast<unsigned long long>(d.focusChanges), d.pairingArmed);
+        static_cast<unsigned long long>(d.focusChanges), d.pairingArmed, static_cast<unsigned>(d.source),
+        static_cast<unsigned long long>(d.providerNormal), static_cast<unsigned long long>(d.providerSeparate),
+        static_cast<unsigned long long>(d.sourceSwitches), d.gattPhase, d.gattStreaming,
+        static_cast<unsigned long long>(d.gattRetries), static_cast<unsigned long long>(d.gattRearms));
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
         "XInput paddle readiness instance=%u valid=%d provider=%llu epoch=%llu resumed=%d normal=%d split=%d busy=%d resume_time=%llu normal_time=%llu split_time=%llu wgi_error=%08x command_error=%08x dispatched=%d admission_expired=%d",
         context.attachment->instanceId, d.inputValid, static_cast<unsigned long long>(d.input.provider), static_cast<unsigned long long>(d.input.epoch),
@@ -1276,7 +1580,8 @@ void LogDataTrace(Shared &broker)
             for (size_t b = 0; b < r.copied; ++b) { hex[2*b] = digits[r.bytes[b] >> 4]; hex[2*b+1] = digits[r.bytes[b] & 15]; }
             hex[2*r.copied] = '\0';
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
-                "PADDLETRACE raw id=%llu route=%u attachment=%llu source=%llu native=%016llx view=%llu generation=%llu sequence=%llu source_time=%llu clock=%s qpc=%llu report=%02x bytes=%u copied=%u bootstrap=%d gap=%d instance=%u slot=%u openx_generation=%llu channel=%u/%u byte14=%d byte15=%d byte18=%d hex=%s",
+                "PADDLETRACE raw origin=%s id=%llu route=%u attachment=%llu source=%llu native=%016llx view=%llu generation=%llu sequence=%llu source_time=%llu clock=%s qpc=%llu report=%02x bytes=%u copied=%u bootstrap=%d gap=%d instance=%u slot=%u openx_generation=%llu channel=%u/%u byte14=%d byte15=%d byte18=%d hex=%s",
+                r.origin == Origin::Wgi ? "wgi" : r.origin == Origin::Gatt ? "gatt" : "service",
                 static_cast<unsigned long long>(r.id), static_cast<unsigned>(r.route), static_cast<unsigned long long>(r.attachment),
                 static_cast<unsigned long long>(r.source), static_cast<unsigned long long>(r.nativeId), static_cast<unsigned long long>(r.view),
                 static_cast<unsigned long long>(r.generation), static_cast<unsigned long long>(r.sequence), static_cast<unsigned long long>(r.sourceTime),
@@ -1394,6 +1699,37 @@ extern "C" void SDL_XINPUT_PaddleUpdate(SDL_Joystick *joystick)
                 static_cast<unsigned long long>(values[i].traceId), joystick->instance_id, values[i].mask, before, after,
                 values[i].release, SDL_EventEnabled(SDL_EVENT_JOYSTICK_BUTTON_DOWN), SDL_EventEnabled(SDL_EVENT_JOYSTICK_BUTTON_UP), static_cast<unsigned long long>(timestamp));
         }
+    }
+    if (context->attachment->physical.transport == PaddleTransport::Bluetooth) {
+        // Ordinary XInput state changed but no vendor payload followed: the
+        // subscribed client is silent. Ask the owner for a new client, which
+        // performs a real descriptor transition. An idle pad never trips this.
+        const DWORD packet = joystick->hwdata->dwPacketNumber;
+        if (packet != context->lastPacket) { context->lastPacket = packet; context->lastActivityNs = now; }
+        if (static_cast<Sint64>(diagnostics.gatt) != context->lastGattCount) { context->lastGattCount = static_cast<Sint64>(diagnostics.gatt); context->lastGattNs = now; }
+        if (diagnostics.gattStreaming && !context->wasStreaming) context->lastGattNs = now;
+        context->wasStreaming = diagnostics.gattStreaming;
+        if (diagnostics.gattStreaming && context->lastActivityNs > context->lastGattNs + GattSilenceNs &&
+            now - context->lastActivityNs < GattActivityWindowNs && now >= context->nextRearmNs) {
+            context->nextRearmNs = now + GattRearmRequestIntervalNs;
+            broker->Rearm(context->route, context->attachment->token);
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "XInput paddles instance=%u GATT re-arm requested: %llu ms of ordinary input without a vendor payload",
+                context->attachment->instanceId, static_cast<unsigned long long>((context->lastActivityNs - context->lastGattNs) / SDL_NS_PER_MS));
+        }
+        if (diagnostics.gattRetries != context->lastGattRetries || diagnostics.gattRearms != context->lastGattRearms) {
+            context->lastGattRetries = diagnostics.gattRetries;
+            context->lastGattRearms = diagnostics.gattRearms;
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "XInput paddles instance=%u GATT client recreated: retries=%llu rearms=%llu error=%u hresult=%08x",
+                context->attachment->instanceId, static_cast<unsigned long long>(diagnostics.gattRetries),
+                static_cast<unsigned long long>(diagnostics.gattRearms), diagnostics.gattErrorCode, static_cast<unsigned>(diagnostics.gattHresult));
+        }
+    }
+    if (diagnostics.source != context->lastSource) {
+        context->lastSource = diagnostics.source;
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "XInput paddles instance=%u source=%u switches=%llu provider20=%llu provider0c=%llu received20=%llu",
+            context->attachment->instanceId, static_cast<unsigned>(diagnostics.source), static_cast<unsigned long long>(diagnostics.sourceSwitches),
+            static_cast<unsigned long long>(diagnostics.providerNormal), static_cast<unsigned long long>(diagnostics.providerSeparate),
+            static_cast<unsigned long long>(diagnostics.normal));
     }
     Report(*context, diagnostics, now);
     if (diagnostics.failed) Retire(*context, diagnostics.reason);

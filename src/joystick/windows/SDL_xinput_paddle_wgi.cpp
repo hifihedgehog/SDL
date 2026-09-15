@@ -49,7 +49,7 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Wrappers::HString;
 using Microsoft::WRL::Wrappers::HStringReference;
 using Status = GipEnableStatus;
-constexpr unsigned CatalogLimit = 16, RequestLimit = 20, QueueLimit = 16, WorkerLimit = 4;
+constexpr unsigned CatalogLimit = 16, RequestLimit = 20, QueueLimit = 16, WorkerLimit = 4, InputRing = 64;
 constexpr std::uint64_t DeadlineMs = 10000;
 constexpr HRESULT TimeoutError = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
 constexpr HRESULT RetiredError = HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
@@ -101,6 +101,20 @@ struct CatalogCell {
     }
     custom::IGipGameControllerProvider* provider = nullptr; // Owned, released off the lock.
     IUnknown* identity = nullptr; // Owned controlling identity, not the inner.
+    // Copied provider reports for the broker's provider source. Overflow drops
+    // the oldest entry and marks a gap that the next drain reports.
+    std::array<GipInputPacket, InputRing> ring{};
+    unsigned ringBegin = 0, ringCount = 0;
+    bool ringGap = false;
+    void Queue(const GipInputPacket& packet) noexcept {
+        if (ringCount == ring.size()) {
+            ringBegin = (ringBegin + 1) % ring.size();
+            --ringCount;
+            ringGap = true;
+        }
+        ring[(ringBegin + ringCount) % ring.size()] = packet;
+        ++ringCount;
+    }
 };
 struct Request {
     std::uint64_t token = 0, nativeId = 0, generation = 0, serial = 0, submitted = 0;
@@ -161,6 +175,20 @@ struct State {
             trace::Raw(record, bytes, size);
         }
         if (c->closing) return;
+        if (kind == InputKind::Message && bytes) {
+            const bool normalShape = messageClass == custom::GipMessageClass_LowLatency && id == 0 &&
+                                     SDL_XInputPaddleNormalSizeValid(size);
+            const bool splitShape = messageClass == custom::GipMessageClass_Command && id == 0x0c && size == 17;
+            if (normalShape || splitShape) {
+                GipInputPacket packet;
+                LARGE_INTEGER qpc{};
+                if (QueryPerformanceCounter(&qpc) && qpc.QuadPart > 0) packet.receivedQpc = static_cast<std::uint64_t>(qpc.QuadPart);
+                packet.provider = c->serial; packet.epoch = c->inputEpoch; packet.sourceTime = timestamp;
+                packet.messageClass = messageClass; packet.id = id; packet.sequence = sequence; packet.size = size;
+                std::memcpy(packet.bytes.data(), bytes, (std::min)(static_cast<std::size_t>(size), packet.bytes.size()));
+                c->Queue(packet);
+            }
+        }
         if (kind == InputKind::Resumed || kind == InputKind::Suspended) {
             record.kind = kind == InputKind::Resumed ? trace::Kind::WgiResume : trace::Kind::WgiSuspend;
             if ((c->lifecycleSeen && timestamp < c->lifecycleTime) ||
@@ -230,6 +258,24 @@ struct State {
             result.busy = c.borrowers != 0;
         } else if (matches > 1) result.error = HRESULT_FROM_WIN32(ERROR_DUP_NAME);
         else if (registrationDone && FAILED(registrationError)) result.error = registrationError;
+        ReleaseSRWLockExclusive(&lock);
+        return true;
+    }
+    bool DrainInput(std::uint64_t nativeId, GipInputPacket* out, std::size_t capacity,
+                    std::size_t& count, bool& gap) noexcept {
+        count = 0; gap = false;
+        if (!nativeId || !out || !TryAcquireSRWLockExclusive(&lock)) return false;
+        Ticket ticket;
+        if (Matches(nativeId, ticket) == 1) {
+            auto& c = catalog[ticket.index];
+            while (count < capacity && c.ringCount) {
+                out[count++] = c.ring[c.ringBegin];
+                c.ringBegin = (c.ringBegin + 1) % c.ring.size();
+                --c.ringCount;
+            }
+            gap = c.ringGap;
+            c.ringGap = false;
+        }
         ReleaseSRWLockExclusive(&lock);
         return true;
     }
@@ -792,6 +838,15 @@ std::uint64_t SubmitGipEnable(std::uint64_t nativeId, std::uint64_t generation,
     auto* b = GetBroker(true);
     const auto now = GetTickCount64();
     return b ? b->state.Submit(nativeId,generation,provider,epoch,attempt,now,b->Exhausted(now)) : 0;
+}
+
+bool DrainGipInput(std::uint64_t nativeId, GipInputPacket* out, std::size_t capacity,
+                   std::size_t& count, bool& gap) noexcept
+{
+    count = 0; gap = false;
+    auto* b = GetBroker(false);
+    if (!b) return true; // No broker means no provider and nothing queued.
+    return b->state.DrainInput(nativeId, out, capacity, count, gap);
 }
 
 bool PollGipEnable(std::uint64_t token, GipEnableResult& result) noexcept

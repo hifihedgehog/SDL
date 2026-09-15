@@ -21,6 +21,8 @@
 #pragma once
 
 #include <Windows.h>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace sdl_paddles {
@@ -49,6 +51,26 @@ struct GipInputState {
     bool Ready() const noexcept { return provider && epoch && resumed && normalSeen && SUCCEEDED(error); }
     bool ResendReady() const noexcept { return provider && epoch && everReady && SUCCEEDED(error); }
 };
+
+// One copied provider report. The provider receives every normal frame and
+// every separate 0x0C in an elevated client, so these reports carry paddle
+// state whenever the input service publishes nothing for the same device.
+struct GipInputPacket {
+    std::uint64_t provider = 0, epoch = 0, sourceTime = 0, receivedQpc = 0;
+    std::uint8_t messageClass = 0, id = 0, sequence = 0;
+    std::uint32_t size = 0;
+    std::array<std::uint8_t, 64> bytes{};
+};
+
+// Copies and clears the unique active provider's queued reports, oldest first.
+// Only LowLatency id 0 normal frames of a known size and Command 0x0C frames
+// of 17 bytes are queued, regardless of the provider's resumed state. Each
+// provider keeps 64 entries. On overflow the oldest is dropped and gap is set
+// until the next drain reports it. False means lock contention or a zero id
+// (retry next tick). count is 0 with true when no unique active provider
+// matches. A drain with less capacity than queued entries leaves the rest.
+bool DrainGipInput(std::uint64_t nativeId, GipInputPacket *out, std::size_t capacity,
+                   std::size_t &count, bool &gap) noexcept;
 
 // The caller must qualify the WGI/service images and exact physical association
 // before starting observation. This starts the bounded worker pool and factory.
