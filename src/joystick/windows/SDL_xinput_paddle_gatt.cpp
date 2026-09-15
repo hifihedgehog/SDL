@@ -402,6 +402,9 @@ public:
         case Phase::ReadRestore:
             operation_ = characteristic_.ReadClientCharacteristicConfigurationDescriptorAsync();
             break;
+        case Phase::WriteNone:
+            operation_ = characteristic_.WriteClientCharacteristicConfigurationDescriptorAsync(Cccd::None);
+            break;
         case Phase::WriteNotify:
             operation_ = characteristic_.WriteClientCharacteristicConfigurationDescriptorAsync(Cccd::Notify);
             break;
@@ -491,6 +494,7 @@ public:
             Check(result.Status());
             return {result.ClientCharacteristicConfigurationDescriptor()};
         }
+        case Phase::WriteNone:
         case Phase::WriteNotify:
         case Phase::WriteRestore:
             Check(std::get<IAsyncOperation<GattCommunicationStatus>>(operation_).GetResults());
@@ -697,7 +701,9 @@ private:
         // failed. After terminal status, compare CCCD before any restoration.
         if (target == Phase::ReadRestore) { ++restoreReadAttempts_; }
         adapter->Begin(target, original_);
-        if (target == Phase::WriteNotify) { notifyAttempted_ = true; }
+        // Either write can change the descriptor, so both require the restore
+        // comparison at retirement.
+        if (target == Phase::WriteNone || target == Phase::WriteNotify) { notifyAttempted_ = true; }
         pending_ = true;
         canceled_ = false;
         started_ = now;
@@ -770,7 +776,11 @@ private:
         }
         if (phase == Phase::ReadRestore) {
             restoreChecked_ = true;
-            restoreNeeded_ = result.cccd == Cccd::Notify;
+            // Put back what this client found when the descriptor holds one of
+            // the two values this client writes, including a client retired
+            // between its None write and its Notify write. Another value is a
+            // later policy change by someone else and is left alone.
+            restoreNeeded_ = result.cccd != original_ && (result.cccd == Cccd::None || result.cccd == Cccd::Notify);
             return;
         }
         if (phase == Phase::WriteRestore) {
@@ -807,9 +817,11 @@ private:
                     break;
                 }
                 adapter->Subscribe(gate);
-                if (original_ == Cccd::Notify) { phase = Phase::Streaming; }
-                else { next_ = Phase::WriteNotify; }
+                // Never trust an inherited Notify. A subscribed client can be
+                // silent while Windows still reports Notify from its cache.
+                next_ = original_ == Cccd::Notify ? Phase::WriteNone : Phase::WriteNotify;
                 break;
+            case Phase::WriteNone: next_ = Phase::WriteNotify; break;
             case Phase::WriteNotify: phase = Phase::Streaming; break;
             default: Fail(Error(Code::OperationFailed, phase, E_UNEXPECTED), now); break;
             }
@@ -933,6 +945,22 @@ bool GattPaddleClient::Finished() const noexcept
 std::uint64_t GattPaddleClient::BluetoothAddress() const noexcept
 {
     return GetCurrentThreadId() == ownerThread_ && impl_ ? impl_->machine.adapter->Address() : 0;
+}
+
+bool GattPaddleClient::Streaming() const noexcept
+{
+    return GetCurrentThreadId() == ownerThread_ && impl_ && !retired_.load(std::memory_order_seq_cst) &&
+        !impl_->machine.retired && impl_->machine.phase == GattPaddlePhase::Streaming;
+}
+
+GattPaddleError GattPaddleClient::LastError() const noexcept
+{
+    return GetCurrentThreadId() == ownerThread_ && impl_ ? impl_->machine.error : GattPaddleError{};
+}
+
+GattPaddlePhase GattPaddleClient::Phase() const noexcept
+{
+    return GetCurrentThreadId() == ownerThread_ && impl_ ? impl_->machine.phase : GattPaddlePhase::Idle;
 }
 
 unsigned GattPaddleClient::PumpRetired(GattPaddleError& error) noexcept
