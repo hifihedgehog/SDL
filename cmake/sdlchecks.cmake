@@ -1282,6 +1282,20 @@ macro(CheckHIDAPI)
           set(HAVE_LIBUSB TRUE)
           if(SDL_HIDAPI_LIBUSB_SHARED)
             target_get_dynamic_library(dynamic_libusb LibUSB::LibUSB)
+            # PadForge fork: on Windows the DLL name comes from running dumpbin
+            # on the import library. A Visual Studio update removes the old
+            # toolset and leaves the cached CMAKE_DUMPBIN path dangling. The
+            # lookup then fails with only a warning, and the fallback is the
+            # import library's own file name. SDL would ask Windows for
+            # "libusb-1.0.lib" at runtime, the load would fail, and every
+            # libusb-only driver (wired Switch 2, GameCube adapter) would be
+            # dead in a build that compiled cleanly. Refuse that configuration.
+            if(WIN32 AND NOT dynamic_libusb MATCHES "\\.[dD][lL][lL]$")
+              message(FATAL_ERROR "Could not identify the libusb DLL name from ${LibUSB_LIBRARY} (got \"${dynamic_libusb}\"). "
+                "dumpbin is missing or its cached path is stale (CMAKE_DUMPBIN=${CMAKE_DUMPBIN}). "
+                "Delete CMakeCache.txt and the CMakeFiles directory in this build tree and configure again, "
+                "or pass -DCMAKE_DUMPBIN=<path to the current dumpbin.exe>.")
+            endif()
             if(dynamic_libusb)
               set(HAVE_HIDAPI_LIBUSB_SHARED ON)
               set(SDL_LIBUSB_DYNAMIC "\"${dynamic_libusb}\"")
