@@ -132,7 +132,7 @@ paddle_test(trace "${PADDLE_TESTS}/testxinputpaddletrace.cpp"
 # The runtime test's no-argument entry runs FakeSource cases. Its manual --live
 # branch is never registered with CTest.
 paddle_test(runtime "${PADDLE_TESTS}/testxinputpaddleruntime.cpp")
-target_link_libraries(testxinputpaddleruntime PRIVATE advapi32 bcrypt)
+target_link_libraries(testxinputpaddleruntime PRIVATE advapi32 version)
 
 paddle_test(mapping "${PADDLE_TESTS}/testxinputpaddlemapping.c")
 target_compile_definitions(testxinputpaddlemapping PRIVATE USING_GENERATED_CONFIG_H SDL_STATIC_LIB)

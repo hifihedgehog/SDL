@@ -29,23 +29,39 @@ using namespace sdl_paddles;
 using namespace sdl_paddles::runtime_detail;
 #define CHECK(x) do { if (!(x)) { throw std::runtime_error(#x); } } while (0)
 
+// A version inside each family, and a size for each stamp. The redist is the
+// bench's 3.3.221.0, and the others are the bench's Windows builds.
+static constexpr std::array<FileVersion, Profile.size()> KnownVersions{{
+    {0, 2309, 26100, 9278}, {0, 2309, 26100, 9278}, {3, 3, 221, 0}, {10, 0, 26100, 9278}, {10, 0, 26100, 8972}}};
+static constexpr std::array<std::int64_t, Profile.size()> KnownSizes{{80336, 424376, 1155456, 864256, 421888}};
+static constexpr std::size_t Redist = 2;
+static_assert(!Profile[Redist].required && Profile[0].required && Profile[1].required && Profile[3].required && Profile[4].required);
+
 struct FakeSource : Source {
     Service service{50, SERVICE_RUNNING, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
         L"C:\\Windows\\System32\\GameInputSvc.exe", L"LocalSystem", 15};
     std::vector<Process> processes{{50, 4, 0, 1000, L"GameInputSvc.exe"},
         {60, 50, 1, 2000, L"GameInputSvc.exe"}, {70, 42, 1, 3000, L"test.exe"}};
     std::array<FileStamp, Profile.size()> stamps{};
-    std::function<void(FakeSource&)> afterHashes;
+    std::array<FileVersion, Profile.size()> versions = KnownVersions;
+    std::array<bool, Profile.size()> present{{true, true, true, true, true}};
+    std::function<void(FakeSource&)> afterVersions;
     std::function<void(FakeSource&)> secondProcesses;
     std::function<void(FakeSource&)> secondService;
-    int openFailure = -1, hashFailure = -1, wrongHash = -1, changedPath = -1;
-    unsigned serviceReads = 0, processReads = 0, opens = 0, hashes = 0, checks = 0;
+    int openFailure = -1, versionFailure = -1, changedPath = -1;
+    unsigned serviceReads = 0, processReads = 0, opens = 0, reads = 0, checks = 0, presenceQueries = 0;
     FakeSource()
     {
         for (std::size_t i = 0; i < Profile.size(); ++i) {
-            stamps[i] = {1, {}, Profile[i].size, 900, 4000, FILE_ATTRIBUTE_ARCHIVE};
+            stamps[i] = {1, {}, KnownSizes[i], 900, 4000, FILE_ATTRIBUTE_ARCHIVE};
             stamps[i].id[0] = static_cast<std::uint8_t>(i + 1);
         }
+    }
+    unsigned Expected() const
+    {
+        unsigned count = 0;
+        for (std::size_t i = 0; i < Profile.size(); ++i) { count += Profile[i].required || present[i]; }
+        return count;
     }
     std::wstring SystemDirectory() const override { return L"C:\\Windows\\System32"; }
     DWORD SelfPid() const override { return 70; }
@@ -59,26 +75,29 @@ struct FakeSource : Source {
         if (++processReads == 2 && secondProcesses) { secondProcesses(*this); }
         return processes;
     }
+    bool Present(std::size_t i) override
+    {
+        CHECK(!Profile[i].required); ++presenceQueries;
+        return present[i];
+    }
     FileStamp OpenFile(std::size_t i) override
     {
-        CHECK(hashes == 0); ++opens;
+        CHECK(reads == 0); ++opens;
         if (static_cast<int>(i) == openFailure) { throw std::runtime_error("unreadable file"); }
         return stamps[i];
     }
-    std::string HashFile(std::size_t i, std::int64_t expectedSize) override
+    FileVersion ReadVersion(std::size_t i) override
     {
-        CHECK(opens == Profile.size() && expectedSize == Profile[i].size);
-        ++hashes;
-        if (static_cast<int>(i) == hashFailure) { throw std::runtime_error("short read"); }
-        std::string digest = Profile[i].sha256;
-        if (static_cast<int>(i) == wrongHash) { digest[0] = digest[0] == '0' ? '1' : '0'; }
-        if (hashes == Profile.size() && afterHashes) { afterHashes(*this); }
-        return digest;
+        CHECK(opens == Expected());
+        ++reads;
+        if (static_cast<int>(i) == versionFailure) { throw std::runtime_error("no version resource"); }
+        if (reads == Expected() && afterVersions) { afterVersions(*this); }
+        return versions[i];
     }
-    FileStamp HandleStamp(std::size_t i) override { CHECK(hashes == Profile.size()); ++checks; return stamps[i]; }
+    FileStamp HandleStamp(std::size_t i) override { CHECK(reads == Expected()); ++checks; return stamps[i]; }
     FileStamp PathStamp(std::size_t i) override
     {
-        CHECK(hashes == Profile.size()); ++checks;
+        CHECK(reads == Expected()); ++checks;
         auto value = stamps[i];
         if (static_cast<int>(i) == changedPath) { ++value.id[0]; }
         return value;
@@ -128,7 +147,44 @@ int main(int argc, char** argv)
     test("whole known profile and actual peer relationship accepted", [] {
         FakeSource s; std::string error = "stale";
         CHECK(Qualify(s, 60, true, error) && error.empty());
-        CHECK(s.hashes == Profile.size() && s.checks == 2 * Profile.size() && s.processReads == 2 && s.serviceReads == 2);
+        CHECK(s.reads == Profile.size() && s.checks == 2 * Profile.size() && s.processReads == 2 && s.serviceReads == 2);
+        CHECK(s.presenceQueries == 1);
+    });
+    test("every later revision inside a family is accepted", [] {
+        FakeSource s; std::string error;
+        s.versions[0].revision = 9457; s.versions[1].revision = 9457; s.versions[3].revision = 9500; s.versions[4].revision = 9999;
+        CHECK(Qualify(s, 60, true, error) && error.empty());
+    });
+    test("the ARM64 update set is accepted", [] {
+        FakeSource s; std::string error;
+        s.versions = {{{0, 2309, 26100, 9457}, {0, 2309, 26100, 9457}, {3, 5, 270, 0}, {10, 0, 26100, 9278}, {10, 0, 26100, 8972}}};
+        s.stamps[Redist].size = 1921152;
+        CHECK(Qualify(s, 60, true, error) && error.empty());
+    });
+    test("a revision below the floor is rejected with the file and version named", [] {
+        FakeSource s; s.versions[1].revision = 7000; std::string error;
+        CHECK(!Qualify(s, 60, true, error));
+        CHECK(error.find("GameInput.dll 0.2309.26100.7000") != std::string::npos);
+        FakeSource a; a.versions[0].revision = 8874; Reject(a);
+        FakeSource b; b.versions[3].revision = 8736; Reject(b);
+        FakeSource c; c.versions[4].revision = 8971; Reject(c);
+        FakeSource d; d.versions[0].revision = 8875; d.versions[1].revision = 8875; d.versions[3].revision = 8737;
+        std::string ok; CHECK(Qualify(d, 60, true, ok));
+    });
+    test("another major minor or build is rejected for a required file", [] {
+        FakeSource a; a.versions[0].major = 1; Reject(a);
+        FakeSource b; b.versions[1].minor = 2310; Reject(b);
+        FakeSource c; c.versions[3].build = 22621; Reject(c);
+        FakeSource d; d.versions[4].build = 26200; Reject(d);
+    });
+    test("the redist is optional and is checked by major part when present", [] {
+        FakeSource absent; absent.present[Redist] = false; std::string error;
+        CHECK(Qualify(absent, 60, true, error) && error.empty());
+        CHECK(absent.opens == Profile.size() - 1 && absent.reads == Profile.size() - 1 && absent.checks == 2 * (Profile.size() - 1));
+        FakeSource newer; newer.versions[Redist] = {3, 9, 1, 5}; CHECK(Qualify(newer, 60, true, error));
+        FakeSource older; older.versions[Redist] = {2, 9, 0, 0}; Reject(older);
+        FakeSource future; future.versions[Redist] = {4, 0, 0, 0}; Reject(future);
+        FakeSource unreadable; unreadable.present[Redist] = true; unreadable.openFailure = Redist; Reject(unreadable);
     });
     test("post-start metadata change time is not image proof or rejection", [] {
         FakeSource s; std::string error; s.stamps[2].changed = 5000;
@@ -138,29 +194,26 @@ int main(int argc, char** argv)
         FakeSource s; s.service.state = SERVICE_STOPPED; s.service.pid = 0; s.processes.clear();
         std::string error; CHECK(Qualify(s, 0, false, error)); CHECK(s.processReads == 0);
     });
-    test("every manifest component is mandatory including redist", [] {
-        for (int i = 0; i < static_cast<int>(Profile.size()); ++i) { FakeSource s; s.wrongHash = i; Reject(s); }
-    });
-    test("missing files and incomplete reads fail closed", [] {
+    test("missing files and unreadable versions fail closed", [] {
         for (int i = 0; i < static_cast<int>(Profile.size()); ++i) {
             FakeSource a; a.openFailure = i; Reject(a);
-            FakeSource b; b.hashFailure = i; Reject(b);
+            FakeSource b; b.versionFailure = i; Reject(b);
         }
     });
-    test("wrong size directory and reparse point fail", [] {
-        FakeSource a; ++a.stamps[0].size; Reject(a);
+    test("empty file directory and reparse point fail", [] {
+        FakeSource a; a.stamps[0].size = 0; Reject(a);
         FakeSource b; b.stamps[1].attributes |= FILE_ATTRIBUTE_DIRECTORY; Reject(b);
         FakeSource c; c.stamps[2].attributes |= FILE_ATTRIBUTE_REPARSE_POINT; Reject(c);
     });
-    test("earlier file change after final digest is detected", [] {
-        FakeSource s; s.afterHashes = [](FakeSource& value) { ++value.stamps[0].changed; }; Reject(s);
+    test("earlier file change after final version read is detected", [] {
+        FakeSource s; s.afterVersions = [](FakeSource& value) { ++value.stamps[0].changed; }; Reject(s);
     });
     test("path replacement detected even when original handle is stable", [] {
         FakeSource s; s.changedPath = 0; Reject(s);
     });
     test("file identity volume and write timestamp changes detected", [] {
         for (int i = 0; i < 3; ++i) {
-            FakeSource s; s.afterHashes = [i](FakeSource& v) {
+            FakeSource s; s.afterVersions = [i](FakeSource& v) {
                 if (i == 0) { ++v.stamps[1].id[0]; } else if (i == 1) { ++v.stamps[1].volume; } else { ++v.stamps[1].written; }
             }; Reject(s);
         }
@@ -193,7 +246,7 @@ int main(int argc, char** argv)
         FakeSource b; b.processes.push_back(b.processes[1]); Reject(b);
         FakeSource c; c.processes[1].name = L"Other.exe"; Reject(c);
     });
-    test("process identity changed during hashes rejected", [] {
+    test("process identity changed during version reads rejected", [] {
         FakeSource s; s.secondProcesses = [](FakeSource& value) { ++value.processes[1].created; }; Reject(s);
     });
     test("service PID state and registry metadata changes rejected", [] {

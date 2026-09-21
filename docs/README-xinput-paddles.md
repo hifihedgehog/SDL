@@ -18,9 +18,7 @@ service view. The host index in the device path is not used as controller identi
 
 The build option `SDL_XINPUT_PADDLES` enables the supplement on native MSVC x64
 and native MSVC ARM64 Windows builds with XInput and the C runtime enabled.
-ARM64EC is excluded. On ARM64 only the Bluetooth route runs. The USB and Xbox
-Wireless Adapter route needs a measured file profile, and the one in the tree
-is x64. Set the private hint
+ARM64EC is excluded. Both routes run on both architectures. Set the private hint
 `SDL_JOYSTICK_XINPUT_PADDLES` to `0` before opening the joystick to disable it.
 The Windows SDK GameInput selection remains independent of this option.
 This build adds Windows 10 WinRT API-set and Microsoft C++ runtime dependencies
@@ -121,16 +119,20 @@ never lists starts in provider mode at the 10 s deadline when the provider has
 delivered 16 normal frames, and adopts the view if it appears later. Pairing
 detection, the focus poll, and the re-send run in both modes.
 
-The private GIP layout is qualified against the complete file profile in
-`SDL_xinput_paddle_runtime.cpp`: the service executable, inbox and redistributable
-GameInput DLLs, WGI DLL, and XboxGIP driver. File identities and digests are
-checked together. A missing file, including an absent redistributable DLL,
-or an unknown or changing profile disables this GIP supplement.
-The profile lists x64 files. ARM64 Windows installs other files, so an ARM64
-build never passes this check and its GIP supplement stays off. The Bluetooth
-route has no such check, because it uses the public WinRT GATT contract alone.
-The check assumes Windows loaded a member of that supported family. It does
-not establish the exact bytes already mapped in the service process.
+The private GIP layout is qualified against the installed file families in
+`SDL_xinput_paddle_runtime.cpp`: the service executable, the inbox GameInput
+DLL, the WGI DLL, and the XboxGIP driver by version family (major, minor and
+build, with a revision floor), and the redistributable GameInput DLL by major
+version when it is present in System32. A servicing update inside a family
+keeps the route on, on x64 and on ARM64 alike, because the version resource
+carries no architecture. A file outside its family, a missing required file,
+or a file that changes during the check disables this GIP supplement, and the
+`error` property names the file and the version it found. The Bluetooth route
+has no such check, because it uses the public WinRT GATT contract alone.
+The family check assumes Windows loaded a member of that family. It does not
+establish the exact bytes already mapped in the service process, and it does
+not prove that a new build inside the family kept the format. The reader's
+layout validation on every view is what rejects such a build, before any write.
 
 The service connection also checks its peer against the service manager's
 session child. Every view is bounded and its native ID must agree with its
@@ -164,9 +166,12 @@ Joystick properties under `SDL.joystick.xinput.paddle.` expose `received_20`,
 `resends`, `pairing_losses`, `focus_changes`, `pairing_armed`, `source` (0 none,
 1 service, 2 provider), `provider_20`, `provider_0c`, `provider_discarded`,
 `source_switches`, `gatt_phase`, `gatt_streaming`, `gatt_error`, `gatt_hresult`,
-`gatt_retries`, `gatt_rearms`, `data_available`, and `error`. The private
-`SDL.joystick.xinput.paddle_mask` property describes capability. These
-properties are diagnostic, not a public SDL API contract. Trace records add
+`gatt_retries`, `gatt_rearms`, `data_available`, and `error`. When Open
+declines the route, `data_available` is false and `error` says why, for
+example which installed file sits outside its qualified family. The private
+`SDL.joystick.xinput.paddle_mask` property describes capability and is absent
+on a declined route. These properties are diagnostic, not a public SDL API
+contract. Trace records add
 `source-changed`, `gatt-retry`, and `gatt-rearm`, and raw records carry their
 origin: `service`, `wgi`, or `gatt`.
 
