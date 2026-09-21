@@ -17,7 +17,10 @@ The native controller ID joins the XInput attachment to its GIP provider and
 service view. The host index in the device path is not used as controller identity.
 
 The build option `SDL_XINPUT_PADDLES` enables the supplement on native MSVC x64
-Windows builds with XInput and the C runtime enabled. Set the private hint
+and native MSVC ARM64 Windows builds with XInput and the C runtime enabled.
+ARM64EC is excluded. On ARM64 only the Bluetooth route runs. The USB and Xbox
+Wireless Adapter route needs a measured file profile, and the one in the tree
+is x64. Set the private hint
 `SDL_JOYSTICK_XINPUT_PADDLES` to `0` before opening the joystick to disable it.
 The Windows SDK GameInput selection remains independent of this option.
 This build adds Windows 10 WinRT API-set and Microsoft C++ runtime dependencies
@@ -123,6 +126,9 @@ The private GIP layout is qualified against the complete file profile in
 GameInput DLLs, WGI DLL, and XboxGIP driver. File identities and digests are
 checked together. A missing file, including an absent redistributable DLL,
 or an unknown or changing profile disables this GIP supplement.
+The profile lists x64 files. ARM64 Windows installs other files, so an ARM64
+build never passes this check and its GIP supplement stays off. The Bluetooth
+route has no such check, because it uses the public WinRT GATT contract alone.
 The check assumes Windows loaded a member of that supported family. It does
 not establish the exact bytes already mapped in the service process.
 

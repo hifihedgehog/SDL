@@ -724,9 +724,9 @@ bool Client::Select(std::uint64_t nativeId, std::uint64_t viewGeneration, bool e
             view.catalog = false;
             return false;
         }
-        // SharedReader writes only this client's policy and issues its mfence.
+        // SharedReader writes only this client's policy and issues its fence.
         // Signal even if it was already zero after a prior selection.
-        _mm_mfence();
+        PublicationFence();
         CheckWin(impl_->api.signal(impl_->names.clientSignal.value), "publish client policy");
         view.selected = true;
         return true;

@@ -379,7 +379,7 @@ dep_option(SDL_ROCKCHIP            "Use ROCKCHIP Hardware Acceleration video dri
 dep_option(SDL_COCOA               "Use Cocoa video driver" ON "APPLE" OFF)
 dep_option(SDL_DIRECTX             "Use DirectX for Windows audio/video" ON "SDL_AUDIO OR SDL_VIDEO;WINDOWS OR CYGWIN" OFF)
 dep_option(SDL_XINPUT              "Use Xinput for Windows" ON "WINDOWS OR CYGWIN" OFF)
-dep_option(SDL_XINPUT_PADDLES      "Supplement XInput with Elite paddle reports" ON "WINDOWS;MSVC;NOT USE_CLANG;NOT USE_INTELCC;SDL_CPU_X64;SDL_XINPUT;SDL_JOYSTICK;SDL_LIBC" OFF)
+dep_option(SDL_XINPUT_PADDLES      "Supplement XInput with Elite paddle reports" ON "WINDOWS;MSVC;NOT USE_CLANG;NOT USE_INTELCC;SDL_CPU_X64 OR SDL_CPU_ARM64;SDL_XINPUT;SDL_JOYSTICK;SDL_LIBC" OFF)
 dep_option(SDL_WASAPI              "Use the Windows WASAPI audio driver" ON "WINDOWS OR CYGWIN;SDL_AUDIO" OFF)
 dep_option(SDL_RENDER_D3D          "Enable the Direct3D 9 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
 dep_option(SDL_RENDER_D3D11        "Enable the Direct3D 11 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
