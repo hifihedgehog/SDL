@@ -2751,7 +2751,7 @@ elseif(WINDOWS OR CYGWIN)
         )
         set_property(SOURCE "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_reader.cpp"
           APPEND PROPERTY COMPILE_OPTIONS "/volatile:ms")
-        sdl_link_dependency(xinput_paddles LIBS WindowsApp bcrypt cfgmgr32 ole32 advapi32)
+        sdl_link_dependency(xinput_paddles LIBS WindowsApp bcrypt cfgmgr32 ole32 advapi32 version)
       endif()
     endif()
     if(HAVE_WINDOWS_GAMING_INPUT_H)

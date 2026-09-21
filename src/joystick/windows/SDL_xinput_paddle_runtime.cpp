@@ -24,7 +24,7 @@
 #include "SDL_xinput_paddle_runtime.h"
 #include <windows.h>
 #include <winsvc.h>
-#include <bcrypt.h>
+#include <winver.h>
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -38,20 +38,50 @@ namespace runtime_detail {
 
 static_assert(sizeof(void*) == 8, "The qualified runtime is 64-bit");
 
-// One complete measured installation profile, of native x64 Windows. In
-// particular, the service EXE tries the System32 redist candidate before its
-// inbox candidate. These hashes qualify this compatible family on disk, not the
-// bytes in a running process. ARM64 Windows installs other files, so no ARM64
-// machine matches, and the USB and adapter route stays off there until a
-// measured ARM64 profile is added. An empty profile would pass every machine.
-struct ProfileFile { const wchar_t* name; std::int64_t size; const char* sha256; };
-constexpr std::array<ProfileFile, 5> Profile{{
-    {L"GameInputSvc.exe", 80336, "83ba5166dd6397ade67f4b6fddae6be61a694f487ed88ea83ee204f20be6d075"},
-    {L"GameInput.dll", 424376, "f9f5adbde4a2883b9b307bb1848a120094904578d92b21100828bd83f7b77cb6"},
-    {L"GameInputRedist.dll", 1155456, "3f9f7e49868639f00ff1942bb3a4d9bc513c6940a8e43e1b5c8c1eba765060ce"},
-    {L"Windows.Gaming.Input.dll", 864256, "2d319bd941977a536c91929d5cf46586bf58a58a2c0c33bda279af9798742491"},
-    {L"drivers\\xboxgip.sys", 421888, "ea57e827b3b739d89f68cb41460c3466eac0c9d2be128cd9f7eea6654a816db7"},
+// The installed files whose private format the reader depends on, qualified
+// by version family instead of by exact bytes, so a servicing update inside
+// the family keeps the route on. The service EXE loads the System32 redist
+// candidate when it exists and its inbox DLL otherwise, so the redist is
+// optional and is checked only when present. A file is inside its family
+// when the major, minor and build parts of its product version match and
+// its revision is at least the floor. For the two GameInput files the floor
+// is 8875, the lowest revision whose pool routines were read and matched,
+// on the ARM64 build. The x64 read was 9278. For the other two it is the
+// lowest build read. The format itself is checked again on every view by
+// the reader's layout validation, which is the gate that catches a build
+// that changed the format. The product version carries no architecture, so
+// x64 and ARM64 share this table.
+struct FileFamily { const wchar_t* name; bool required; unsigned major, minor, build, revisionFloor; };
+constexpr std::array<FileFamily, 5> Profile{{
+    {L"GameInputSvc.exe", true, 0, 2309, 26100, 8875},
+    {L"GameInput.dll", true, 0, 2309, 26100, 8875},
+    {L"GameInputRedist.dll", false, 3, 0, 0, 0},
+    {L"Windows.Gaming.Input.dll", true, 10, 0, 26100, 8737},
+    {L"drivers\\xboxgip.sys", true, 10, 0, 26100, 8972},
 }};
+
+struct FileVersion {
+    unsigned major = 0, minor = 0, build = 0, revision = 0;
+    bool operator==(FileVersion const&) const = default;
+};
+
+// The redist family pins its major part alone. Its minor and build change
+// with every redistributable release, and the reader's layout validation
+// decides whether a given release keeps the format.
+static bool InFamily(FileVersion const& version, FileFamily const& family)
+{
+    if (version.major != family.major) { return false; }
+    if (!family.required) { return true; }
+    return version.minor == family.minor && version.build == family.build && version.revision >= family.revisionFloor;
+}
+
+static std::string Describe(FileFamily const& family, FileVersion const& version)
+{
+    std::string name;
+    for (const wchar_t* c = family.name; *c; ++c) { name.push_back(*c < 128 ? static_cast<char>(*c) : '?'); }
+    return name + " " + std::to_string(version.major) + "." + std::to_string(version.minor) + "." +
+        std::to_string(version.build) + "." + std::to_string(version.revision);
+}
 
 static void Require(bool condition, const char* message)
 {
@@ -154,8 +184,9 @@ struct Source {
     virtual DWORD SelfPid() const = 0;
     virtual Service ReadService() = 0;
     virtual std::vector<Process> ReadProcesses() = 0;
+    virtual bool Present(std::size_t index) = 0;
     virtual FileStamp OpenFile(std::size_t index) = 0;
-    virtual std::string HashFile(std::size_t index, std::int64_t expectedSize) = 0;
+    virtual FileVersion ReadVersion(std::size_t index) = 0;
     virtual FileStamp HandleStamp(std::size_t index) = 0;
     virtual FileStamp PathStamp(std::size_t index) = 0;
 };
@@ -209,21 +240,28 @@ static bool Qualify(Source& source, DWORD peer, bool connected, std::string& err
         std::array<Process, 3> processes{};
         if (connected) { processes = CheckPeer(source.ReadProcesses(), before, peer, source.SelfPid()); }
         std::array<FileStamp, Profile.size()> stamps{};
-        // Snapshot and retain all five shared handles before hashing any file.
+        std::array<bool, Profile.size()> present{};
+        // Snapshot and retain every shared handle before reading any version.
         for (std::size_t i = 0; i < Profile.size(); ++i) {
+            present[i] = Profile[i].required || source.Present(i);
+            if (!present[i]) { continue; }
             stamps[i] = source.OpenFile(i);
-            Require(stamps[i].size == Profile[i].size &&
+            Require(stamps[i].size > 0 &&
                 !(stamps[i].attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)),
                 "The installed USB runtime file profile is not supported.");
         }
         for (std::size_t i = 0; i < Profile.size(); ++i) {
-            Require(source.HashFile(i, stamps[i].size) == Profile[i].sha256,
-                "The installed USB runtime does not match a supported complete file profile.");
+            if (!present[i]) { continue; }
+            const auto version = source.ReadVersion(i);
+            if (!InFamily(version, Profile[i])) {
+                throw std::runtime_error("The installed USB runtime is outside the qualified family: " + Describe(Profile[i], version) + ".");
+            }
         }
-        // Recheck every file after the LAST digest, including a path reopen.
+        // Recheck every file after the LAST read, including a path reopen.
         // This also catches replacement of an earlier file while a later file
-        // was being hashed. Handles permit write/delete sharing throughout.
+        // was being read. Handles permit write/delete sharing throughout.
         for (std::size_t i = 0; i < Profile.size(); ++i) {
+            if (!present[i]) { continue; }
             Require(source.HandleStamp(i) == stamps[i] && source.PathStamp(i) == stamps[i],
                 "The USB runtime files changed during qualification.");
         }
@@ -254,16 +292,6 @@ struct RegistryHandle {
     HKEY value = nullptr;
     ~RegistryHandle() { if (value) { RegCloseKey(value); } }
 };
-struct HashHandles {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    ~HashHandles()
-    {
-        if (hash) { BCryptDestroyHash(hash); }
-        if (algorithm) { BCryptCloseAlgorithmProvider(algorithm, 0); }
-    }
-};
-
 class WindowsSource final : public Source {
 public:
     WindowsSource()
@@ -339,39 +367,44 @@ public:
         throw std::runtime_error("The system process metadata exceeded its bounded query budget.");
     }
 
+    // Only a file that does not exist counts as absent. Any other failure to
+    // read its attributes surfaces when the file is opened.
+    bool Present(std::size_t index) override
+    {
+        const auto path = Path(index);
+        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) { return true; }
+        const DWORD error = GetLastError();
+        return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
+    }
+
     FileStamp OpenFile(std::size_t index) override
     {
         files_[index].value = OpenPath(index, GENERIC_READ);
         return Stamp(files_[index].value);
     }
 
-    std::string HashFile(std::size_t index, std::int64_t expectedSize) override
+    // The product version from the fixed block of the file's version resource.
+    // The file version's major and minor parts of the two Windows components
+    // differ by architecture (6.2 on x64, 10.0 on ARM64) while their product
+    // version is 10.0 on both. The GameInput files carry the same value in both
+    // fields. The file stays open through the read, and the stamps around it
+    // detect a replacement.
+    FileVersion ReadVersion(std::size_t index) override
     {
-        HashHandles handles;
-        Require(BCryptOpenAlgorithmProvider(&handles.algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0,
-            "Cannot initialize the runtime SHA256 provider.");
-        Require(BCryptCreateHash(handles.algorithm, &handles.hash, nullptr, 0, nullptr, 0, 0) >= 0,
-            "Cannot create the runtime SHA256 state.");
-        std::array<BYTE, 65536> bytes{};
-        std::int64_t total = 0;
-        for (;;) {
-            DWORD read = 0;
-            WinCheck(::ReadFile(files_[index].value, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr), "Cannot read the runtime file");
-            if (!read) { break; }
-            Require(read <= bytes.size() && total <= expectedSize && read <= expectedSize - total,
-                "The runtime file grew during its digest read.");
-            total += read;
-            Require(BCryptHashData(handles.hash, bytes.data(), read, 0) >= 0, "Cannot hash the runtime file.");
-        }
-        Require(total == expectedSize, "The runtime file digest read was incomplete.");
-        std::array<BYTE, 32> digest{};
-        Require(BCryptFinishHash(handles.hash, digest.data(), static_cast<ULONG>(digest.size()), 0) >= 0,
-            "Cannot finish the runtime file digest.");
-        constexpr char Hex[] = "0123456789abcdef";
-        std::string result;
-        result.reserve(64);
-        for (auto value : digest) { result.push_back(Hex[value >> 4]); result.push_back(Hex[value & 15]); }
-        return result;
+        const auto path = Path(index);
+        DWORD ignored = 0;
+        const DWORD size = GetFileVersionInfoSizeExW(FILE_VER_GET_NEUTRAL, path.c_str(), &ignored);
+        WinCheck(size != 0, "Cannot size the runtime file version resource");
+        Require(size <= 1048576, "The runtime file version resource is too large.");
+        std::vector<BYTE> block(size);
+        WinCheck(GetFileVersionInfoExW(FILE_VER_GET_NEUTRAL, path.c_str(), 0, size, block.data()), "Cannot read the runtime file version resource");
+        VS_FIXEDFILEINFO* fixed = nullptr;
+        UINT length = 0;
+        WinCheck(VerQueryValueW(block.data(), L"\\", reinterpret_cast<LPVOID*>(&fixed), &length), "Cannot query the runtime file version");
+        Require(fixed && length >= sizeof(VS_FIXEDFILEINFO) && fixed->dwSignature == 0xFEEF04BD,
+            "The runtime file version block is invalid.");
+        return {fixed->dwProductVersionMS >> 16, fixed->dwProductVersionMS & 0xFFFF,
+            fixed->dwProductVersionLS >> 16, fixed->dwProductVersionLS & 0xFFFF};
     }
 
     FileStamp HandleStamp(std::size_t index) override { return Stamp(files_[index].value); }
@@ -385,9 +418,11 @@ private:
     std::wstring system_;
     std::array<FileHandle, Profile.size()> files_{};
 
+    std::wstring Path(std::size_t index) const { return system_ + L"\\" + Profile[index].name; }
+
     HANDLE OpenPath(std::size_t index, DWORD access)
     {
-        auto path = system_ + L"\\" + Profile[index].name;
+        const auto path = Path(index);
         HANDLE result = CreateFileW(path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         WinCheck(result != INVALID_HANDLE_VALUE, "Cannot open the runtime file");
@@ -408,10 +443,11 @@ private:
     }
 };
 
-// Compatibility assumes the trusted loader's resident provider belongs to this
-// reviewed family. Stable disk metadata cannot prove historical mapped bytes.
-// Birth times reject PID reuse, not ordinary post-start metadata changes.
-// The Client still owns layout, attachment, and connection-generation checks.
+// Compatibility assumes the trusted loader's resident provider belongs to the
+// installed family. Disk metadata cannot prove historical mapped bytes. Birth
+// times reject PID reuse, not ordinary post-start metadata changes. The Client
+// owns the layout, attachment, and connection-generation checks, and those
+// are what reject a build inside the family that changed the format.
 static bool Run(DWORD peer, bool connected, std::string& error)
 {
     try {
