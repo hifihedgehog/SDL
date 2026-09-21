@@ -27,6 +27,10 @@ Visual Studio generators also work. Supply `-A x64` when configuring,
 `--config Release` when building, and `-C Release` when running CTest. ASan
 supports Release and RelWithDebInfo. It excludes Debug's incompatible `/RTC1`.
 
+The project also configures for native ARM64 (`-A ARM64`, or an ARM64 Native
+Tools prompt). An x64 machine can build those tests but cannot run them.
+Running `ctest` on that build needs ARM64 hardware. ARM64EC is rejected.
+
 Tests use C11 or C++20, `/W4 /WX`, and C++ exception handling. The mapping
 target and the pipeline's C bridge suppress C4100 for unused callback parameters
 in the included upstream `SDL_gamepad.c`. Other warnings remain errors, so a

@@ -3,17 +3,17 @@ project(SDLXInputPaddleTests LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR
    NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "These offline tests require native MSVC for Windows x64.")
+    message(FATAL_ERROR "These offline tests require native MSVC for 64-bit Windows.")
 endif()
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("
-#if !defined(_M_X64) || defined(_M_ARM64EC)
-#error Native x64 compiler required
+#if defined(_M_ARM64EC) || !(defined(_M_X64) || defined(_M_ARM64))
+#error Native x64 or native ARM64 compiler required
 #endif
 int main() { return 0; }
-" PADDLE_TEST_NATIVE_X64)
-if(NOT PADDLE_TEST_NATIVE_X64)
-    message(FATAL_ERROR "These offline tests require native x64, excluding ARM64 and ARM64EC.")
+" PADDLE_TEST_NATIVE_64)
+if(NOT PADDLE_TEST_NATIVE_64)
+    message(FATAL_ERROR "These offline tests require native x64 or native ARM64, excluding ARM64EC.")
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "Use a separate build directory for the offline tests.")

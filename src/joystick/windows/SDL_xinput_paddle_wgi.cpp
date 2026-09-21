@@ -38,7 +38,7 @@
 #include <limits>
 #include <new>
 
-static_assert(sizeof(void*) == 8, "The qualified WGI contract is x64 only");
+static_assert(sizeof(void*) == 8, "The qualified WGI contract is 64-bit");
 
 namespace sdl_paddles {
 namespace {

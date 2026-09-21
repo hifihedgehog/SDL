@@ -79,8 +79,9 @@ bool DrainGipInput(std::uint64_t nativeId, GipInputPacket *out, std::size_t capa
 // timestamps are diagnostic source times. This API publishes no SDL input.
 bool QueryGipInputState(std::uint64_t nativeId, GipInputState &state) noexcept;
 
-// Private x64 contract. nativeId is the nonzero 64-bit GIP device ID rendered
-// by public GameControllerProviderInfo.GetProviderId as GIP: plus 16 hex digits.
+// Private contract, qualified on x64. nativeId is the nonzero 64-bit GIP
+// device ID rendered by public GameControllerProviderInfo.GetProviderId as
+// GIP: plus 16 hex digits.
 // Before submission, the caller must qualify the WGI/service images, prove the
 // exact PnP-slot/SIPC/WGI association in that ID namespace, and obtain Ready()
 // from the command provider's own input epoch. A service report alone is not

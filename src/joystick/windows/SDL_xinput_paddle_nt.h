@@ -34,8 +34,8 @@
 #include <winternl.h>
 #include <cstddef>
 
-#if !defined(_MSC_VER) || !defined(_M_X64) || defined(_M_ARM64EC)
-#error This service format requires MSVC targeting native x64.
+#if !defined(_MSC_VER) || defined(_M_ARM64EC) || !(defined(_M_X64) || defined(_M_ARM64))
+#error This service format requires MSVC targeting native x64 or native ARM64.
 #endif
 
 namespace sdl_paddles::nt {
@@ -66,10 +66,29 @@ struct ViewAttribute {
 };
 struct ServerSessionInformation { ULONG sessionId, processId; };
 #pragma pack(pop)
-static_assert(sizeof(PortMessage) == 0x28 && offsetof(PortMessage, clientViewSize) == 0x20);
-static_assert(sizeof(PortAttributes) == 0x48 && offsetof(PortAttributes, maxMessageLength) == 0x10);
-static_assert(sizeof(MessageAttributes) == 8 && sizeof(ViewAttribute) == 0x20);
-static_assert(sizeof(ContextAttribute) == 0x20 && sizeof(ServerSessionInformation) == 8);
+// The wire offset of every field. Native x64 and native ARM64 lay these out
+// the same way, and a layout change stops the build.
+static_assert(sizeof(PortMessage) == 0x28 && offsetof(PortMessage, dataLength) == 0 &&
+    offsetof(PortMessage, totalLength) == 2 && offsetof(PortMessage, type) == 4 &&
+    offsetof(PortMessage, dataInfoOffset) == 6 && offsetof(PortMessage, clientId) == 8 &&
+    offsetof(PortMessage, messageId) == 0x18 && offsetof(PortMessage, clientViewSize) == 0x20);
+static_assert(sizeof(SECURITY_QUALITY_OF_SERVICE) == 0xC);
+static_assert(sizeof(PortAttributes) == 0x48 && offsetof(PortAttributes, flags) == 0 &&
+    offsetof(PortAttributes, securityQos) == 4 && offsetof(PortAttributes, maxMessageLength) == 0x10 &&
+    offsetof(PortAttributes, memoryBandwidth) == 0x18 && offsetof(PortAttributes, maxPoolUsage) == 0x20 &&
+    offsetof(PortAttributes, maxSectionSize) == 0x28 && offsetof(PortAttributes, maxViewSize) == 0x30 &&
+    offsetof(PortAttributes, maxTotalSectionSize) == 0x38 && offsetof(PortAttributes, dupObjectTypes) == 0x40 &&
+    offsetof(PortAttributes, reserved) == 0x44);
+static_assert(sizeof(MessageAttributes) == 8 && offsetof(MessageAttributes, valid) == 4);
+static_assert(sizeof(ContextAttribute) == 0x20 && offsetof(ContextAttribute, portContext) == 0 &&
+    offsetof(ContextAttribute, messageContext) == 8 && offsetof(ContextAttribute, sequence) == 0x10 &&
+    offsetof(ContextAttribute, messageId) == 0x14 && offsetof(ContextAttribute, callbackId) == 0x18);
+static_assert(sizeof(ViewAttribute) == 0x20 && offsetof(ViewAttribute, flags) == 0 &&
+    offsetof(ViewAttribute, sectionHandle) == 8 && offsetof(ViewAttribute, base) == 0x10 &&
+    offsetof(ViewAttribute, size) == 0x18);
+static_assert(sizeof(ServerSessionInformation) == 8 && offsetof(ServerSessionInformation, processId) == 4);
+static_assert(sizeof(UNICODE_STRING) == 0x10 && offsetof(UNICODE_STRING, Buffer) == 8);
+static_assert(sizeof(OBJECT_ATTRIBUTES) == 0x30 && sizeof(LARGE_INTEGER) == 8);
 
 constexpr ULONG View = 0x40000000, Context = 0x20000000;
 constexpr ULONG ViewAutoRelease = 0x20000;
