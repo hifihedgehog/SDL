@@ -36,11 +36,14 @@
 namespace sdl_paddles {
 namespace runtime_detail {
 
-static_assert(sizeof(void*) == 8, "The qualified runtime is native x64");
+static_assert(sizeof(void*) == 8, "The qualified runtime is 64-bit");
 
-// One complete measured installation profile. In particular, the service EXE
-// tries the System32 redist candidate before its inbox candidate. These hashes
-// qualify this compatible family on disk, not the bytes in a running process.
+// One complete measured installation profile, of native x64 Windows. In
+// particular, the service EXE tries the System32 redist candidate before its
+// inbox candidate. These hashes qualify this compatible family on disk, not the
+// bytes in a running process. ARM64 Windows installs other files, so no ARM64
+// machine matches, and the USB and adapter route stays off there until a
+// measured ARM64 profile is added. An empty profile would pass every machine.
 struct ProfileFile { const wchar_t* name; std::int64_t size; const char* sha256; };
 constexpr std::array<ProfileFile, 5> Profile{{
     {L"GameInputSvc.exe", 80336, "83ba5166dd6397ade67f4b6fddae6be61a694f487ed88ea83ee204f20be6d075"},
@@ -104,6 +107,13 @@ struct NativeProcessPrefix {
     HANDLE uniqueProcessId, inheritedFromUniqueProcessId;
     ULONG handleCount, sessionId;
 };
+// The same on native x64 and native ARM64. A layout change stops the build.
+static_assert(sizeof(NativeString) == 0x10 && offsetof(NativeString, buffer) == 8);
+static_assert(sizeof(NativeProcessPrefix) == 0x68 && offsetof(NativeProcessPrefix, createTime) == 0x20 &&
+    offsetof(NativeProcessPrefix, imageName) == 0x38 && offsetof(NativeProcessPrefix, basePriority) == 0x48 &&
+    offsetof(NativeProcessPrefix, uniqueProcessId) == 0x50 &&
+    offsetof(NativeProcessPrefix, inheritedFromUniqueProcessId) == 0x58 &&
+    offsetof(NativeProcessPrefix, handleCount) == 0x60 && offsetof(NativeProcessPrefix, sessionId) == 0x64);
 
 static std::vector<Process> ParseProcesses(const BYTE* bytes, std::size_t size)
 {

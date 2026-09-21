@@ -28,8 +28,8 @@
 #include <limits>
 #include <utility>
 
-#if !defined(_MSC_VER) || !defined(_M_X64) || defined(_M_ARM64EC)
-#error This reader requires MSVC targeting native x64.
+#if !defined(_MSC_VER) || defined(_M_ARM64EC) || !(defined(_M_X64) || defined(_M_ARM64))
+#error This reader requires MSVC targeting native x64 or native ARM64.
 #endif
 
 namespace sdl_paddles {
@@ -63,11 +63,14 @@ template<class T> T Read(const std::uint8_t* base, std::size_t offset) {
     return value;
 }
 
-// /volatile:ms supplies compiler acquire/release ordering. These aligned x64
-// loads and stores do not issue a read-modify-write on a publication cell.
+// /volatile:ms supplies compiler acquire/release ordering: a load-acquire and
+// a store-release on ARM64, a plain move on x64. These aligned loads and stores
+// do not issue a read-modify-write on a publication cell.
 std::uint64_t Load64(const std::uint8_t* address) {
-    return std::bit_cast<std::uint64_t>(
-        *reinterpret_cast<const volatile __int64*>(address));
+    // Read through the volatile lvalue itself. Passed through std::bit_cast,
+    // the same read compiles to an unordered load on ARM64.
+    const __int64 value = *reinterpret_cast<const volatile __int64*>(address);
+    return static_cast<std::uint64_t>(value);
 }
 
 void Store64(std::uint8_t* address, std::uint64_t value) {
@@ -324,10 +327,10 @@ struct SharedReader::Impl {
         }
         if ((before & 0xFFFF) == 1) {
             Store64(entry + 8, 0);
-            _mm_mfence();
+            PublicationFence();
             Observe("cleared-links", base, id);
             Store64(entry, 0);
-            _mm_mfence();
+            PublicationFence();
             Observe("cleared-reference", base, id);
             const std::size_t slot = static_cast<std::size_t>(id & 0xFFFF);
             _InterlockedOr64(reinterpret_cast<volatile __int64*>(base + bitmap + (slot / 64) * 8),
@@ -370,6 +373,7 @@ struct SharedReader::Impl {
                 reinterpret_cast<volatile __int64*>(entry),
                 std::bit_cast<__int64>(value + 1), std::bit_cast<__int64>(value)));
             if (actual == value) {
+                AcquireFence();
                 ref.id = id;
                 Observe("pinned", base, id);
                 ref.flags = Load64(entry + 8);
@@ -525,7 +529,7 @@ bool SharedReader::UseDefaultInputPolicy(std::uint32_t& previous, bool& changed,
     if (!ReadInputPolicy(previous, error)) return false;
     if (previous != 0) {
         *reinterpret_cast<volatile std::uint32_t*>(impl_->base + impl_->inputPolicy) = 0;
-        _mm_mfence();
+        PublicationFence();
         changed = true;
     }
     return true;

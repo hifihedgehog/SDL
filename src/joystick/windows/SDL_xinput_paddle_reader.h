@@ -27,7 +27,31 @@
 #include <string>
 #include <vector>
 
+#include <intrin.h>
+
 namespace sdl_paddles {
+
+// The publication fence of the shared pool. The x64 service client issues
+// mfence. The ARM64 build of the same client orders these stores with
+// store-release instructions, and a full system barrier is at least as strong.
+inline void PublicationFence() noexcept
+{
+#if defined(_M_ARM64)
+    __dmb(_ARM64_BARRIER_SY);
+#else
+    _mm_mfence();
+#endif
+}
+
+// After a successful pin. x64 orders every load after a locked instruction.
+// ARM64 can issue a later load early, so the slot reads need this barrier.
+// The ARM64 service client has a barrier at the same point.
+inline void AcquireFence() noexcept
+{
+#if defined(_M_ARM64)
+    __dmb(_ARM64_BARRIER_SY);
+#endif
+}
 
 struct ReportDescriptor {
     std::uint32_t kind = 0;
@@ -59,10 +83,12 @@ struct ReaderDiagnostics {
     std::uint32_t readingKinds = 0, latestPin = 0;
 };
 
-// The owner supplies a writable view of the recovered x64 format. All methods,
-// including destruction, run on that owner's thread. The owner keeps the view
-// mapped through Poll and calls Retire before unmapping it. Metadata and layout
-// are immutable for that view's lifetime. Reading data is immutable while pinned.
+// The owner supplies a writable view of the recovered format. It was recovered
+// from the x64 service client, and the pool routines of the ARM64 client match
+// it. All methods, including destruction, run on that owner's thread. The owner
+// keeps the view mapped through Poll and calls Retire before unmapping it.
+// Metadata and layout are immutable for that view's lifetime. Reading data is
+// immutable while pinned.
 class SharedReader final {
 public:
     static std::unique_ptr<SharedReader> Create(

@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -1424,6 +1425,14 @@ constexpr Uint64 GattSilenceNs = SDL_NS_PER_SECOND;
 constexpr Uint64 GattActivityWindowNs = 2 * SDL_NS_PER_SECOND;
 constexpr Uint64 GattRearmRequestIntervalNs = 3 * SDL_NS_PER_SECOND;
 Context *contexts = nullptr;
+
+// OpenXInput fills this structure and asserts the same layout on its side.
+// It is the same on native x64 and native ARM64.
+static_assert(sizeof(SDL_XINPUT_DEVICE_IDENTITY_V1) == 0x18 &&
+    offsetof(SDL_XINPUT_DEVICE_IDENTITY_V1, requiredCch) == 4 &&
+    offsetof(SDL_XINPUT_DEVICE_IDENTITY_V1, generation) == 8 &&
+    offsetof(SDL_XINPUT_DEVICE_IDENTITY_V1, interfaceIndex) == 0x10 &&
+    offsetof(SDL_XINPUT_DEVICE_IDENTITY_V1, interfaceCount) == 0x14);
 
 struct Query {
     SDL_XINPUT_DEVICE_IDENTITY_V1 identity{};
