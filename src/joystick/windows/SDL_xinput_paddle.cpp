@@ -1637,13 +1637,25 @@ extern "C" void SDL_XINPUT_PaddleOpen(SDL_Joystick *joystick, Uint8 user)
         std::string error;
         if (!ResolvePaddleIdentity(attachment->path.c_str(), attachment->index, attachment->count, attachment->physical, error)) return;
         if (!EligiblePhysical(vendor, product, attachment->physical)) return;
+        // A route that stays off publishes why, so the application can show
+        // the reason instead of paddles that do nothing.
+        const auto declined = [&](const char *reason) {
+            if (const auto props = SDL_GetJoystickProperties(joystick)) {
+                SDL_SetBooleanProperty(props, "SDL.joystick.xinput.paddle.data_available", false);
+                SDL_SetStringProperty(props, "SDL.joystick.xinput.paddle.error", reason);
+            }
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "XInput paddles instance=%u not started: %s", joystick->instance_id, reason);
+        };
         if (IsGipTransport(attachment->physical.transport) && !PaddleUsbRuntimeAvailable(error)) {
-            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "XInput paddles runtime unavailable: %s", error.c_str());
+            declined(error.c_str());
             return;
         }
         // GATT uses the public Windows 10 WinRT contract. No private service or
         // loaded-image inference is needed for this transport.
-        if (!IsGipTransport(attachment->physical.transport) && attachment->physical.transport != PaddleTransport::Bluetooth) return;
+        if (!IsGipTransport(attachment->physical.transport) && attachment->physical.transport != PaddleTransport::Bluetooth) {
+            declined("Paddles are not read over this controller's transport.");
+            return;
+        }
         Query recheck;
         if (QuerySlotAtOpen(joystick, user, recheck, "recheck") != ERROR_SUCCESS || !Matches(*attachment, recheck)) return;
         auto context = std::make_unique<Context>();
