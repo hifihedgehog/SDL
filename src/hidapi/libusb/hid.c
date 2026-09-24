@@ -115,6 +115,11 @@ struct hid_device_ {
 	int input_endpoint;
 	int output_endpoint;
 	int input_ep_max_packet_size;
+	int input_ep_bulk;  /* bulk instead of interrupt */
+	int output_ep_bulk;
+
+	/* The alternate setting a vendor rule selected, or 0 */
+	int selected_alternate;
 
 	/* Indexes of Strings */
 	int manufacturer_index;
@@ -1042,18 +1047,34 @@ static int should_enumerate_interface(unsigned short vendor_id, unsigned short p
 {
 	int is_xbox = (is_xbox360(vendor_id, intf_desc) ||
 	               is_xboxone(vendor_id, intf_desc));
+	int is_vendor = 0;
 
 #if 0
 	printf("Checking interface 0x%x %d/%d/%d/%d\n", vendor_id, intf_desc->bInterfaceNumber, intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass, intf_desc->bInterfaceProtocol);
 #endif
 
+#ifdef HIDAPI_VENDOR_USB
+	/* A vendor interface: a device whose input has no usable HID interface on Windows */
+	is_vendor = (SDL_VendorUSB_FindRule(vendor_id, product_id, intf_desc->bInterfaceNumber,
+	                                    intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
+	                                    intf_desc->bInterfaceProtocol) != NULL);
+#endif
+	(void)is_vendor;
+
 #ifdef HIDAPI_IGNORE_DEVICE
 	/* See if there are any devices we should skip in enumeration */
-	if (HIDAPI_IGNORE_DEVICE(HID_API_BUS_USB, vendor_id, product_id, 0, 0, true, is_xbox)) {
+	if (HIDAPI_IGNORE_DEVICE(HID_API_BUS_USB, vendor_id, product_id, 0, 0, true, is_xbox, is_vendor)) {
 		return 0;
 	}
 #endif
 
+#ifdef HIDAPI_VENDOR_USB
+	/* A vendor interface, never another interface of a device that has one,
+	   and otherwise Xbox 360, Xbox One and HID interfaces */
+	return SDL_VendorUSB_IsCandidate(vendor_id, product_id, intf_desc->bInterfaceNumber,
+	                                 intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
+	                                 intf_desc->bInterfaceProtocol, is_xbox);
+#else
 	/* Enumerate Xbox 360 and Xbox One controllers */
 	if (is_xbox)
 		return 1;
@@ -1062,6 +1083,7 @@ static int should_enumerate_interface(unsigned short vendor_id, unsigned short p
 		return 1;
 
 	return 0;
+#endif
 }
 
 static int libusb_blacklist(unsigned short vendor_id, unsigned short product_id)
@@ -1128,6 +1150,17 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 						struct hid_device_info *tmp;
 
 						res = libusb_open(dev, &handle);
+#ifdef HIDAPI_VENDOR_USB
+						{
+							/* On Windows an Xbox interface that xusb22 or the GIP driver
+							   holds cannot be opened. Skipping it keeps a pad Windows
+							   serves from also appearing here. One bound to WinUSB opens. */
+							int is_xbox = is_xbox360(dev_vid, intf_desc) || is_xboxone(dev_vid, intf_desc);
+							if (SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_THIS_PLATFORM, is_xbox, res >= 0)) {
+								break;
+							}
+						}
+#endif
 #ifdef SDL_PLATFORM_MACOS
 						if (res == 0) {
 							/* Do not enumerate XInput devices already owned by a kernel driver and not opened by us */
@@ -1337,14 +1370,25 @@ static void start_read_operations(hid_device *dev)
 	/* Set up the transfer object. */
 	buf = (uint8_t*) malloc(length);
 	dev->transfer = libusb_alloc_transfer(0);
-	libusb_fill_interrupt_transfer(dev->transfer,
-		dev->device_handle,
-		(unsigned char)dev->input_endpoint,
-		buf,
-		(int) length,
-		read_callback,
-		dev,
-		5000/*timeout*/);
+	if (dev->input_ep_bulk) {
+		libusb_fill_bulk_transfer(dev->transfer,
+			dev->device_handle,
+			(unsigned char)dev->input_endpoint,
+			buf,
+			(int) length,
+			read_callback,
+			dev,
+			5000/*timeout*/);
+	} else {
+		libusb_fill_interrupt_transfer(dev->transfer,
+			dev->device_handle,
+			(unsigned char)dev->input_endpoint,
+			buf,
+			(int) length,
+			read_callback,
+			dev,
+			5000/*timeout*/);
+	}
 
 	/* Make the first submission. Further submissions are made
 	   from inside read_callback() */
@@ -1500,12 +1544,86 @@ static void calculate_device_quirks(hid_device *dev, unsigned short idVendor, un
 	}
 }
 
+#ifdef HIDAPI_VENDOR_USB
+/* Lays out one interface's descriptors, every alternate setting in order, the
+   way the configuration descriptor carries them, and lets the shared rules
+   choose the alternate and its endpoints. */
+static int select_vendor_endpoints(const struct libusb_config_descriptor *conf_desc, uint8_t interface_number,
+                                   const SDL_VendorUSBRule *rule, SDL_VendorUSBSelection *selection)
+{
+	unsigned char descriptors[1024];
+	size_t length = 0;
+	int j, k, e;
+
+	for (j = 0; j < conf_desc->bNumInterfaces; j++) {
+		const struct libusb_interface *intf = &conf_desc->interface[j];
+		for (k = 0; k < intf->num_altsetting; k++) {
+			const struct libusb_interface_descriptor *alt = &intf->altsetting[k];
+			const size_t alt_extra = (alt->extra && alt->extra_length > 0) ? (size_t)alt->extra_length : 0;
+
+			if (alt->bInterfaceNumber != interface_number)
+				continue;
+			if (sizeof(descriptors) - length < 9 + alt_extra)
+				return 0;
+			descriptors[length++] = 9;
+			descriptors[length++] = LIBUSB_DT_INTERFACE;
+			descriptors[length++] = alt->bInterfaceNumber;
+			descriptors[length++] = alt->bAlternateSetting;
+			descriptors[length++] = alt->bNumEndpoints;
+			descriptors[length++] = alt->bInterfaceClass;
+			descriptors[length++] = alt->bInterfaceSubClass;
+			descriptors[length++] = alt->bInterfaceProtocol;
+			descriptors[length++] = alt->iInterface;
+			if (alt_extra) {
+				memcpy(&descriptors[length], alt->extra, alt_extra);
+				length += alt_extra;
+			}
+			for (e = 0; e < alt->bNumEndpoints; e++) {
+				const struct libusb_endpoint_descriptor *ep = &alt->endpoint[e];
+				const size_t ep_extra = (ep->extra && ep->extra_length > 0) ? (size_t)ep->extra_length : 0;
+
+				if (sizeof(descriptors) - length < 7 + ep_extra)
+					return 0;
+				descriptors[length++] = 7;
+				descriptors[length++] = LIBUSB_DT_ENDPOINT;
+				descriptors[length++] = ep->bEndpointAddress;
+				descriptors[length++] = ep->bmAttributes;
+				descriptors[length++] = (unsigned char)(ep->wMaxPacketSize & 0xFF);
+				descriptors[length++] = (unsigned char)(ep->wMaxPacketSize >> 8);
+				descriptors[length++] = ep->bInterval;
+				if (ep_extra) {
+					memcpy(&descriptors[length], ep->extra, ep_extra);
+					length += ep_extra;
+				}
+			}
+		}
+	}
+	return SDL_VendorUSB_SelectEndpoints(rule, interface_number, descriptors, length, selection) ? 1 : 0;
+}
+#endif /* HIDAPI_VENDOR_USB */
+
 static int hidapi_initialize_device(hid_device *dev, const struct libusb_interface_descriptor *intf_desc, const struct libusb_config_descriptor *conf_desc)
 {
 	int i =0;
 	int res = 0;
 	struct libusb_device_descriptor desc;
+#ifdef HIDAPI_VENDOR_USB
+	const SDL_VendorUSBRule *vendor_rule;
+	SDL_VendorUSBSelection vendor_selection;
+#endif
 	libusb_get_device_descriptor(libusb_get_device(dev->device_handle), &desc);
+
+#ifdef HIDAPI_VENDOR_USB
+	/* A vendor interface names its alternate setting and endpoints. Choose
+	   them before claiming anything. */
+	vendor_rule = SDL_VendorUSB_FindRule(desc.idVendor, desc.idProduct, intf_desc->bInterfaceNumber,
+	                                     intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
+	                                     intf_desc->bInterfaceProtocol);
+	if (vendor_rule && !select_vendor_endpoints(conf_desc, intf_desc->bInterfaceNumber, vendor_rule, &vendor_selection)) {
+		LOG("no usable endpoints on vendor interface %d\n", intf_desc->bInterfaceNumber);
+		return 0;
+	}
+#endif
 
 #ifdef DETACH_KERNEL_DRIVER
 	/* Detach the kernel driver, but only if the
@@ -1537,6 +1655,25 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 		return 0;
 	}
 
+#ifdef HIDAPI_VENDOR_USB
+	if (vendor_rule && vendor_selection.alternate != 0) {
+		res = libusb_set_interface_alt_setting(dev->device_handle, intf_desc->bInterfaceNumber, vendor_selection.alternate);
+		if (res < 0) {
+			LOG("can't select alternate %d of interface %d: (%d) %s\n", vendor_selection.alternate, intf_desc->bInterfaceNumber, res, libusb_error_name(res));
+			libusb_release_interface(dev->device_handle, intf_desc->bInterfaceNumber);
+#ifdef DETACH_KERNEL_DRIVER
+			if (dev->is_driver_detached) {
+				res = libusb_attach_kernel_driver(dev->device_handle, intf_desc->bInterfaceNumber);
+				if (res < 0)
+					LOG("Failed to reattach the driver to kernel: (%d) %s\n", res, libusb_error_name(res));
+			}
+#endif
+			return 0;
+		}
+		dev->selected_alternate = vendor_selection.alternate;
+	}
+#endif
+
 	/* Initialize XBox 360 controllers */
 	if (is_xbox360(desc.idVendor, intf_desc)) {
 		dev->no_skip_output_report_id = 1;
@@ -1565,7 +1702,23 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 	dev->input_endpoint = 0;
 	dev->input_ep_max_packet_size = 0;
 	dev->output_endpoint = 0;
+	dev->input_ep_bulk = 0;
+	dev->output_ep_bulk = 0;
 
+#ifdef HIDAPI_VENDOR_USB
+	if (vendor_rule) {
+		dev->input_endpoint = vendor_selection.in.address;
+		dev->input_ep_max_packet_size = vendor_selection.in.read_size;
+		dev->input_ep_bulk = (vendor_selection.in.transfer == SDL_VENDORUSB_TRANSFER_BULK);
+		dev->output_endpoint = vendor_selection.out.address;
+		dev->output_ep_bulk = (vendor_selection.out.transfer == SDL_VENDORUSB_TRANSFER_BULK);
+		if (vendor_rule->flags & SDL_VENDORUSB_RAW_OUTPUT) {
+			/* Output reports carry no report ID, so a first byte of 0 is data */
+			dev->no_skip_output_report_id = 1;
+		}
+	}
+	else
+#endif
 	/* Find the INPUT and OUTPUT endpoints. An
 	   OUTPUT endpoint is not required. */
 	for (i = 0; i < intf_desc->bNumEndpoints; i++) {
@@ -1799,13 +1952,21 @@ int HID_API_EXPORT hid_write(hid_device *dev, const unsigned char *data, size_t 
 		return (int) length;
 	}
 	else {
-		/* Use the interrupt out endpoint */
+		/* Use the interrupt or bulk out endpoint */
 		int actual_length;
-		res = libusb_interrupt_transfer(dev->device_handle,
-			(unsigned char)dev->output_endpoint,
-			(unsigned char*)data,
-			(int) length,
-			&actual_length, 1000);
+		if (dev->output_ep_bulk) {
+			res = libusb_bulk_transfer(dev->device_handle,
+				(unsigned char)dev->output_endpoint,
+				(unsigned char*)data,
+				(int) length,
+				&actual_length, 1000);
+		} else {
+			res = libusb_interrupt_transfer(dev->device_handle,
+				(unsigned char)dev->output_endpoint,
+				(unsigned char*)data,
+				(int) length,
+				&actual_length, 1000);
+		}
 
 		if (res < 0)
 			return -1;
@@ -2046,6 +2207,10 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 	free(dev->transfer->buffer);
 	dev->transfer->buffer = NULL;
 	libusb_free_transfer(dev->transfer);
+
+	/* Restore the default alternate setting a vendor rule changed */
+	if (dev->selected_alternate)
+		libusb_set_interface_alt_setting(dev->device_handle, dev->interface, 0);
 
 	/* release the interface */
 	libusb_release_interface(dev->device_handle, dev->interface);

@@ -41,6 +41,9 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #ifdef SDL_JOYSTICK_HIDAPI_GAMECUBE
     &SDL_HIDAPI_DriverGameCube,
 #endif
+#ifdef SDL_JOYSTICK_HIDAPI_INTEL_WIRELESS
+    &SDL_HIDAPI_DriverIntelWireless,
+#endif
 #ifdef SDL_JOYSTICK_HIDAPI_LUNA
     &SDL_HIDAPI_DriverLuna,
 #endif
