@@ -25,6 +25,7 @@ get_filename_component(PROTOCOL_SDL_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOL
 set(PROTOCOL_TESTS "${PROTOCOL_SDL_ROOT}/test")
 set(PROTOCOL_HIDAPI "${PROTOCOL_SDL_ROOT}/src/hidapi")
 set(PROTOCOL_JOYSTICK "${PROTOCOL_SDL_ROOT}/src/joystick/hidapi")
+set(PROTOCOL_JOYSTICK_SHARED "${PROTOCOL_SDL_ROOT}/src/joystick")
 
 enable_testing()
 
@@ -69,3 +70,14 @@ protocol_test(xbox360bb "${PROTOCOL_TESTS}/testxbox360bb.c"
 # hifihedgehog/SDL#33 Part 2: Wii Remote extensions.
 protocol_test(wiiext "${PROTOCOL_TESTS}/testwiiext.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_wii_ext_proto.c")
+
+# hifihedgehog/SDL#33 Part 3: Guitar Hero Live, Rock Band 3 Pro, uDraw,
+# Top Shot and Tony Hawk.
+protocol_test(ghl "${PROTOCOL_TESTS}/testghl.c"
+    "${PROTOCOL_JOYSTICK_SHARED}/SDL_ghl_proto.c")
+
+protocol_test(rb3pro "${PROTOCOL_TESTS}/testrb3pro.c"
+    "${PROTOCOL_JOYSTICK_SHARED}/SDL_rb3pro_proto.c")
+
+protocol_test(ps3ext "${PROTOCOL_TESTS}/testps3ext.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_ps3ext_proto.c")
