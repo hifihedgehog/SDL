@@ -2314,6 +2314,26 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_WII "SDL_JOYSTICK_HIDAPI_WII"
 
 /**
+ * A variable controlling whether the HIDAPI Wii driver decodes the Wii Remote
+ * extensions beyond the Nunchuk, Classic Controller, Wii U Pro Controller and
+ * Balance Board.
+ *
+ * This is a PadForge fork addition. It covers the Guitar Hero guitars, the
+ * Guitar Hero World Tour drum kit, the DJ Hero turntable, the Taiko TaTaCon,
+ * the uDraw and Drawsome tablets and the Densha de GO! Shinkansen controller.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": These extensions are reported as an unknown extension.
+ * - "1": These extensions are decoded. (default)
+ *
+ * The driver reads this hint when it identifies a Wii Remote's extension.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_WII_EXTENSIONS "SDL_JOYSTICK_HIDAPI_WII_EXTENSIONS"
+
+/**
  * A variable controlling whether the player LEDs should be lit to indicate
  * which player is associated with a Wii controller.
  *
