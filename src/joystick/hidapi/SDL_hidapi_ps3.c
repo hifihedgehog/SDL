@@ -26,8 +26,37 @@
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
+#include "../../hidapi/SDL_hidapi_c.h"
+#include "../SDL_rb3pro_proto.h"
+#include "SDL_hidapi_ps3ext_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_PS3
+
+SDL_COMPILE_TIME_ASSERT(rb3pro_hat_up, SDL_RB3PRO_HAT_UP == SDL_HAT_UP);
+SDL_COMPILE_TIME_ASSERT(rb3pro_hat_right, SDL_RB3PRO_HAT_RIGHT == SDL_HAT_RIGHT);
+SDL_COMPILE_TIME_ASSERT(rb3pro_hat_down, SDL_RB3PRO_HAT_DOWN == SDL_HAT_DOWN);
+SDL_COMPILE_TIME_ASSERT(rb3pro_hat_left, SDL_RB3PRO_HAT_LEFT == SDL_HAT_LEFT);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_south, SDL_RB3PRO_BUTTON_SOUTH == SDL_GAMEPAD_BUTTON_SOUTH);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_east, SDL_RB3PRO_BUTTON_EAST == SDL_GAMEPAD_BUTTON_EAST);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_west, SDL_RB3PRO_BUTTON_WEST == SDL_GAMEPAD_BUTTON_WEST);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_north, SDL_RB3PRO_BUTTON_NORTH == SDL_GAMEPAD_BUTTON_NORTH);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_back, SDL_RB3PRO_BUTTON_BACK == SDL_GAMEPAD_BUTTON_BACK);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_guide, SDL_RB3PRO_BUTTON_GUIDE == SDL_GAMEPAD_BUTTON_GUIDE);
+SDL_COMPILE_TIME_ASSERT(rb3pro_button_start, SDL_RB3PRO_BUTTON_START == SDL_GAMEPAD_BUTTON_START);
+SDL_COMPILE_TIME_ASSERT(ps3ext_hat_up, SDL_PS3EXT_HAT_UP == SDL_HAT_UP);
+SDL_COMPILE_TIME_ASSERT(ps3ext_hat_right, SDL_PS3EXT_HAT_RIGHT == SDL_HAT_RIGHT);
+SDL_COMPILE_TIME_ASSERT(ps3ext_hat_down, SDL_PS3EXT_HAT_DOWN == SDL_HAT_DOWN);
+SDL_COMPILE_TIME_ASSERT(ps3ext_hat_left, SDL_PS3EXT_HAT_LEFT == SDL_HAT_LEFT);
+SDL_COMPILE_TIME_ASSERT(ps3ext_button_left_stick, SDL_PS3EXT_BUTTON_LEFT_STICK == SDL_GAMEPAD_BUTTON_LEFT_STICK);
+SDL_COMPILE_TIME_ASSERT(ps3ext_button_right_stick, SDL_PS3EXT_BUTTON_RIGHT_STICK == SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+
+#if defined(SDL_PLATFORM_WIN32) || defined(SDL_PLATFORM_WINGDK)
+/* HidD_SetFeature cuts a feature report to the declared length, 8 bytes on
+   the Rock Band 3 Pro instruments, so their 40-byte enable goes as five */
+#define HIDAPI_PS3_SPLIT_RB3PRO_ENABLE true
+#else
+#define HIDAPI_PS3_SPLIT_RB3PRO_ENABLE false
+#endif
 
 // Define this if you want to log all packets from the controller
 // #define DEBUG_PS3_PROTOCOL
@@ -85,6 +114,12 @@ typedef struct
     Uint8 rumble_left;
     Uint8 rumble_right;
     Uint8 last_state[USB_PACKET_LENGTH];
+
+    /* Third-party devices whose main input needs their own decoder */
+    int rb3pro_variant;   /* SDL_RB3PRO_*, the Rock Band 3 Pro instruments */
+    SDL_RB3ProEnable rb3pro_enable;
+    int ps3ext_variant;   /* SDL_PS3EXT_*, the uDraw, Top Shot and Tony Hawk */
+    SDL_PS3ExtAim aim;    /* The Top Shot sensor request */
 } SDL_DriverPS3_Context;
 
 static bool HIDAPI_DriverPS3_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *effect, int size);
@@ -651,6 +686,14 @@ static bool HIDAPI_DriverPS3ThirdParty_IsSupportedDevice(SDL_HIDAPI_Device *devi
         return true;
     }
 
+    /* The Rock Band 3 Pro instruments, the uDraw tablet, the Top Shot guns
+     * and the Tony Hawk boards, by ID. The feature probe below cannot vouch
+     * for them, and the uDraw's vendor would reach the PS4 and PS5 probes. */
+    if (SDL_RB3Pro_GetDevice(vendor_id, product_id, NULL) ||
+        SDL_PS3Ext_GetDevice(vendor_id, product_id, NULL)) {
+        return true;
+    }
+
     if ((type == SDL_GAMEPAD_TYPE_PS3 && vendor_id != USB_VENDOR_SONY) ||
         HIDAPI_SupportsPlaystationDetection(device, vendor_id, product_id)) {
         if (device && device->dev) {
@@ -676,9 +719,51 @@ static bool HIDAPI_DriverPS3ThirdParty_IsSupportedDevice(SDL_HIDAPI_Device *devi
     return false;
 }
 
+/* The Rock Band 3 Pro enable rows that are due, on Windows HID */
+static void HIDAPI_DriverPS3ThirdParty_SendEnableRows(SDL_DriverPS3_Context *ctx)
+{
+    const Uint64 now = SDL_NS_TO_US(SDL_GetTicksNS());
+    Uint8 row[SDL_RB3PRO_ENABLE_ROW_REPORT_LENGTH];
+
+    while (SDL_RB3ProEnable_NextRow(&ctx->rb3pro_enable, now, row)) {
+        SendFeatureReport(ctx->device->dev, row, sizeof(row));
+    }
+}
+
+/* A new enable: the rows that are due at once, or the single report */
+static void HIDAPI_DriverPS3ThirdParty_StartEnable(SDL_DriverPS3_Context *ctx)
+{
+    if (ctx->rb3pro_enable.split) {
+        HIDAPI_DriverPS3ThirdParty_SendEnableRows(ctx);
+    } else {
+        Uint8 enable[1 + SDL_RB3PRO_ENABLE_LENGTH];
+
+        SDL_RB3Pro_BuildEnable(enable);
+        SendFeatureReport(ctx->device->dev, enable, sizeof(enable));
+    }
+}
+
+/* The Top Shot sensor request, as an output or a feature report */
+static void HIDAPI_DriverPS3ThirdParty_SendTopShotRequest(SDL_DriverPS3_Context *ctx, int kind)
+{
+    Uint8 request[SDL_PS3EXT_TOPSHOT_REQUEST_LENGTH];
+    const size_t length = SDL_PS3Ext_BuildTopShotRequest(request);
+
+    if (kind == SDL_PS3EXT_REQUEST_OUTPUT) {
+        SDL_hid_send_output_report(ctx->device->dev, request, length);
+    } else if (kind == SDL_PS3EXT_REQUEST_FEATURE) {
+        SDL_hid_send_feature_report(ctx->device->dev, request, length);
+    } else {
+        return;
+    }
+    SDL_PS3ExtAim_Sent(&ctx->aim, kind, SDL_GetTicks());
+}
+
 static bool HIDAPI_DriverPS3ThirdParty_InitDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverPS3_Context *ctx;
+    SDL_RB3ProDevice rb3pro;
+    SDL_PS3ExtDevice ps3ext;
 
     ctx = (SDL_DriverPS3_Context *)SDL_calloc(1, sizeof(*ctx));
     if (!ctx) {
@@ -733,6 +818,35 @@ static bool HIDAPI_DriverPS3ThirdParty_InitDevice(SDL_HIDAPI_Device *device)
         }
     }
 
+    if (SDL_RB3Pro_GetDevice(device->vendor_id, device->product_id, &rb3pro)) {
+        ctx->rb3pro_variant = rb3pro.variant;
+        HIDAPI_SetDeviceName(device, rb3pro.name);
+        device->joystick_type = (rb3pro.variant == SDL_RB3PRO_GUITAR) ? SDL_JOYSTICK_TYPE_GUITAR : SDL_JOYSTICK_TYPE_UNKNOWN;
+
+        /* The PS3 models send keys and frets only after the enable */
+        SDL_RB3ProEnable_Init(&ctx->rb3pro_enable, rb3pro.ps3, HIDAPI_PS3_SPLIT_RB3PRO_ENABLE);
+        if (SDL_RB3ProEnable_Open(&ctx->rb3pro_enable, SDL_NS_TO_US(SDL_GetTicksNS()))) {
+            HIDAPI_DriverPS3ThirdParty_StartEnable(ctx);
+        }
+    } else if (SDL_PS3Ext_GetDevice(device->vendor_id, device->product_id, &ps3ext)) {
+        ctx->ps3ext_variant = ps3ext.variant;
+        HIDAPI_SetDeviceName(device, ps3ext.name);
+        device->joystick_type = SDL_JOYSTICK_TYPE_UNKNOWN;
+
+        if (ps3ext.variant == SDL_PS3EXT_TOPSHOT_ELITE || ps3ext.variant == SDL_PS3EXT_TOPSHOT_FEARMASTER) {
+            /* The guns report the sensor bar only after this request */
+            HIDAPI_DriverPS3ThirdParty_SendTopShotRequest(ctx, SDL_PS3ExtAim_Open(&ctx->aim, SDL_GetTicks()));
+        } else if (ps3ext.variant == SDL_PS3EXT_TONYHAWK) {
+            Uint8 activation[SDL_PS3EXT_TONYHAWK_ACTIVATION_LENGTH];
+
+            /* What RPCS3 sends when it adds a board */
+            SDL_hid_write(device->dev, activation, SDL_PS3Ext_BuildTonyHawkActivation(activation));
+
+            /* The board joins when a report differs from both idle states */
+            return true;
+        }
+    }
+
     return HIDAPI_JoystickConnected(device, NULL);
 }
 
@@ -753,6 +867,28 @@ static bool HIDAPI_DriverPS3ThirdParty_OpenJoystick(SDL_HIDAPI_Device *device, S
 
     ctx->joystick = joystick;
     SDL_zeroa(ctx->last_state);
+
+    if (ctx->rb3pro_variant) {
+        int nbuttons, naxes, nhats;
+
+        SDL_RB3Pro_GetLayout(ctx->rb3pro_variant, &nbuttons, &naxes, &nhats);
+        joystick->nbuttons = nbuttons;
+        joystick->naxes = naxes;
+        joystick->nhats = nhats;
+        return true;
+    }
+    if (ctx->ps3ext_variant) {
+        SDL_PS3ExtLayout layout;
+
+        SDL_PS3Ext_GetLayout(ctx->ps3ext_variant, &layout);
+        joystick->nbuttons = layout.nbuttons;
+        joystick->naxes = layout.naxes;
+        joystick->nhats = layout.nhats;
+        if (layout.accelerometer) {
+            SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 100.0f);
+        }
+        return true;
+    }
 
     // Initialize the joystick capabilities
     joystick->nbuttons = 11;
@@ -1053,12 +1189,135 @@ static void HIDAPI_DriverPS3ThirdParty_HandleStatePacket19(SDL_Joystick *joystic
     SDL_memcpy(ctx->last_state, data, SDL_min(size, sizeof(ctx->last_state)));
 }
 
+static void HIDAPI_DriverPS3ThirdParty_PostRB3Pro(SDL_Joystick *joystick, const SDL_RB3ProOutput *output)
+{
+    const Uint64 timestamp = SDL_GetTicksNS();
+    Uint8 i;
+
+    for (i = 0; i < 64; ++i) {
+        if (output->button_mask & ((Uint64)1 << i)) {
+            SDL_SendJoystickButton(timestamp, joystick, i, ((output->buttons >> i) & 1) != 0);
+        }
+    }
+    for (i = 0; i < SDL_RB3PRO_MAX_AXES; ++i) {
+        if (output->axis_mask & (1u << i)) {
+            /* Keys, frets and velocities are data: seed past the anti-jitter
+               gate so the first reading counts */
+            SDL_SeedJoystickDataAxis(joystick, i, output->axes[i]);
+            SDL_SendJoystickAxis(timestamp, joystick, i, output->axes[i]);
+        }
+    }
+    SDL_SendJoystickHat(timestamp, joystick, 0, output->hat);
+}
+
+static void HIDAPI_DriverPS3ThirdParty_PostPS3Ext(SDL_DriverPS3_Context *ctx, SDL_Joystick *joystick, const SDL_PS3ExtOutput *output)
+{
+    const Uint64 timestamp = SDL_GetTicksNS();
+    Uint8 i;
+
+    for (i = 0; i < 32; ++i) {
+        if (output->button_mask & (1u << i)) {
+            SDL_SendJoystickButton(timestamp, joystick, i, ((output->buttons >> i) & 1) != 0);
+        }
+    }
+    for (i = 0; i < SDL_PS3EXT_MAX_AXES; ++i) {
+        if (output->axis_mask & (1u << i)) {
+            if (output->data_axis_mask & (1u << i)) {
+                SDL_SeedJoystickDataAxis(joystick, i, output->axes[i]);
+            }
+            SDL_SendJoystickAxis(timestamp, joystick, i, output->axes[i]);
+        }
+    }
+    SDL_SendJoystickHat(timestamp, joystick, 0, output->hat);
+
+    if (output->has_accel && ctx->report_sensors) {
+        /* No source states a calibrated scale. brandonw.net's readings put
+           one g at 20 to 26 counts from 0x200. */
+        float sensor_data[3];
+
+        for (i = 0; i < 3; ++i) {
+            sensor_data[i] = (float)output->accel[i] * SDL_STANDARD_GRAVITY / SDL_PS3EXT_UDRAW_COUNTS_PER_G;
+        }
+        SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_ACCEL, timestamp, sensor_data, SDL_arraysize(sensor_data));
+    }
+}
+
+/* The devices with their own decoder */
+static bool HIDAPI_DriverPS3ThirdParty_UpdateDecoded(SDL_HIDAPI_Device *device, SDL_DriverPS3_Context *ctx)
+{
+    Uint8 data[USB_PACKET_LENGTH];
+    int size;
+
+    while ((size = SDL_hid_read_timeout(device->dev, data, sizeof(data), 0)) > 0) {
+        SDL_Joystick *joystick = (device->num_joysticks > 0) ? SDL_GetJoystickFromID(device->joysticks[0]) : NULL;
+
+#ifdef DEBUG_PS3_PROTOCOL
+        HIDAPI_DumpPacket("PS3 packet: size = %d", data, size);
+#endif
+        if (ctx->rb3pro_variant) {
+            SDL_RB3ProOutput output;
+
+            /* Following Linux, a report of navigation only asks for the
+               enable again, at most every 8 s */
+            if (SDL_RB3ProEnable_OnReport(&ctx->rb3pro_enable, data, (size_t)size, SDL_NS_TO_US(SDL_GetTicksNS()))) {
+                HIDAPI_DriverPS3ThirdParty_StartEnable(ctx);
+            }
+            if (joystick && SDL_RB3Pro_DecodeReport(ctx->rb3pro_variant, data, (size_t)size, &output)) {
+                HIDAPI_DriverPS3ThirdParty_PostRB3Pro(joystick, &output);
+            }
+        } else {
+            SDL_PS3ExtOutput output;
+
+            if (ctx->ps3ext_variant == SDL_PS3EXT_TONYHAWK) {
+                const int state = SDL_PS3Ext_TonyHawkBoardState(data, (size_t)size);
+
+                if (state == SDL_PS3EXT_BOARD_INVALID) {
+                    continue;
+                }
+                if (state == SDL_PS3EXT_BOARD_LIVE && device->num_joysticks == 0) {
+                    HIDAPI_JoystickConnected(device, NULL);
+                } else if (state == SDL_PS3EXT_BOARD_IDLE && device->num_joysticks > 0) {
+                    HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+                }
+                if (state != SDL_PS3EXT_BOARD_LIVE) {
+                    continue;
+                }
+                joystick = (device->num_joysticks > 0) ? SDL_GetJoystickFromID(device->joysticks[0]) : NULL;
+            } else if (ctx->ps3ext_variant != SDL_PS3EXT_UDRAW) {
+                SDL_PS3ExtAim_OnReport(&ctx->aim, data, (size_t)size, SDL_GetTicks());
+            }
+            if (joystick && SDL_PS3Ext_Decode(ctx->ps3ext_variant, data, (size_t)size, &output)) {
+                HIDAPI_DriverPS3ThirdParty_PostPS3Ext(ctx, joystick, &output);
+            }
+        }
+    }
+
+    if (size < 0) {
+        // Read error, device is disconnected
+        if (device->num_joysticks > 0) {
+            HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+        }
+        return false;
+    }
+
+    if (ctx->rb3pro_variant) {
+        HIDAPI_DriverPS3ThirdParty_SendEnableRows(ctx);
+    } else if (ctx->ps3ext_variant == SDL_PS3EXT_TOPSHOT_ELITE || ctx->ps3ext_variant == SDL_PS3EXT_TOPSHOT_FEARMASTER) {
+        HIDAPI_DriverPS3ThirdParty_SendTopShotRequest(ctx, SDL_PS3ExtAim_Due(&ctx->aim, SDL_GetTicks()));
+    }
+    return true;
+}
+
 static bool HIDAPI_DriverPS3ThirdParty_UpdateDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverPS3_Context *ctx = (SDL_DriverPS3_Context *)device->context;
     SDL_Joystick *joystick = NULL;
     Uint8 data[USB_PACKET_LENGTH];
     int size;
+
+    if (ctx->rb3pro_variant || ctx->ps3ext_variant) {
+        return HIDAPI_DriverPS3ThirdParty_UpdateDecoded(device, ctx);
+    }
 
     if (device->num_joysticks > 0) {
         joystick = SDL_GetJoystickFromID(device->joysticks[0]);

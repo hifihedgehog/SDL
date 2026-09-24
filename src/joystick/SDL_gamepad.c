@@ -27,11 +27,13 @@
 #include "SDL_steam_virtual_gamepad.h"
 #include "SDL_gamepad_c.h"
 #include "SDL_gamepad_db.h"
+#include "SDL_rb3pro_proto.h"
 #include "controller_type.h"
 #include "usb_ids.h"
 #include "hidapi/SDL_hidapi_flydigi.h"
 #include "hidapi/SDL_hidapi_intelwireless_proto.h"
 #include "hidapi/SDL_hidapi_nintendo.h"
+#include "hidapi/SDL_hidapi_ps3ext_proto.h"
 #include "hidapi/SDL_hidapi_sinput.h"
 #include "../events/SDL_events_c.h"
 #include "../SDL_hints_c.h"
@@ -1102,6 +1104,38 @@ static void SDL_CreateMappingStringForSInputGamepad(Uint16 vendor, Uint16 produc
     SDL_SInputStylesMapExtraction(&decoded, mapping_string, mapping_string_len);
 }
 
+/* The Rock Band 3 Pro instruments on PS3 and Wii, which the PS3 driver lays
+   out with the gamepad buttons first */
+static bool SDL_IsJoystickRB3Pro(Uint16 vendor, Uint16 product)
+{
+    if (vendor == USB_VENDOR_SCEA) {
+        switch (product) {
+        case USB_PRODUCT_SCEA_PS3_RB3_KEYBOARD:
+        case USB_PRODUCT_SCEA_PS3_RB3_MPA_KEYBOARD_MODE:
+        case USB_PRODUCT_SCEA_PS3_RB3_MUSTANG_GUITAR:
+        case USB_PRODUCT_SCEA_PS3_RB3_MPA_MUSTANG_MODE:
+        case USB_PRODUCT_SCEA_PS3_RB3_SQUIER_GUITAR:
+        case USB_PRODUCT_SCEA_PS3_RB3_MPA_SQUIER_MODE:
+            return true;
+        default:
+            break;
+        }
+    } else if (vendor == USB_VENDOR_HARMONIX) {
+        switch (product) {
+        case USB_PRODUCT_HARMONIX_WII_RB3_KEYBOARD:
+        case USB_PRODUCT_HARMONIX_WII_RB3_MPA_KEYBOARD_MODE:
+        case USB_PRODUCT_HARMONIX_WII_RB3_MUSTANG_GUITAR:
+        case USB_PRODUCT_HARMONIX_WII_RB3_MPA_MUSTANG_MODE:
+        case USB_PRODUCT_HARMONIX_WII_RB3_SQUIER_GUITAR:
+        case USB_PRODUCT_HARMONIX_WII_RB3_MPA_SQUIER_MODE:
+            return true;
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
 /*
  * Helper function to guess at a mapping for HIDAPI gamepads
  */
@@ -1265,6 +1299,18 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         SDL_strlcat(mapping_string, SDL_INTEL_WIRELESS_MAPPING, sizeof(mapping_string));
     } else if ((vendor == USB_VENDOR_MICROSOFT) && (product == USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER)) {
         SDL_strlcat(mapping_string, "dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,a:b0,b:b1,x:b2,y:b3,back:b4,guide:b5,start:b6,misc1:b7", sizeof(mapping_string));
+    } else if (SDL_IsJoystickRB3Pro(vendor, product)) {
+        // The keys, frets and sensors have no gamepad control
+        SDL_strlcat(mapping_string, SDL_RB3PRO_MAPPING, sizeof(mapping_string));
+    } else if ((vendor == USB_VENDOR_POWERA_ALT && product == USB_PRODUCT_THQ_PS3_UDRAW) ||
+               (vendor == USB_VENDOR_SCEA && product == USB_PRODUCT_SCEA_PS3_TONY_HAWK_RIDE) ||
+               (vendor == USB_VENDOR_RED_OCTANE && product == USB_PRODUCT_RED_OCTANE_SKATEBOARD)) {
+        // The pen and the board sensors have no gamepad control
+        SDL_strlcat(mapping_string, SDL_PS3EXT_MAPPING_BASE, sizeof(mapping_string));
+    } else if (vendor == USB_VENDOR_SCEA && product == USB_PRODUCT_SCEA_PS3_TOP_SHOT_ELITE) {
+        SDL_strlcat(mapping_string, SDL_PS3EXT_MAPPING_TOPSHOT_ELITE, sizeof(mapping_string));
+    } else if (vendor == USB_VENDOR_SCEA && product == USB_PRODUCT_SCEA_PS3_TOP_SHOT_FEARMASTER) {
+        SDL_strlcat(mapping_string, SDL_PS3EXT_MAPPING_TOPSHOT_FEARMASTER, sizeof(mapping_string));
     } else {
         // All other gamepads have the standard set of 19 buttons and 6 axes
         if (SDL_IsJoystickGameCube(vendor, product)) {
@@ -1494,6 +1540,16 @@ static GamepadMapping_t *SDL_PrivateGetGamepadMappingForGUID(SDL_GUID guid, bool
 #ifdef SDL_JOYSTICK_XINPUT
     if (SDL_IsJoystickXInput(guid)) {
         // This is an XInput device
+        if (guid.data[15] == SDL_RB3PRO_XINPUT_SUBTYPE_KEYBOARD ||
+            guid.data[15] == SDL_RB3PRO_XINPUT_SUBTYPE_GUITAR) {
+            // The Rock Band 3 Pro instruments take the PS3 layout
+            bool existing;
+            char mapping_string[1024];
+
+            SDL_strlcpy(mapping_string, "none,*,", sizeof(mapping_string));
+            SDL_strlcat(mapping_string, SDL_RB3PRO_MAPPING, sizeof(mapping_string));
+            return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
+        }
         return s_pXInputMapping;
     }
 #endif

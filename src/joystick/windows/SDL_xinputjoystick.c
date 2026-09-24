@@ -30,6 +30,7 @@
 #include "SDL_rawinputjoystick_c.h"
 #include "../../core/windows/SDL_gameinput.h"
 #include "../hidapi/SDL_hidapijoystick_c.h"
+#include "../SDL_rb3pro_proto.h"
 
 // Set up for C function definitions, even when using C++
 #ifdef __cplusplus
@@ -93,6 +94,9 @@ static const char *GetXInputName(const Uint8 userid, BYTE SubType)
     case XINPUT_DEVSUBTYPE_ARCADE_PAD:
         (void)SDL_snprintf(name, sizeof(name), "XInput ArcadePad #%d", 1 + userid);
         break;
+    case SDL_RB3PRO_XINPUT_SUBTYPE_KEYBOARD:
+    case SDL_RB3PRO_XINPUT_SUBTYPE_GUITAR:
+        return SDL_RB3Pro_XInputName(SDL_RB3Pro_VariantForXInputSubtype(SubType));
     default:
         (void)SDL_snprintf(name, sizeof(name), "XInput Device #%d", 1 + userid);
         break;
@@ -280,12 +284,23 @@ bool SDL_XINPUT_JoystickOpen(SDL_Joystick *joystick, JoyStick_DeviceData *joysti
     joystick->hwdata->bXInputHaptic = (XINPUTSETSTATE(userId, &state) == ERROR_SUCCESS);
     joystick->hwdata->userid = userId;
 
-    // The XInput API has a hard coded button/axis mapping, so we just match it.
-    // OpenXInput exposes Share via XInputGetSystemButtons (ordinal 109); when
-    // that pointer is non-NULL the controller's Share button lands at index 11.
-    joystick->naxes = 6;
-    joystick->nbuttons = SDL_XInputGetSystemButtons ? 12 : 11;
-    joystick->nhats = 1;
+    joystick->hwdata->rb3pro_variant = SDL_RB3Pro_VariantForXInputSubtype(joystickdevice->SubType);
+    if (joystick->hwdata->rb3pro_variant) {
+        // The Rock Band 3 Pro instruments take the layout of their PS3 models
+        int nbuttons, naxes, nhats;
+
+        SDL_RB3Pro_GetLayout(joystick->hwdata->rb3pro_variant, &nbuttons, &naxes, &nhats);
+        joystick->naxes = naxes;
+        joystick->nbuttons = nbuttons;
+        joystick->nhats = nhats;
+    } else {
+        // The XInput API has a hard coded button/axis mapping, so we just match it.
+        // OpenXInput exposes Share via XInputGetSystemButtons (ordinal 109). When
+        // that pointer is non-NULL the controller's Share button lands at index 11.
+        joystick->naxes = 6;
+        joystick->nbuttons = SDL_XInputGetSystemButtons ? 12 : 11;
+        joystick->nhats = 1;
+    }
 
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
     SDL_XINPUT_PaddleOpen(joystick, userId);
@@ -376,6 +391,49 @@ static void UpdateXInputJoystickState(SDL_Joystick *joystick, XINPUT_STATE *pXIn
     UpdateXInputJoystickBatteryInformation(joystick, pBatteryInformation);
 }
 
+/* A Rock Band 3 Pro instrument. XInput passes its bit-packed fields through,
+   so SDL_rb3pro_proto.c decodes the raw state, before any inversion.
+   extra is the six trailing XUSB bytes, or NULL where only XInput's own
+   twelve are known. */
+static void UpdateXInputRB3ProState(SDL_Joystick *joystick, const XINPUT_STATE *pXInputState, const BYTE *extra, XINPUT_BATTERY_INFORMATION_EX *pBatteryInformation)
+{
+    SDL_RB3ProXInputState state;
+    SDL_RB3ProOutput output;
+    Uint64 timestamp = SDL_GetTicksNS();
+    Uint8 i;
+
+    SDL_zero(state);
+    state.buttons = pXInputState->Gamepad.wButtons;
+    state.left_trigger = pXInputState->Gamepad.bLeftTrigger;
+    state.right_trigger = pXInputState->Gamepad.bRightTrigger;
+    state.thumb_lx = pXInputState->Gamepad.sThumbLX;
+    state.thumb_ly = pXInputState->Gamepad.sThumbLY;
+    state.thumb_rx = pXInputState->Gamepad.sThumbRX;
+    state.thumb_ry = pXInputState->Gamepad.sThumbRY;
+    if (extra) {
+        state.has_trailing = true;
+        SDL_memcpy(state.trailing, extra, sizeof(state.trailing));
+    }
+
+    if (SDL_RB3Pro_DecodeXInput(joystick->hwdata->rb3pro_variant, &state, &output)) {
+        for (i = 0; i < 64; ++i) {
+            if (output.button_mask & ((Uint64)1 << i)) {
+                SDL_SendJoystickButton(timestamp, joystick, i, ((output.buttons >> i) & 1) != 0);
+            }
+        }
+        for (i = 0; i < SDL_RB3PRO_MAX_AXES; ++i) {
+            if (output.axis_mask & (1u << i)) {
+                // Keys, frets and velocities are data: seed past the anti-jitter gate
+                SDL_SeedJoystickDataAxis(joystick, i, output.axes[i]);
+                SDL_SendJoystickAxis(timestamp, joystick, i, output.axes[i]);
+            }
+        }
+        SDL_SendJoystickHat(timestamp, joystick, 0, output.hat);
+    }
+
+    UpdateXInputJoystickBatteryInformation(joystick, pBatteryInformation);
+}
+
 bool SDL_XINPUT_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
     XINPUT_VIBRATION XVibration;
@@ -397,12 +455,25 @@ void SDL_XINPUT_JoystickUpdate(SDL_Joystick *joystick)
     DWORD result;
     XINPUT_STATE XInputState;
     XINPUT_BATTERY_INFORMATION_EX XBatteryInformation;
+    SDL_XINPUT_STATE_EXTENDED_V1 extended;
+    const BYTE *extra = NULL;
 
     if (!XINPUTGETSTATE) {
         return;
     }
 
-    result = XINPUTGETSTATE(joystick->hwdata->userid, &XInputState);
+    if (joystick->hwdata->rb3pro_variant && SDL_XInputGetStateExtended) {
+        // The same reply, with the six bytes XInputGetState leaves out
+        SDL_zero(extended);
+        extended.cbSize = sizeof(extended);
+        result = SDL_XInputGetStateExtended(joystick->hwdata->userid, &extended);
+        XInputState = extended.state;
+        if (result == ERROR_SUCCESS && extended.extraByteCount == sizeof(extended.extraBytes)) {
+            extra = extended.extraBytes;
+        }
+    } else {
+        result = XINPUTGETSTATE(joystick->hwdata->userid, &XInputState);
+    }
     if (result == ERROR_DEVICE_NOT_CONNECTED) {
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
         SDL_XINPUT_PaddleRemoved(joystick->instance_id);
@@ -418,19 +489,29 @@ void SDL_XINPUT_JoystickUpdate(SDL_Joystick *joystick)
 
 #if defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES)
     // XInputOnGameInput doesn't ever change dwPacketNumber, so have to just update every frame
-    UpdateXInputJoystickState(joystick, &XInputState, &XBatteryInformation);
+    if (joystick->hwdata->rb3pro_variant) {
+        UpdateXInputRB3ProState(joystick, &XInputState, extra, &XBatteryInformation);
+    } else {
+        UpdateXInputJoystickState(joystick, &XInputState, &XBatteryInformation);
+    }
 #else
     // only fire events if the data changed from last time
     if (XInputState.dwPacketNumber && XInputState.dwPacketNumber != joystick->hwdata->dwPacketNumber) {
-        UpdateXInputJoystickState(joystick, &XInputState, &XBatteryInformation);
+        if (joystick->hwdata->rb3pro_variant) {
+            UpdateXInputRB3ProState(joystick, &XInputState, extra, &XBatteryInformation);
+        } else {
+            UpdateXInputJoystickState(joystick, &XInputState, &XBatteryInformation);
+        }
         joystick->hwdata->dwPacketNumber = XInputState.dwPacketNumber;
     }
 #endif
 
     // Poll the OpenXInput Share button channel (ordinal 109) every frame.
     // The API has no packet number, so we read each tick and rely on
-    // SDL_SendJoystickButton to deduplicate unchanged state.
-    if (SDL_XInputGetSystemButtons) {
+    // SDL_SendJoystickButton to deduplicate unchanged state. The Rock Band 3
+    // Pro instruments have no Share button: the byte OpenXInput reads for it
+    // carries their pedal connection, and button 11 is overdrive or solo.
+    if (SDL_XInputGetSystemButtons && !joystick->hwdata->rb3pro_variant) {
         XINPUT_SYSTEM_BUTTONS sys;
         SDL_zero(sys);
         if (SDL_XInputGetSystemButtons(joystick->hwdata->userid, &sys, NULL) == ERROR_SUCCESS) {

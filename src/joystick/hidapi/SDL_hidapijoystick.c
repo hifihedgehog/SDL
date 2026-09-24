@@ -50,6 +50,10 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #ifdef SDL_JOYSTICK_HIDAPI_SHIELD
     &SDL_HIDAPI_DriverShield,
 #endif
+#ifdef SDL_JOYSTICK_HIDAPI_GHL
+    // Ahead of the PS3 drivers, which keep 12BA:074B while its hint is off
+    &SDL_HIDAPI_DriverGHL,
+#endif
 #ifdef SDL_JOYSTICK_HIDAPI_PS3
     &SDL_HIDAPI_DriverPS3,
     &SDL_HIDAPI_DriverPS3ThirdParty,
@@ -356,6 +360,7 @@ static SDL_GamepadType SDL_GetJoystickGameControllerProtocol(const char *name, U
             0x0f0d, // Hori
             0x10f5, // Turtle Beach
             0x1209, // Generic
+            0x1430, // RedOctane
             0x1532, // Razer
             0x20d6, // PowerA
             0x24c6, // PowerA

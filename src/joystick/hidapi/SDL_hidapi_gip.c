@@ -26,6 +26,7 @@
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
+#include "../SDL_ghl_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_GIP
 
@@ -500,6 +501,8 @@ typedef struct GIP_Attachment
     Uint8 extra_button_idx;
     int extra_buttons;
     int extra_axes;
+
+    SDL_GHLKeepAlive ghl_keepalive; /* GIP_TYPE_LIVE_GUITAR only */
 } GIP_Attachment;
 
 typedef struct GIP_Device
@@ -2283,6 +2286,12 @@ static bool GIP_HandleLLInputReport(
         return false;
     }
 
+    if (attachment->attachment_type == GIP_TYPE_LIVE_GUITAR) {
+        /* This is the gamepad-shaped copy the console menus read. The guitar
+           itself arrives in message 0x21. */
+        return true;
+    }
+
     GIP_HandleNavigationReport(attachment, joystick, timestamp, bytes, num_bytes);
 
     switch (attachment->attachment_type) {
@@ -2402,6 +2411,75 @@ static bool GIP_HandleLLInputReport(
     SDL_memcpy(attachment->last_input, bytes, SDL_min(num_bytes, sizeof(attachment->last_input)));
 
     return true;
+}
+
+/* Message 0x21 from the Guitar Hero Live guitar: frame A, which
+   SDL_ghl_proto.c decodes. The guide message carries the d-pad
+   center. */
+static bool GIP_HandleLiveGuitarReport(
+    GIP_Attachment *attachment,
+    const GIP_Header *header,
+    const Uint8 *bytes,
+    int num_bytes)
+{
+    Uint64 timestamp = SDL_GetTicksNS();
+    SDL_Joystick *joystick = NULL;
+    SDL_GHLOutput output;
+    Uint8 i;
+
+    if (attachment->device->device->num_joysticks < 1) {
+        GIP_EnsureMetadata(attachment);
+        if (attachment->got_metadata != GIP_METADATA_GOT && attachment->got_metadata != GIP_METADATA_FAKED) {
+            return true;
+        }
+    }
+
+    joystick = SDL_GetJoystickFromID(attachment->joystick);
+    if (!joystick) {
+        return false;
+    }
+
+    if (attachment->device_state != GIP_STATE_START) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "GIP: Discarding early input report");
+        attachment->device_state = GIP_STATE_START;
+        return true;
+    }
+
+    if (num_bytes < 0 || !SDL_GHL_DecodeXboxMessage(header->message_type, bytes, (size_t)num_bytes, &output)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "GIP: Discarding malformed guitar report");
+        return false;
+    }
+    for (i = 0; i < SDL_GHL_NUM_BUTTONS; ++i) {
+        if (output.button_mask & (1u << i)) {
+            SDL_SendJoystickButton(timestamp, joystick, i, (output.buttons & (1u << i)) != 0);
+        }
+    }
+    for (i = 0; i < SDL_GHL_NUM_AXES; ++i) {
+        SDL_SendJoystickAxis(timestamp, joystick, i, output.axes[i]);
+    }
+    SDL_SendJoystickHat(timestamp, joystick, 0, output.hat);
+    return true;
+}
+
+/* The Guitar Hero Live guitar wants message 0x22 every 8 s, or the strum bar
+   cuts out held frets. The first goes once its joystick exists. A failed
+   send stays due for the next update. */
+static void GIP_UpdateLiveGuitarKeepAlive(GIP_Attachment *attachment, Uint64 now)
+{
+    Uint8 payload[SDL_GHL_XBOX_KEEPALIVE_LENGTH];
+
+    if (attachment->attachment_type != GIP_TYPE_LIVE_GUITAR || !attachment->joystick) {
+        return;
+    }
+    if (!attachment->ghl_keepalive.active) {
+        SDL_GHL_KeepAliveStart(&attachment->ghl_keepalive, now);
+    }
+    if (!SDL_GHL_KeepAliveDue(&attachment->ghl_keepalive, now)) {
+        return;
+    }
+    SDL_GHL_BuildXboxKeepAlive(payload);
+    SDL_GHL_KeepAliveSent(&attachment->ghl_keepalive, now,
+                          GIP_SendVendorMessage(attachment, SDL_GHL_XBOX_MESSAGE_OUTPUT, 0, payload, sizeof(payload)));
 }
 
 static bool GIP_HandleLLStaticConfiguration(
@@ -2538,6 +2616,9 @@ static bool GIP_HandleMessage(
         case GIP_LL_INPUT_REPORT:
             return GIP_HandleLLInputReport(attachment, header, bytes, num_bytes);
         case GIP_LL_STATIC_CONFIGURATION:
+            if (attachment->attachment_type == GIP_TYPE_LIVE_GUITAR) {
+                return GIP_HandleLiveGuitarReport(attachment, header, bytes, num_bytes);
+            }
             return GIP_HandleLLStaticConfiguration(attachment, header, bytes, num_bytes);
         case GIP_LL_BUTTON_INFO_REPORT:
             return GIP_HandleLLButtonInfoReport(attachment, header, bytes, num_bytes);
@@ -3038,6 +3119,7 @@ static bool HIDAPI_DriverGIP_UpdateDevice(SDL_HIDAPI_Device *device)
             perform_reset = false;
         }
         HIDAPI_DriverGIP_UpdateRumble(attachment);
+        GIP_UpdateLiveGuitarKeepAlive(attachment, timestamp);
     }
 
     if (num_bytes < 0 && device->num_joysticks > 0) {

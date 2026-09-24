@@ -65,11 +65,14 @@
 #endif
 
 
-// HIDIOCGINPUT is not defined in Linux kernel headers < 5.11.
+// HIDIOCGINPUT and HIDIOCSOUTPUT are not defined in Linux kernel headers < 5.11.
 // This definition is from hidraw.h in Linux >= 5.11.
 // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f43d3870cafa2a0f3854c1819c8385733db8f9ae
 #ifndef HIDIOCGINPUT
 #define HIDIOCGINPUT(len)    _IOC(_IOC_WRITE|_IOC_READ, 'H', 0x0A, len)
+#endif
+#ifndef HIDIOCSOUTPUT
+#define HIDIOCSOUTPUT(len)   _IOC(_IOC_WRITE|_IOC_READ, 'H', 0x0B, len)
 #endif
 
 struct hid_device_ {
@@ -1359,6 +1362,25 @@ int HID_API_EXPORT hid_get_feature_report(hid_device *dev, unsigned char *data, 
 			++res;
 		}
 	}
+
+	return res;
+}
+
+int HID_API_EXPORT HID_API_CALL hid_send_output_report(hid_device *dev, const unsigned char *data, size_t length)
+{
+	int res;
+
+	if (!data || (length == 0)) {
+		errno = EINVAL;
+		register_device_error(dev, "Zero buffer/length");
+		return -1;
+	}
+
+	register_device_error(dev, NULL);
+
+	res = ioctl(dev->device_handle, HIDIOCSOUTPUT(length), data);
+	if (res < 0)
+		register_device_error_format(dev, "ioctl (SOUTPUT): %s", strerror(errno));
 
 	return res;
 }
