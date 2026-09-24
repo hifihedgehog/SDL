@@ -193,6 +193,9 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverZUIKI;
 // Returns true if the product string is available
 extern bool HIDAPI_GetDeviceStrings(Uint16 vendor_id, Uint16 product_id, char **manufacturer_string, char **product_string);
 
+// Return true if any HIDAPI driver, enabled or not, supports the device
+extern bool HIDAPI_IsDeviceSupportedByAnyDriver(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
+
 // Return the type of a joystick if it's present and supported
 extern SDL_JoystickType HIDAPI_GetJoystickTypeFromGUID(SDL_GUID guid);
 
