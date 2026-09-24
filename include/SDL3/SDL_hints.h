@@ -1674,6 +1674,27 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE "SDL_JOYSTICK_HIDAPI_GAMECUBE"
 
 /**
+ * A variable controlling whether the HIDAPI driver for the Intel Wireless
+ * Series gamepads should be used.
+ *
+ * This is a PadForge fork addition. The pads reach the PC through the Intel
+ * Wireless Series USB base station (8086:C013). On Windows the driver reads
+ * it through libusb once WinUSB is bound to the base station's interface 0.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_INTEL_WIRELESS "SDL_JOYSTICK_HIDAPI_INTEL_WIRELESS"
+
+/**
  * A variable controlling whether rumble is used to implement the GameCube
  * controller's 3 rumble modes, Stop(0), Rumble(1), and StopHard(2).
  *

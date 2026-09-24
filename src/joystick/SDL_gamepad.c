@@ -30,6 +30,7 @@
 #include "controller_type.h"
 #include "usb_ids.h"
 #include "hidapi/SDL_hidapi_flydigi.h"
+#include "hidapi/SDL_hidapi_intelwireless_proto.h"
 #include "hidapi/SDL_hidapi_nintendo.h"
 #include "hidapi/SDL_hidapi_sinput.h"
 #include "../events/SDL_events_c.h"
@@ -1251,6 +1252,9 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         Uint8 sub_product  = guid.data[15] & 0x1F;
 
         SDL_CreateMappingStringForSInputGamepad(vendor, product, sub_product, version, face_style, mapping_string, sizeof(mapping_string));
+    } else if (vendor == USB_VENDOR_INTEL && product == USB_PRODUCT_INTEL_WIRELESS_SERIES) {
+        // Z and C are the shoulders and L and R the triggers. Mouse is Back and Shift is Guide.
+        SDL_strlcat(mapping_string, SDL_INTEL_WIRELESS_MAPPING, sizeof(mapping_string));
     } else if ((vendor == USB_VENDOR_MICROSOFT) && (product == USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER)) {
         SDL_strlcat(mapping_string, "dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,a:b0,b:b1,x:b2,y:b3,back:b4,guide:b5,start:b6,misc1:b7", sizeof(mapping_string));
     } else {
