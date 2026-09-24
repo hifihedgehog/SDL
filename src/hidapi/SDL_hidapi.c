@@ -583,6 +583,7 @@ typedef struct PLATFORM_hid_device_ PLATFORM_hid_device;
 #define hid_read                     PLATFORM_hid_read
 #define hid_read_timeout             PLATFORM_hid_read_timeout
 #define hid_send_feature_report      PLATFORM_hid_send_feature_report
+#define hid_send_output_report       PLATFORM_hid_send_output_report
 #define hid_set_nonblocking          PLATFORM_hid_set_nonblocking
 #define hid_version                  PLATFORM_hid_version
 #define hid_version_str              PLATFORM_hid_version_str
@@ -631,6 +632,7 @@ typedef struct PLATFORM_hid_device_ PLATFORM_hid_device;
 #undef hid_read
 #undef hid_read_timeout
 #undef hid_send_feature_report
+#undef hid_send_output_report
 #undef hid_set_nonblocking
 #undef hid_version
 #undef hid_version_str
@@ -673,6 +675,7 @@ typedef struct DRIVER_hid_device_ DRIVER_hid_device;
 #define hid_read                     DRIVER_hid_read
 #define hid_read_timeout             DRIVER_hid_read_timeout
 #define hid_send_feature_report      DRIVER_hid_send_feature_report
+#define hid_send_output_report       DRIVER_hid_send_output_report
 #define hid_set_nonblocking          DRIVER_hid_set_nonblocking
 #define hid_write                    DRIVER_hid_write
 
@@ -703,6 +706,7 @@ typedef struct DRIVER_hid_device_ DRIVER_hid_device;
 #undef hid_read
 #undef hid_read_timeout
 #undef hid_send_feature_report
+#undef hid_send_output_report
 #undef hid_set_nonblocking
 #undef hid_write
 
@@ -776,6 +780,7 @@ typedef struct LIBUSB_hid_device_ LIBUSB_hid_device;
 #define hid_read                        LIBUSB_hid_read
 #define hid_read_timeout                LIBUSB_hid_read_timeout
 #define hid_send_feature_report         LIBUSB_hid_send_feature_report
+#define hid_send_output_report          LIBUSB_hid_send_output_report
 #define hid_set_nonblocking             LIBUSB_hid_set_nonblocking
 #define hid_write                       LIBUSB_hid_write
 #define hid_libusb_wrap_sys_device      LIBUSB_hid_libusb_wrap_sys_device
@@ -844,6 +849,7 @@ typedef struct LIBUSB_hid_device_ LIBUSB_hid_device;
 #undef hid_read
 #undef hid_read_timeout
 #undef hid_send_feature_report
+#undef hid_send_output_report
 #undef hid_set_nonblocking
 #undef hid_write
 #undef input_report
@@ -887,6 +893,7 @@ struct hidapi_backend
     int (*hid_set_nonblocking)(hid_device *device, int nonblock);
     int (*hid_send_feature_report)(hid_device *device, const unsigned char *data, size_t length);
     int (*hid_get_feature_report)(hid_device *device, unsigned char *data, size_t length);
+    int (*hid_send_output_report)(hid_device *device, const unsigned char *data, size_t length); // NULL where the backend has no way to send one
     int (*hid_get_input_report)(hid_device *device, unsigned char *data, size_t length);
     void (*hid_close)(hid_device *device);
     int (*hid_get_manufacturer_string)(hid_device *device, wchar_t *string, size_t maxlen);
@@ -960,8 +967,17 @@ struct hidapi_backend
         return PREFIX##_hid_error((DEVICE_TYPE *)device);                                                                             \
     }
 
+/* Output reports through SET_REPORT on the control pipe. The driver backend
+   is built from a file outside this tree that does not provide it. */
+#define HIDAPI_BACKEND_OUTPUT_REPORT_WRAPPER(PREFIX, DEVICE_TYPE)                                                                     \
+    static int PREFIX##_hid_send_output_report_backend(hid_device *device, const unsigned char *data, size_t length)                  \
+    {                                                                                                                                 \
+        return PREFIX##_hid_send_output_report((DEVICE_TYPE *)device, data, length);                                                  \
+    }
+
 #ifdef HAVE_PLATFORM_BACKEND
 HIDAPI_BACKEND_WRAPPERS(PLATFORM, PLATFORM_hid_device)
+HIDAPI_BACKEND_OUTPUT_REPORT_WRAPPER(PLATFORM, PLATFORM_hid_device)
 
 static const struct hidapi_backend PLATFORM_Backend = {
     PLATFORM_hid_write_backend,
@@ -970,6 +986,7 @@ static const struct hidapi_backend PLATFORM_Backend = {
     PLATFORM_hid_set_nonblocking_backend,
     PLATFORM_hid_send_feature_report_backend,
     PLATFORM_hid_get_feature_report_backend,
+    PLATFORM_hid_send_output_report_backend,
     PLATFORM_hid_get_input_report_backend,
     PLATFORM_hid_close_backend,
     PLATFORM_hid_get_manufacturer_string_backend,
@@ -992,6 +1009,7 @@ static const struct hidapi_backend DRIVER_Backend = {
     DRIVER_hid_set_nonblocking_backend,
     DRIVER_hid_send_feature_report_backend,
     DRIVER_hid_get_feature_report_backend,
+    NULL,
     DRIVER_hid_get_input_report_backend,
     DRIVER_hid_close_backend,
     DRIVER_hid_get_manufacturer_string_backend,
@@ -1006,6 +1024,7 @@ static const struct hidapi_backend DRIVER_Backend = {
 
 #ifdef HAVE_LIBUSB
 HIDAPI_BACKEND_WRAPPERS(LIBUSB, LIBUSB_hid_device)
+HIDAPI_BACKEND_OUTPUT_REPORT_WRAPPER(LIBUSB, LIBUSB_hid_device)
 
 static const struct hidapi_backend LIBUSB_Backend = {
     LIBUSB_hid_write_backend,
@@ -1014,6 +1033,7 @@ static const struct hidapi_backend LIBUSB_Backend = {
     LIBUSB_hid_set_nonblocking_backend,
     LIBUSB_hid_send_feature_report_backend,
     LIBUSB_hid_get_feature_report_backend,
+    LIBUSB_hid_send_output_report_backend,
     LIBUSB_hid_get_input_report_backend,
     LIBUSB_hid_close_backend,
     LIBUSB_hid_get_manufacturer_string_backend,
@@ -1027,6 +1047,7 @@ static const struct hidapi_backend LIBUSB_Backend = {
 #endif // HAVE_LIBUSB
 
 #undef HIDAPI_BACKEND_WRAPPERS
+#undef HIDAPI_BACKEND_OUTPUT_REPORT_WRAPPER
 
 struct SDL_hid_device
 {
@@ -1602,6 +1623,17 @@ int SDL_hid_get_feature_report(SDL_hid_device *device, unsigned char *data, size
     CHECK_DEVICE_MAGIC(device, -1);
 
     return device->backend->hid_get_feature_report(device->device, data, length);
+}
+
+int SDL_hid_send_output_report(SDL_hid_device *device, const unsigned char *data, size_t length)
+{
+    CHECK_DEVICE_MAGIC(device, -1);
+
+    if (!device->backend->hid_send_output_report) {
+        SDL_Unsupported();
+        return -1;
+    }
+    return device->backend->hid_send_output_report(device->device, data, length);
 }
 
 int SDL_hid_get_input_report(SDL_hid_device *device, unsigned char *data, size_t length)

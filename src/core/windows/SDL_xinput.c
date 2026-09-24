@@ -34,6 +34,9 @@ XInputGetCapabilitiesEx_t SDL_XInputGetCapabilitiesEx = NULL;
 XInputGetBatteryInformation_t SDL_XInputGetBatteryInformation = NULL;
 XInputGetSystemButtons_t SDL_XInputGetSystemButtons = NULL;
 XInputGetDeviceIdentity_t SDL_XInputGetDeviceIdentity = NULL;
+XInputGetStateExtended_t SDL_XInputGetStateExtended = NULL;
+
+SDL_COMPILE_TIME_ASSERT(xinput_state_extended_v1_size, sizeof(SDL_XINPUT_STATE_EXTENDED_V1) == 32);
 
 static HMODULE s_pXInputDLL = NULL;
 static int s_XInputDLLRefCount = 0;
@@ -106,6 +109,7 @@ bool WIN_LoadXInputDLL(void)
     // stays NULL there and the Share path no-ops.
     SDL_XInputGetSystemButtons = (XInputGetSystemButtons_t)GetProcAddress(s_pXInputDLL, (LPCSTR)109);
     SDL_XInputGetDeviceIdentity = (XInputGetDeviceIdentity_t)GetProcAddress(s_pXInputDLL, "OpenXInputGetDeviceIdentityV1");
+    SDL_XInputGetStateExtended = (XInputGetStateExtended_t)GetProcAddress(s_pXInputDLL, "OpenXInputGetStateExtendedV1");
     if (!SDL_XInputGetState || !SDL_XInputSetState || !SDL_XInputGetCapabilities) {
         WIN_UnloadXInputDLL();
         return false;
@@ -122,6 +126,7 @@ void WIN_UnloadXInputDLL(void)
             FreeLibrary(s_pXInputDLL);
             s_pXInputDLL = NULL;
             SDL_XInputGetDeviceIdentity = NULL;
+            SDL_XInputGetStateExtended = NULL;
         }
     } else {
         SDL_assert(s_XInputDLLRefCount == 0);

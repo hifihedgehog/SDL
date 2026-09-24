@@ -639,6 +639,8 @@ static Uint32 initial_guitar_devices[] = {
 	MAKE_VIDPID(0x1430, 0x02a7), // Guitar Hero Wireless Guitar (Linux)
 	MAKE_VIDPID(0x1430, 0x0705), // Guitar Hero 5 Guitar
 	MAKE_VIDPID(0x1430, 0x070B), // Guitar Hero Live Guitar
+	MAKE_VIDPID(0x1430, 0x079B), // Xbox One Guitar Hero Live Guitar
+	MAKE_VIDPID(0x1430, 0x07BB), // PS4 Guitar Hero Live Guitar
 	MAKE_VIDPID(0x1430, 0x4734), // Guitar Hero World Tour Kiosk
 	MAKE_VIDPID(0x1430, 0x4748), // RedOctane Guitar Hero X-plorer
 	MAKE_VIDPID(0x1bad, 0x02a6), // Rock Band 2 Wireless Guitar (Linux)
@@ -3736,6 +3738,7 @@ static SDL_JoystickType SDL_GetJoystickGUIDType(SDL_GUID guid)
         case 0x06: // XINPUT_DEVSUBTYPE_GUITAR
         case 0x07: // XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE
         case 0x0B: // XINPUT_DEVSUBTYPE_GUITAR_BASS
+        case 0x19: // Rock Band 3 Pro guitar, outside the XInput set
             return SDL_JOYSTICK_TYPE_GUITAR;
         case 0x08: // XINPUT_DEVSUBTYPE_DRUM_KIT
             return SDL_JOYSTICK_TYPE_DRUM_KIT;

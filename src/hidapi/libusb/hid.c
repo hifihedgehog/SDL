@@ -1015,6 +1015,7 @@ static int is_xboxone(unsigned short vendor_id, const struct libusb_interface_de
 		0x0f0d, /* Hori */
 		0x10f5, /* Turtle Beach */
 		0x1209, /* Generic */
+		0x1430, /* RedOctane */
 		0x1532, /* Razer Wildcat */
 		0x20d6, /* PowerA */
 		0x24c6, /* PowerA */
@@ -2113,6 +2114,42 @@ int HID_API_EXPORT hid_send_feature_report(hid_device *dev, const unsigned char 
 		LIBUSB_REQUEST_TYPE_CLASS|LIBUSB_RECIPIENT_INTERFACE|LIBUSB_ENDPOINT_OUT,
 		0x09/*HID set_report*/,
 		(uint16_t)((3/*HID feature*/ << 8) | report_number),
+		(uint16_t)dev->interface,
+		(unsigned char *)data, (uint16_t)length,
+		1000/*timeout millis*/);
+
+	if (res < 0)
+		return -1;
+
+	/* Account for the report ID */
+	if (skipped_report_id)
+		length++;
+
+	return (int) length;
+}
+
+int HID_API_EXPORT hid_send_output_report(hid_device *dev, const unsigned char *data, size_t length)
+{
+	int res = -1;
+	int skipped_report_id = 0;
+	int report_number;
+
+	if (!data || (length == 0)) {
+		return -1;
+	}
+
+	report_number = data[0];
+
+	if (report_number == 0x0) {
+		data++;
+		length--;
+		skipped_report_id = 1;
+	}
+
+	res = libusb_control_transfer(dev->device_handle,
+		LIBUSB_REQUEST_TYPE_CLASS|LIBUSB_RECIPIENT_INTERFACE|LIBUSB_ENDPOINT_OUT,
+		0x09/*HID set_report*/,
+		(uint16_t)((2/*HID output*/ << 8) | report_number),
 		(uint16_t)dev->interface,
 		(unsigned char *)data, (uint16_t)length,
 		1000/*timeout millis*/);

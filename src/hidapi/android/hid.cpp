@@ -77,6 +77,7 @@ extern "C" {
 #define hid_read                     PLATFORM_hid_read
 #define hid_read_timeout             PLATFORM_hid_read_timeout
 #define hid_send_feature_report      PLATFORM_hid_send_feature_report
+#define hid_send_output_report       PLATFORM_hid_send_output_report
 #define hid_set_nonblocking          PLATFORM_hid_set_nonblocking
 #define hid_version                  PLATFORM_hid_version
 #define hid_version_str              PLATFORM_hid_version_str
@@ -1289,6 +1290,16 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *device, unsig
 		}
 	}
 	return -1; // Controller was disconnected
+}
+
+
+int HID_API_EXPORT HID_API_CALL hid_send_output_report(hid_device *device, const unsigned char *data, size_t length)
+{
+	// Not supported: the Java layer has no control-pipe output report
+	(void)device;
+	(void)data;
+	(void)length;
+	return -1;
 }
 
 

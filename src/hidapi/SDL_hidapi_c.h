@@ -24,3 +24,10 @@
 /* Return true if the HIDAPI should ignore a device during enumeration */
 extern bool SDL_HIDAPI_ShouldIgnoreDevice(int bus_type, Uint16 vendor_id, Uint16 product_id, Uint16 usage_page, Uint16 usage, bool libusb, bool is_xbox);
 
+/* Sends an output report through SET_REPORT on the control pipe, where
+   SDL_hid_write takes the first interrupt OUT endpoint when one exists. The
+   first byte of data is the report ID, 0 for a device without report IDs.
+   Returns the number of bytes sent, or -1 on error, including on a backend
+   that cannot send one. */
+extern int SDL_hid_send_output_report(SDL_hid_device *device, const unsigned char *data, size_t length);
+
