@@ -65,3 +65,7 @@ protocol_test(intelwireless "${PROTOCOL_TESTS}/testintelwireless.c"
 protocol_test(xbox360bb "${PROTOCOL_TESTS}/testxbox360bb.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_xbox360bb_proto.c"
     "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+# hifihedgehog/SDL#33 Part 2: Wii Remote extensions.
+protocol_test(wiiext "${PROTOCOL_TESTS}/testwiiext.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_wii_ext_proto.c")

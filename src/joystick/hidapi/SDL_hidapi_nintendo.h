@@ -47,4 +47,12 @@ typedef enum
     k_eWiiExtensionControllerType_Gamepad = 130,
     k_eWiiExtensionControllerType_WiiUPro = 131,
     k_eWiiExtensionControllerType_BalanceBoard = 132,
+    // Decoded by SDL_hidapi_wii_ext_proto.c
+    k_eWiiExtensionControllerType_Guitar = 133,
+    k_eWiiExtensionControllerType_Drums = 134,
+    k_eWiiExtensionControllerType_Turntable = 135,
+    k_eWiiExtensionControllerType_Taiko = 136,
+    k_eWiiExtensionControllerType_UDraw = 137,
+    k_eWiiExtensionControllerType_Drawsome = 138,
+    k_eWiiExtensionControllerType_Shinkansen = 139,
 } EWiiExtensionControllerType;

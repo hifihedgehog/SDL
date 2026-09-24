@@ -27,6 +27,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
 #include "SDL_hidapi_nintendo.h"
+#include "SDL_hidapi_wii_ext_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_WII
 
@@ -148,6 +149,49 @@ typedef enum
 
 #define k_unWiiPacketDataLength 22
 
+/* SDL_hidapi_wii_ext_proto.c decodes the extensions the driver used to report
+   as unknown. It builds without SDL's headers, so its values are checked
+   against SDL's here. */
+SDL_COMPILE_TIME_ASSERT(wii_ext_none, SDL_WII_EXT_NONE == k_eWiiExtensionControllerType_None);
+SDL_COMPILE_TIME_ASSERT(wii_ext_unknown, SDL_WII_EXT_UNKNOWN == k_eWiiExtensionControllerType_Unknown);
+SDL_COMPILE_TIME_ASSERT(wii_ext_nunchuk, SDL_WII_EXT_NUNCHUK == k_eWiiExtensionControllerType_Nunchuk);
+SDL_COMPILE_TIME_ASSERT(wii_ext_gamepad, SDL_WII_EXT_GAMEPAD == k_eWiiExtensionControllerType_Gamepad);
+SDL_COMPILE_TIME_ASSERT(wii_ext_wiiupro, SDL_WII_EXT_WIIUPRO == k_eWiiExtensionControllerType_WiiUPro);
+SDL_COMPILE_TIME_ASSERT(wii_ext_balanceboard, SDL_WII_EXT_BALANCEBOARD == k_eWiiExtensionControllerType_BalanceBoard);
+SDL_COMPILE_TIME_ASSERT(wii_ext_guitar, SDL_WII_EXT_GUITAR == k_eWiiExtensionControllerType_Guitar);
+SDL_COMPILE_TIME_ASSERT(wii_ext_drums, SDL_WII_EXT_DRUMS == k_eWiiExtensionControllerType_Drums);
+SDL_COMPILE_TIME_ASSERT(wii_ext_turntable, SDL_WII_EXT_TURNTABLE == k_eWiiExtensionControllerType_Turntable);
+SDL_COMPILE_TIME_ASSERT(wii_ext_taiko, SDL_WII_EXT_TAIKO == k_eWiiExtensionControllerType_Taiko);
+SDL_COMPILE_TIME_ASSERT(wii_ext_udraw, SDL_WII_EXT_UDRAW == k_eWiiExtensionControllerType_UDraw);
+SDL_COMPILE_TIME_ASSERT(wii_ext_drawsome, SDL_WII_EXT_DRAWSOME == k_eWiiExtensionControllerType_Drawsome);
+SDL_COMPILE_TIME_ASSERT(wii_ext_shinkansen, SDL_WII_EXT_SHINKANSEN == k_eWiiExtensionControllerType_Shinkansen);
+SDL_COMPILE_TIME_ASSERT(wii_ext_type_unknown, SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN == SDL_JOYSTICK_TYPE_UNKNOWN);
+SDL_COMPILE_TIME_ASSERT(wii_ext_type_gamepad, SDL_WII_EXT_JOYSTICK_TYPE_GAMEPAD == SDL_JOYSTICK_TYPE_GAMEPAD);
+SDL_COMPILE_TIME_ASSERT(wii_ext_type_guitar, SDL_WII_EXT_JOYSTICK_TYPE_GUITAR == SDL_JOYSTICK_TYPE_GUITAR);
+SDL_COMPILE_TIME_ASSERT(wii_ext_type_drum_kit, SDL_WII_EXT_JOYSTICK_TYPE_DRUM_KIT == SDL_JOYSTICK_TYPE_DRUM_KIT);
+SDL_COMPILE_TIME_ASSERT(wii_ext_south, SDL_WII_EXT_BUTTON_SOUTH == SDL_GAMEPAD_BUTTON_SOUTH);
+SDL_COMPILE_TIME_ASSERT(wii_ext_east, SDL_WII_EXT_BUTTON_EAST == SDL_GAMEPAD_BUTTON_EAST);
+SDL_COMPILE_TIME_ASSERT(wii_ext_west, SDL_WII_EXT_BUTTON_WEST == SDL_GAMEPAD_BUTTON_WEST);
+SDL_COMPILE_TIME_ASSERT(wii_ext_north, SDL_WII_EXT_BUTTON_NORTH == SDL_GAMEPAD_BUTTON_NORTH);
+SDL_COMPILE_TIME_ASSERT(wii_ext_back, SDL_WII_EXT_BUTTON_BACK == SDL_GAMEPAD_BUTTON_BACK);
+SDL_COMPILE_TIME_ASSERT(wii_ext_start, SDL_WII_EXT_BUTTON_START == SDL_GAMEPAD_BUTTON_START);
+SDL_COMPILE_TIME_ASSERT(wii_ext_left_stick, SDL_WII_EXT_BUTTON_LEFT_STICK == SDL_GAMEPAD_BUTTON_LEFT_STICK);
+SDL_COMPILE_TIME_ASSERT(wii_ext_right_stick, SDL_WII_EXT_BUTTON_RIGHT_STICK == SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+SDL_COMPILE_TIME_ASSERT(wii_ext_left_shoulder, SDL_WII_EXT_BUTTON_LEFT_SHOULDER == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+SDL_COMPILE_TIME_ASSERT(wii_ext_right_shoulder, SDL_WII_EXT_BUTTON_RIGHT_SHOULDER == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+SDL_COMPILE_TIME_ASSERT(wii_ext_turntable_buttons, SDL_WII_EXT_BUTTON_TURNTABLE_LEFT_GREEN == k_eWiiButtons_Max);
+SDL_COMPILE_TIME_ASSERT(wii_ext_leftx, SDL_WII_EXT_AXIS_LEFTX == SDL_GAMEPAD_AXIS_LEFTX);
+SDL_COMPILE_TIME_ASSERT(wii_ext_lefty, SDL_WII_EXT_AXIS_LEFTY == SDL_GAMEPAD_AXIS_LEFTY);
+SDL_COMPILE_TIME_ASSERT(wii_ext_rightx, SDL_WII_EXT_AXIS_RIGHTX == SDL_GAMEPAD_AXIS_RIGHTX);
+SDL_COMPILE_TIME_ASSERT(wii_ext_righty, SDL_WII_EXT_AXIS_RIGHTY == SDL_GAMEPAD_AXIS_RIGHTY);
+SDL_COMPILE_TIME_ASSERT(wii_ext_left_trigger, SDL_WII_EXT_AXIS_LEFT_TRIGGER == SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+SDL_COMPILE_TIME_ASSERT(wii_ext_right_trigger, SDL_WII_EXT_AXIS_RIGHT_TRIGGER == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+SDL_COMPILE_TIME_ASSERT(wii_ext_hat_up, SDL_WII_EXT_HAT_UP == SDL_HAT_UP);
+SDL_COMPILE_TIME_ASSERT(wii_ext_hat_right, SDL_WII_EXT_HAT_RIGHT == SDL_HAT_RIGHT);
+SDL_COMPILE_TIME_ASSERT(wii_ext_hat_down, SDL_WII_EXT_HAT_DOWN == SDL_HAT_DOWN);
+SDL_COMPILE_TIME_ASSERT(wii_ext_hat_left, SDL_WII_EXT_HAT_LEFT == SDL_HAT_LEFT);
+SDL_COMPILE_TIME_ASSERT(wii_ext_write_request, SDL_WII_EXT_WRITE_REQUEST_SIZE == k_unWiiPacketDataLength);
+
 typedef struct
 {
     Uint8 rgucBaseButtons[2];
@@ -191,6 +235,8 @@ typedef struct
     bool m_bDisconnected;
 
     StickCalibrationData m_StickCalibrationData[6];
+    SDL_WiiExtState m_ExtState; // The extensions SDL_hidapi_wii_ext_proto.c decodes
+    int m_nReadSize;            // Length of the report in m_rgucReadBuffer
 } SDL_DriverWii_Context;
 
 static void HIDAPI_DriverWii_RegisterHints(SDL_HintCallback callback, void *userdata)
@@ -234,6 +280,9 @@ static int ReadInput(SDL_DriverWii_Context *ctx)
     }
 
     size = SDL_hid_read_timeout(ctx->device->dev, ctx->m_rgucReadBuffer, sizeof(ctx->m_rgucReadBuffer), 0);
+    if (size > 0) {
+        ctx->m_nReadSize = size;
+    }
 #ifdef DEBUG_WII_PROTOCOL
     if (size > 0) {
         HIDAPI_DumpPacket("Wii packet: size = %d", ctx->m_rgucReadBuffer, size);
@@ -288,17 +337,12 @@ static bool IsWriteMemoryResponse(const Uint8 *data)
 
 static bool WriteRegister(SDL_DriverWii_Context *ctx, Uint32 address, const Uint8 *data, int size, bool sync)
 {
-    Uint8 writeRequest[k_unWiiPacketDataLength];
+    Uint8 writeRequest[SDL_WII_EXT_WRITE_REQUEST_SIZE];
 
-    SDL_zeroa(writeRequest);
-    writeRequest[0] = k_eWiiOutputReportIDs_WriteMemory;
-    writeRequest[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
-    writeRequest[2] = (address >> 16) & 0xff;
-    writeRequest[3] = (address >> 8) & 0xff;
-    writeRequest[4] = address & 0xff;
-    writeRequest[5] = (Uint8)size;
     SDL_assert(size > 0 && size <= 16);
-    SDL_memcpy(writeRequest + 6, data, size);
+    if (!SDL_WiiExt_BuildWriteRequest(writeRequest, ctx->m_bRumbleActive, address, data, (size_t)size)) {
+        return false;
+    }
 
     if (!WriteOutput(ctx, writeRequest, sizeof(writeRequest), sync)) {
         return false;
@@ -318,17 +362,10 @@ static bool WriteRegister(SDL_DriverWii_Context *ctx, Uint32 address, const Uint
 
 static bool ReadRegister(SDL_DriverWii_Context *ctx, Uint32 address, int size, bool sync)
 {
-    Uint8 readRequest[7];
-
-    readRequest[0] = k_eWiiOutputReportIDs_ReadMemory;
-    readRequest[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
-    readRequest[2] = (address >> 16) & 0xff;
-    readRequest[3] = (address >> 8) & 0xff;
-    readRequest[4] = address & 0xff;
-    readRequest[5] = (size >> 8) & 0xff;
-    readRequest[6] = size & 0xff;
+    Uint8 readRequest[SDL_WII_EXT_READ_REQUEST_SIZE];
 
     SDL_assert(size > 0 && size <= 0xffff);
+    SDL_WiiExt_BuildReadRequest(readRequest, ctx->m_bRumbleActive, address, (Uint16)size);
 
     if (!WriteOutput(ctx, readRequest, sizeof(readRequest), sync)) {
         return false;
@@ -343,9 +380,12 @@ static bool ReadRegister(SDL_DriverWii_Context *ctx, Uint32 address, int size, b
     return true;
 }
 
+/* All six ID bytes at 0xA400FA, as Linux (hid-wiimote-core.c) and Dolphin's
+   real-Wiimote backend read them. The guitar, drum kit and turntable share
+   bytes 4-5 and differ in byte 0, which the old 2-byte read at 0xFE missed. */
 static bool SendExtensionIdentify(SDL_DriverWii_Context *ctx, bool sync)
 {
-    return ReadRegister(ctx, 0xA400FE, 2, sync);
+    return ReadRegister(ctx, SDL_WII_EXT_REG_IDENTIFY, 6, sync);
 }
 
 /* An ACTIVE Motion Plus blocks i2c passthrough entirely (Dolphin
@@ -355,80 +395,62 @@ static bool SendExtensionIdentify(SDL_DriverWii_Context *ctx, bool sync)
    register map). Dolphin's real-Wiimote backend reads these four bytes at the
    active address and maps the child from bytes (0xF8, 0xF6, 0xF9)
    (WiimoteController.cpp:541-564). Our 16-bit extension IDs are full-ID bytes
-   4-5, so the stored pair is (data[0] << 8) | data[3]. */
-static bool ReadStoredChildExtensionID(SDL_DriverWii_Context *ctx, Uint16 *extension)
+   4-5, so the stored pair is (data[0] << 8) | data[3], and data[2] is ID byte
+   0, which tells the guitar, drum kit and turntable apart. */
+static bool ReadStoredChildExtensionID(SDL_DriverWii_Context *ctx, Uint16 *extension, Uint8 *id0)
 {
-    if (!ReadRegister(ctx, 0xA400F6, 4, true)) {
+    Uint8 i0, i4, i5;
+
+    if (!ReadRegister(ctx, SDL_WII_EXT_REG_STORED_ID, 4, true)) {
         return false;
     }
-    if (ctx->m_rgucReadBuffer[0] != k_eWiiInputReportIDs_ReadMemory) {
+    /* A read error, a short read or another reply: the register is
+       unreadable right now */
+    if (!SDL_WiiExt_ParseStoredIdReply(ctx->m_rgucReadBuffer, (size_t)ctx->m_nReadSize, &i0, &i4, &i5)) {
         return false;
     }
-    if (ctx->m_rgucReadBuffer[4] != 0x00 || ctx->m_rgucReadBuffer[5] != 0xF6) {
-        return false;
-    }
-    if (ctx->m_rgucReadBuffer[3] != 0x30) {
-        // Read error or short read: the register is unreadable right now
-        return false;
-    }
-    *extension = (Uint16)((ctx->m_rgucReadBuffer[6] << 8) | ctx->m_rgucReadBuffer[9]);
+    *extension = (Uint16)((i4 << 8) | i5);
+    *id0 = i0;
     return true;
 }
 
-static bool ParseExtensionIdentifyResponse(SDL_DriverWii_Context *ctx, Uint16 *extension)
+/* The reply to a 6-byte identify at 0xA400FA or 0xA600FA: both echo address
+   00 FA. The 16-bit value is ID bytes 4-5, which every Motion Plus test uses,
+   and id0 is ID byte 0. */
+static bool ParseExtensionIdentifyResponse(SDL_DriverWii_Context *ctx, Uint16 *extension, Uint8 *id0)
 {
-    int i;
+    Uint8 id[6];
 
-    if (ctx->m_rgucReadBuffer[0] != k_eWiiInputReportIDs_ReadMemory) {
-        SDL_SetError("Unexpected extension response type");
-        return false;
-    }
-
-    if (ctx->m_rgucReadBuffer[4] != 0x00 || ctx->m_rgucReadBuffer[5] != 0xFE) {
-        SDL_SetError("Unexpected extension response address");
-        return false;
-    }
-
-    if (ctx->m_rgucReadBuffer[3] != 0x10) {
-        Uint8 error = (ctx->m_rgucReadBuffer[3] & 0xF);
-
-        if (error == 7) {
-            // The extension memory isn't mapped
-            *extension = WII_EXTENSION_NONE;
-            return true;
+    switch (SDL_WiiExt_ParseIdentifyReply(ctx->m_rgucReadBuffer, (size_t)ctx->m_nReadSize, SDL_WII_EXT_REG_IDENTIFY, id)) {
+    case SDL_WII_EXT_REPLY_OK:
+        *extension = (Uint16)((id[4] << 8) | id[5]);
+        if (id0) {
+            *id0 = id[0];
         }
-
-        if (error) {
-            SDL_SetError("Failed to read extension type: %u", error);
-        } else {
-            SDL_SetError("Unexpected read length when reading extension type: %d", (ctx->m_rgucReadBuffer[3] >> 4) + 1);
+        return true;
+    case SDL_WII_EXT_REPLY_ABSENT:
+        // The extension memory isn't mapped
+        *extension = WII_EXTENSION_NONE;
+        if (id0) {
+            *id0 = 0;
         }
-        return false;
-    }
-
-    *extension = 0;
-    for (i = 6; i < 8; i++) {
-        *extension = *extension << 8 | ctx->m_rgucReadBuffer[i];
-    }
-    return true;
-}
-
-static EWiiExtensionControllerType GetExtensionType(Uint16 extension_id)
-{
-    switch (extension_id) {
-    case WII_EXTENSION_NONE:
-        return k_eWiiExtensionControllerType_None;
-    case WII_EXTENSION_NUNCHUK:
-        return k_eWiiExtensionControllerType_Nunchuk;
-    case WII_EXTENSION_GAMEPAD:
-        return k_eWiiExtensionControllerType_Gamepad;
-    case WII_EXTENSION_WIIUPRO:
-        return k_eWiiExtensionControllerType_WiiUPro;
-    case WII_EXTENSION_BALANCEBOARD:
-        return k_eWiiExtensionControllerType_BalanceBoard;
+        return true;
     default:
-        return k_eWiiExtensionControllerType_Unknown;
+        SDL_SetError("Unexpected extension identify response");
+        return false;
     }
+}
+
+static EWiiExtensionControllerType GetExtensionType(Uint16 extension_id, Uint8 id0)
+{
+    if (extension_id == WII_EXTENSION_NONE) {
+        return k_eWiiExtensionControllerType_None;
+    }
+    /* The Nunchuk, Classic, Wii U Pro and Balance Board classify on bytes
+       4-5 as before. The extensions the module decodes classify only while
+       their hint is on, and as unknown otherwise, as before. */
+    return (EWiiExtensionControllerType)SDL_WiiExt_Classify(id0, (Uint8)(extension_id >> 8), (Uint8)extension_id,
+                                                            SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_WII_EXTENSIONS, true));
 }
 
 static bool SendExtensionReset(SDL_DriverWii_Context *ctx, bool sync)
@@ -558,7 +580,7 @@ static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint
     }
 
     if (SendExtensionIdentify(ctx, true) &&
-        ParseExtensionIdentifyResponse(ctx, &extension)) {
+        ParseExtensionIdentifyResponse(ctx, &extension, NULL)) {
         if ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID) {
             // Motion Plus is currently active
             if (connected) {
@@ -571,8 +593,8 @@ static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint
         }
     }
 
-    if (ReadRegister(ctx, 0xA600FE, 2, true) &&
-        ParseExtensionIdentifyResponse(ctx, &extension)) {
+    if (ReadRegister(ctx, SDL_WII_EXT_REG_MOTIONPLUS_PROBE, 6, true) &&
+        ParseExtensionIdentifyResponse(ctx, &extension, NULL)) {
         // Determined: connected exactly when the inactive M+ answered its ID
         if (connected) {
             *connected = ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID);
@@ -646,6 +668,13 @@ static void ActivateMotionPlusWithMode(SDL_DriverWii_Context *ctx, Uint8 mode)
 static void ActivateMotionPlus(SDL_DriverWii_Context *ctx)
 {
     Uint8 mode = WII_MOTIONPLUS_MODE_STANDARD;
+
+    /* The extensions the module decodes never run behind an active Motion
+       Plus: passthrough drops or moves bits they use, halves their report
+       rate, and cannot carry the Shinkansen's 8 bytes at all. */
+    if (!SDL_WiiExt_AllowsMotionPlus(ctx->m_eExtensionControllerType)) {
+        return;
+    }
 
     // Pick the pass-through mode based on the connected controller
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
@@ -760,6 +789,10 @@ static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
             return k_eWiiInputReportIDs_ButtonData2;
         }
     default:
+        if (SDL_WiiExt_IsDecodedType(ctx->m_eExtensionControllerType)) {
+            // 0x32, or 0x35 for the guitar's tilt while sensors are on
+            return (EWiiInputReportIDs)SDL_WiiExt_ReportMode(ctx->m_eExtensionControllerType, ctx->m_bReportSensors);
+        }
         if (ctx->m_bIRActive) {
             /* Bare remote: 33 BB BB AA AA AA II*12 (extended IR, no extension
                span). With Motion Plus active the gyro needs the extension span,
@@ -778,17 +811,11 @@ static EWiiInputReportIDs GetButtonPacketType(SDL_DriverWii_Context *ctx)
 
 static bool RequestButtonPacketType(SDL_DriverWii_Context *ctx, EWiiInputReportIDs type)
 {
-    Uint8 data[3];
-    Uint8 tt = (Uint8)ctx->m_bRumbleActive;
+    Uint8 data[SDL_WII_EXT_MODE_REQUEST_SIZE];
 
-    // Continuous reporting off, tt & 4 == 0
-    if (ENABLE_CONTINUOUS_REPORTING) {
-        tt |= 4;
-    }
-
-    data[0] = k_eWiiOutputReportIDs_DataReportingMode;
-    data[1] = tt;
-    data[2] = type;
+    // Continuous reporting on, byte 1 bit 2, with the rumble bit in bit 0
+    SDL_COMPILE_TIME_ASSERT(continuous_reporting, ENABLE_CONTINUOUS_REPORTING);
+    SDL_WiiExt_BuildModeRequest(data, ctx->m_bRumbleActive, (Uint8)type);
     return WriteOutput(ctx, data, sizeof(data), false);
 }
 
@@ -828,6 +855,23 @@ static void InitStickCalibrationData(SDL_DriverWii_Context *ctx)
     default:
         break;
     }
+    // The decoded extensions start from scratch: stick seeds, whammy, drum pads
+    SDL_WiiExt_Reset(&ctx->m_ExtState, ctx->m_eExtensionControllerType);
+}
+
+static bool WriteStartupRegister(void *userdata, Uint32 address, Uint8 value)
+{
+    return WriteRegister((SDL_DriverWii_Context *)userdata, address, &value, sizeof(value), true);
+}
+
+/* Writes a decoded extension needs after the standard init, each after the
+   previous one's acknowledge. Only the Drawsome has any, and it streams no pen
+   data until they land, so a missing acknowledge leaves it unenabled. */
+static void SendExtensionStartup(SDL_DriverWii_Context *ctx)
+{
+    if (SDL_WiiExt_IsDecodedType(ctx->m_eExtensionControllerType)) {
+        ctx->m_ExtState.enabled = SDL_WiiExt_RunStartup(ctx->m_eExtensionControllerType, WriteStartupRegister, ctx);
+    }
 }
 
 static void InitializeExtension(SDL_DriverWii_Context *ctx)
@@ -840,6 +884,7 @@ static void InitializeExtension(SDL_DriverWii_Context *ctx)
         SendExtensionReset(ctx, true);
     }
     InitStickCalibrationData(ctx);
+    SendExtensionStartup(ctx);
     ResetButtonPacketType(ctx);
 }
 
@@ -898,8 +943,9 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
     // Create enough of a context to read the controller type from the device
     for (attempts = 0; attempts < MAX_ATTEMPTS; ++attempts) {
         Uint16 extension;
+        Uint8 id0 = 0;
         if (SendExtensionIdentify(ctx, true) &&
-            ParseExtensionIdentifyResponse(ctx, &extension)) {
+            ParseExtensionIdentifyResponse(ctx, &extension, &id0)) {
             Uint8 motion_plus_mode = 0;
             if ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID) {
                 motion_plus_mode = (Uint8)(extension >> 8);
@@ -916,6 +962,7 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                    are stale when no child is attached, so gate on the live
                    passthrough-connected flag from the M+ data frames. */
                 Uint16 stored;
+                Uint8 stored_id0 = 0;
                 bool stored_ok;
 
                 if (!ctx->m_bMotionPlusChildConnected) {
@@ -932,26 +979,33 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                     break;
                 }
 
-                stored_ok = ReadStoredChildExtensionID(ctx, &stored);
+                stored_ok = ReadStoredChildExtensionID(ctx, &stored, &stored_id0);
                 if (!stored_ok) {
                     /* One retry: Dolphin's response to a failed stored-ID
                        read is retry, never deactivate
                        (WiimoteController.cpp:549-551). */
-                    stored_ok = ReadStoredChildExtensionID(ctx, &stored);
+                    stored_ok = ReadStoredChildExtensionID(ctx, &stored, &stored_id0);
                 }
                 if (stored_ok) {
-                    eExtensionControllerType = GetExtensionType(stored);
-                    ctx->m_ucMotionPlusMode = motion_plus_mode;
-                    /* The port just answered with an active M+, the strongest
-                       presence evidence there is */
-                    ctx->m_bMotionPlusPresent = true;
-                    break;
+                    EWiiExtensionControllerType stored_type = GetExtensionType(stored, stored_id0);
+                    if (SDL_WiiExt_AllowsMotionPlus(stored_type)) {
+                        eExtensionControllerType = stored_type;
+                        ctx->m_ucMotionPlusMode = motion_plus_mode;
+                        /* The port just answered with an active M+, the
+                           strongest presence evidence there is */
+                        ctx->m_bMotionPlusPresent = true;
+                        break;
+                    }
+                    /* An extension the module decodes never rides in
+                       passthrough: take the fallback below, which leaves
+                       the M+ inactive and the child answering directly. */
                 }
 
                 /* Fallback (the child flag is set but the stored read failed
-                   twice): deactivate the M+, consuming its status pulse so
-                   the dead window passes, re-init the now-visible port, and
-                   identify with retries while it settles. Error 7 here means
+                   twice, or the child is one the module decodes):
+                   deactivate the M+, consuming its status pulse so the dead
+                   window passes, re-init the now-visible port, and identify
+                   with retries while it settles. Error 7 here means
                    "settling", not "removed", for at least 50 ms. */
                 DeactivateMotionPlus(ctx);
                 SendExtensionReset(ctx, true);
@@ -960,7 +1014,7 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                     for (;;) {
                         extension = WII_EXTENSION_NONE;
                         if (SendExtensionIdentify(ctx, true) &&
-                            ParseExtensionIdentifyResponse(ctx, &extension) &&
+                            ParseExtensionIdentifyResponse(ctx, &extension, &id0) &&
                             extension != WII_EXTENSION_NONE) {
                             break;
                         }
@@ -970,10 +1024,13 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                         SDL_Delay(5);
                     }
                 }
-                eExtensionControllerType = GetExtensionType(extension);
+                eExtensionControllerType = GetExtensionType(extension, id0);
 
-                // Restore the Motion Plus to the mode it was running
-                ActivateMotionPlusWithMode(ctx, motion_plus_mode);
+                /* Restore the Motion Plus to the mode it was running, unless
+                   the child is one that never rides in passthrough */
+                if (SDL_WiiExt_AllowsMotionPlus(eExtensionControllerType)) {
+                    ActivateMotionPlusWithMode(ctx, motion_plus_mode);
+                }
                 ctx->m_bMotionPlusPresent = true;
                 break;
             }
@@ -985,11 +1042,11 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                    cleverly the same as EXT initialization"). */
                 SendExtensionReset(ctx, true);
                 if (SendExtensionIdentify(ctx, true)) {
-                    ParseExtensionIdentifyResponse(ctx, &extension);
+                    ParseExtensionIdentifyResponse(ctx, &extension, &id0);
                 }
             }
 
-            eExtensionControllerType = GetExtensionType(extension);
+            eExtensionControllerType = GetExtensionType(extension, id0);
             break;
         }
     }
@@ -1000,26 +1057,11 @@ static void UpdateDeviceIdentity(SDL_HIDAPI_Device *device)
 {
     SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
 
-    switch (ctx->m_eExtensionControllerType) {
-    case k_eWiiExtensionControllerType_None:
-        HIDAPI_SetDeviceName(device, "Nintendo Wii Remote");
-        break;
-    case k_eWiiExtensionControllerType_Nunchuk:
-        HIDAPI_SetDeviceName(device, "Nintendo Wii Remote with Nunchuk");
-        break;
-    case k_eWiiExtensionControllerType_Gamepad:
-        HIDAPI_SetDeviceName(device, "Nintendo Wii Remote with Classic Controller");
-        break;
-    case k_eWiiExtensionControllerType_WiiUPro:
-        HIDAPI_SetDeviceName(device, "Nintendo Wii U Pro Controller");
-        break;
-    case k_eWiiExtensionControllerType_BalanceBoard:
-        HIDAPI_SetDeviceName(device, "Nintendo Wii Balance Board");
-        break;
-    default:
-        HIDAPI_SetDeviceName(device, "Nintendo Wii Remote with Unknown Extension");
-        break;
-    }
+    HIDAPI_SetDeviceName(device, SDL_WiiExt_TypeName(ctx->m_eExtensionControllerType));
+    /* A guitar or drum kit is typed as one, as the PS3 driver types its
+       guitars and kits. Every configuration that existed before stays a
+       gamepad. */
+    device->joystick_type = (SDL_JoystickType)SDL_WiiExt_JoystickType(ctx->m_eExtensionControllerType);
     device->guid.data[15] = ctx->m_eExtensionControllerType;
 }
 
@@ -1073,6 +1115,7 @@ static void HIDAPI_DriverWii_SetDevicePlayerIndex(SDL_HIDAPI_Device *device, SDL
 static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
 {
     SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
+    SDL_WiiExtCaps ext_caps;
 
     SDL_AssertJoysticksLocked();
 
@@ -1087,6 +1130,7 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
            and verify once the M+ has settled. Dolphin bars all extension
            work until the M+ settles (WiimoteController.cpp:1476-1480). */
         InitStickCalibrationData(ctx);
+        SendExtensionStartup(ctx);
         ResetButtonPacketType(ctx);
 
         /* The sensors-on mode resync still applies on a settle-gated reopen:
@@ -1150,6 +1194,10 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
             SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 100.0f);
         }
     }
+    if (SDL_WiiExt_GetCaps(ctx->m_eExtensionControllerType, &ext_caps) && ext_caps.accel) {
+        // The guitar's tilt is the remote's accelerometer. No gyro: the M+ stays inactive.
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 100.0f);
+    }
 
     /* Read the Balance Board's per-unit load-cell calibration and expose it as a
        hex-string property. The live corner sensors come through as axes; PadForge
@@ -1177,6 +1225,16 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
                         SDL_PlayerLEDHintChanged, ctx);
 
     // Initialize the joystick capabilities
+    if (SDL_WiiExt_GetCaps(ctx->m_eExtensionControllerType, &ext_caps)) {
+        /* The decoded extensions: their controls at the gamepad positions
+           (26-31 for the turntable's split buttons), the remote's raw block
+           at 15-25 as in the Classic configuration, no IR */
+        joystick->nbuttons = ext_caps.nbuttons;
+        joystick->naxes = ext_caps.naxes;
+        joystick->nhats = ext_caps.nhats;
+        ctx->m_ulLastInput = SDL_GetTicks();
+        return true;
+    }
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_WiiUPro) {
         joystick->nbuttons = 15;
     } else if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_BalanceBoard) {
@@ -1247,11 +1305,29 @@ static bool HIDAPI_DriverWii_RumbleJoystickTriggers(SDL_HIDAPI_Device *device, S
 
 static Uint32 HIDAPI_DriverWii_GetJoystickCapabilities(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
 {
-    return SDL_JOYSTICK_CAP_RUMBLE;
+    SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
+    SDL_WiiExtCaps ext_caps;
+    Uint32 result = SDL_JOYSTICK_CAP_RUMBLE;
+
+    if (SDL_WiiExt_GetCaps(ctx->m_eExtensionControllerType, &ext_caps) && ext_caps.mono_led) {
+        // The turntable's Euphoria LED, as the Switch driver offers the HOME LED
+        result |= SDL_JOYSTICK_CAP_MONO_LED;
+    }
+    return result;
 }
 
 static bool HIDAPI_DriverWii_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint8 red, Uint8 green, Uint8 blue)
 {
+    SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
+    SDL_WiiExtCaps ext_caps;
+
+    if (SDL_WiiExt_GetCaps(ctx->m_eExtensionControllerType, &ext_caps) && ext_caps.mono_led) {
+        Uint8 request[SDL_WII_EXT_WRITE_REQUEST_SIZE];
+
+        // Any color lights it, all zero turns it off
+        SDL_WiiExt_BuildLEDWrite(request, ctx->m_bRumbleActive, (red || green || blue));
+        return WriteOutput(ctx, request, sizeof(request), false);
+    }
     return SDL_Unsupported();
 }
 
@@ -1267,7 +1343,10 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
     if (enabled != ctx->m_bReportSensors) {
         ctx->m_bReportSensors = enabled;
 
-        if (ctx->m_bMotionPlusPresent) {
+        /* The decoded extensions keep the M+ inactive, so there is nothing
+           to activate and nothing to deactivate: a deactivation write would
+           reach the child itself. */
+        if (ctx->m_bMotionPlusPresent && SDL_WiiExt_AllowsMotionPlus(ctx->m_eExtensionControllerType)) {
             if (enabled) {
                 ActivateMotionPlus(ctx);
             } else {
@@ -1663,7 +1742,9 @@ static void HandleWiiRemoteAccelData(SDL_DriverWii_Context *ctx, SDL_Joystick *j
     Sint16 x, y, z;
     float values[3];
 
-    if (!ctx->m_bReportSensors) {
+    /* A status report or a report in a mode without the accelerometer
+       carries no sample */
+    if (!ctx->m_bReportSensors || !data->hasAccelerometer) {
         return;
     }
 
@@ -1920,7 +2001,7 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
     case k_eWiiCommunicationState_CheckMotionPlusStage2:
     {
         Uint16 extension = 0;
-        if (ParseExtensionIdentifyResponse(ctx, &extension)) {
+        if (ParseExtensionIdentifyResponse(ctx, &extension, NULL)) {
             if ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID) {
                 bool stage1 = (ctx->m_eCommState == k_eWiiCommunicationState_CheckMotionPlusStage1);
                 Uint8 running_mode = (Uint8)(extension >> 8);
@@ -1988,7 +2069,7 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
 
             } else if (ctx->m_eCommState == k_eWiiCommunicationState_CheckMotionPlusStage1) {
                 // Check to see if Motion Plus is present
-                ReadRegister(ctx, 0xA600FE, 2, false);
+                ReadRegister(ctx, SDL_WII_EXT_REG_MOTIONPLUS_PROBE, 6, false);
 
                 ctx->m_eCommState = k_eWiiCommunicationState_CheckMotionPlusStage2;
 
@@ -2036,6 +2117,62 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
     }
 }
 
+static void PostExtensionOutput(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick, const SDL_WiiExtOutput *output)
+{
+    int i;
+
+    for (i = 0; i < 32; ++i) {
+        if (output->button_mask & (1u << i)) {
+            SDL_SendJoystickButton(ctx->timestamp, joystick, (Uint8)i, ((output->buttons >> i) & 1) != 0);
+        }
+    }
+    for (i = 0; i < SDL_WII_EXT_MAX_AXES; ++i) {
+        if (output->axis_mask & (1u << i)) {
+            if (output->data_axis_mask & (1u << i)) {
+                /* Pen coordinates and lever bytes are data: seed past the
+                   anti-jitter gate as the IR axes are */
+                SDL_SeedJoystickDataAxis(joystick, (Uint8)i, output->axes[i]);
+            }
+            SDL_SendJoystickAxis(ctx->timestamp, joystick, (Uint8)i, output->axes[i]);
+        }
+    }
+    if (output->has_hat) {
+        SDL_SendJoystickHat(ctx->timestamp, joystick, 0, output->hat);
+    }
+}
+
+/* A data report while a decoded extension is attached. A report shorter than
+   its full length changes nothing, and only the span its mode defines is
+   read. The remote's own buttons stay in the raw block. */
+static void HandleExtensionPacket(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
+{
+    const Uint8 *report = ctx->m_rgucReadBuffer;
+    const size_t length = (ctx->m_nReadSize > 0) ? (size_t)ctx->m_nReadSize : 0;
+    SDL_WiiExtLayout layout;
+    const Uint8 *span = NULL;
+    size_t span_length = 0;
+    SDL_WiiExtOutput output;
+    WiiButtonData data;
+
+    if (!SDL_WiiExt_GetLayout(report[0], &layout) || length < layout.length) {
+        return;
+    }
+    SDL_zero(data);
+    if (layout.buttons) {
+        GetBaseButtons(&data, report + 1);
+    }
+    if (layout.accel) {
+        GetAccelerometer(&data, report + 3);
+    }
+    HandleWiiRemoteButtonData(ctx, joystick, &data);
+    HandleWiiRemoteAccelData(ctx, joystick, &data);
+
+    if (SDL_WiiExt_GetSpan(report, length, &span, &span_length, NULL) &&
+        SDL_WiiExt_Decode(&ctx->m_ExtState, span, span_length, &output)) {
+        PostExtensionOutput(ctx, joystick, &output);
+    }
+}
+
 static void HandleButtonPacket(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
 {
     EWiiInputReportIDs eExpectedReport = GetButtonPacketType(ctx);
@@ -2045,6 +2182,11 @@ static void HandleButtonPacket(SDL_DriverWii_Context *ctx, SDL_Joystick *joystic
     if (eExpectedReport != ctx->m_rgucReadBuffer[0]) {
         SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Resetting report mode to %d", eExpectedReport);
         RequestButtonPacketType(ctx, eExpectedReport);
+    }
+
+    if (SDL_WiiExt_IsDecodedType(ctx->m_eExtensionControllerType)) {
+        HandleExtensionPacket(ctx, joystick);
+        return;
     }
 
     SDL_zero(data);
@@ -2165,10 +2307,9 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
 
             // Request a status update periodically to make sure our battery value is up to date
             if (!ctx->m_ulLastStatus || now >= (ctx->m_ulLastStatus + STATUS_UPDATE_TIME_MS)) {
-                Uint8 data[2];
+                Uint8 data[SDL_WII_EXT_STATUS_REQUEST_SIZE];
 
-                data[0] = k_eWiiOutputReportIDs_StatusRequest;
-                data[1] = (Uint8)ctx->m_bRumbleActive;
+                SDL_WiiExt_BuildStatusRequest(data, ctx->m_bRumbleActive);
                 WriteOutput(ctx, data, sizeof(data), false);
 
                 ctx->m_ulLastStatus = now;

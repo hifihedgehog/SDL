@@ -1123,6 +1123,14 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         return NULL;
     }
 
+    if (vendor == USB_VENDOR_NINTENDO &&
+        (product == USB_PRODUCT_NINTENDO_WII_REMOTE || product == USB_PRODUCT_NINTENDO_WII_REMOTE2) &&
+        (guid.data[15] == k_eWiiExtensionControllerType_UDraw ||
+         guid.data[15] == k_eWiiExtensionControllerType_Drawsome)) {
+        // A pen tablet has no gamepad shape, so it stays a joystick with raw pen axes
+        return NULL;
+    }
+
     if ((vendor == USB_VENDOR_NINTENDO && product == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER) ||
         (vendor == USB_VENDOR_DRAGONRISE &&
          (product == USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER1 ||
