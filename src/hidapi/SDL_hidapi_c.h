@@ -27,3 +27,10 @@ extern bool SDL_HIDAPI_ShouldIgnoreDevice(int bus_type, Uint16 vendor_id, Uint16
 /* Called by platform backends when devices may have changed, this is safe to call from any thread */
 extern void SDL_HIDAPI_DeviceChanged(void);
 
+/* Sends an output report through SET_REPORT on the control pipe, where
+   SDL_hid_write takes the first interrupt OUT endpoint when one exists. The
+   first byte of data is the report ID, 0 for a device without report IDs.
+   Returns the number of bytes sent, or -1 on error, including on a backend
+   that cannot send one. */
+extern int SDL_hid_send_output_report(SDL_hid_device *device, const unsigned char *data, size_t length);
+

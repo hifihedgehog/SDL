@@ -1674,6 +1674,28 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE "SDL_JOYSTICK_HIDAPI_GAMECUBE"
 
 /**
+ * A variable controlling whether the HIDAPI driver for the Guitar Hero Live
+ * guitars' PS3/Wii U and PS4 dongles should be used.
+ *
+ * This is a PadForge fork addition. The driver sends the keep-alive without
+ * which the strum bar cuts out held frets, and reads the frets, strum bar,
+ * whammy and tilt. With it off, the PS3/Wii U dongle falls back to the PS3
+ * driver and the PS4 dongle to DirectInput.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_GHL "SDL_JOYSTICK_HIDAPI_GHL"
+
+/**
  * A variable controlling whether the HIDAPI driver for the Intel Wireless
  * Series gamepads should be used.
  *

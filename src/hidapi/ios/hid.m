@@ -47,6 +47,7 @@
 #define hid_read                     PLATFORM_hid_read
 #define hid_read_timeout             PLATFORM_hid_read_timeout
 #define hid_send_feature_report      PLATFORM_hid_send_feature_report
+#define hid_send_output_report       PLATFORM_hid_send_output_report
 #define hid_set_nonblocking          PLATFORM_hid_set_nonblocking
 #define hid_version                  PLATFORM_hid_version
 #define hid_version_str              PLATFORM_hid_version_str
@@ -1098,6 +1099,12 @@ int HID_API_EXPORT hid_get_feature_report(hid_device *dev, unsigned char *data, 
 }
 
 int HID_API_EXPORT hid_get_input_report(hid_device *dev, unsigned char *data, size_t length)
+{
+    // Not supported
+    return -1;
+}
+
+int HID_API_EXPORT hid_send_output_report(hid_device *dev, const unsigned char *data, size_t length)
 {
     // Not supported
     return -1;

@@ -295,6 +295,20 @@ typedef DWORD(WINAPI *XInputGetDeviceIdentity_t)(
     DWORD userIndex, SDL_XINPUT_DEVICE_IDENTITY_V1 *identity,
     WCHAR *path, DWORD capacityCch);
 
+// OpenXInput's state with the six XUSB report bytes that follow sThumbRY,
+// where the Rock Band 3 Pro instruments carry the touch strip, the tilt and
+// the pedal port. Resolved by name. extraByteCount is 6 or 0.
+typedef struct
+{
+    DWORD cbSize;
+    XINPUT_STATE state; // As XInputGetStateEx returns it
+    DWORD extraByteCount;
+    BYTE extraBytes[6];
+} SDL_XINPUT_STATE_EXTENDED_V1;
+
+typedef DWORD(WINAPI *XInputGetStateExtended_t)(
+    DWORD userIndex, SDL_XINPUT_STATE_EXTENDED_V1 *state);
+
 extern bool WIN_LoadXInputDLL(void);
 extern void WIN_UnloadXInputDLL(void);
 
@@ -305,6 +319,7 @@ extern XInputGetCapabilitiesEx_t SDL_XInputGetCapabilitiesEx;
 extern XInputGetBatteryInformation_t SDL_XInputGetBatteryInformation;
 extern XInputGetSystemButtons_t SDL_XInputGetSystemButtons;
 extern XInputGetDeviceIdentity_t SDL_XInputGetDeviceIdentity;
+extern XInputGetStateExtended_t SDL_XInputGetStateExtended;
 
 // Ends C function definitions when using C++
 #ifdef __cplusplus

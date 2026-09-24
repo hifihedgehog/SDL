@@ -1741,6 +1741,24 @@ int HID_API_EXPORT HID_API_CALL hid_send_feature_report(hid_device *dev, const u
 	return (int) length;
 }
 
+int HID_API_EXPORT HID_API_CALL hid_send_output_report(hid_device *dev, const unsigned char *data, size_t length)
+{
+	int res;
+
+	if (!data || !length) {
+		register_string_error(dev, L"Zero buffer/length");
+		return -1;
+	}
+
+	register_string_error(dev, NULL);
+
+	res = hid_write_output_report(dev, data, length);
+	if (res < 0) {
+		register_winapi_error(dev, L"HidD_SetOutputReport");
+	}
+	return res;
+}
+
 static int hid_get_report(hid_device *dev, DWORD report_type, unsigned char *data, size_t length)
 {
 	BOOL res;

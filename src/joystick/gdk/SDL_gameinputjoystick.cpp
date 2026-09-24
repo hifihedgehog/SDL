@@ -26,24 +26,17 @@
 #include "../usb_ids.h"
 #include "../../core/windows/SDL_windows.h"
 #include "../../core/windows/SDL_gameinput.h"
+#include "SDL_gameinput_rawtype.h"
 
 extern "C"
 {
 #include "../hidapi/SDL_hidapijoystick_c.h"
+#include "../SDL_ghl_proto.h"
 }
 
 enum
 {
     SDL_GAMEPAD_BUTTON_GAMEINPUT_SHARE = 11
-};
-
-enum
-{
-    SDL_GAMEINPUT_RAWTYPE_NONE,
-    SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_GUITAR,
-    SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_DRUM_KIT,
-    SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR,
-    SDL_GAMEINPUT_RAWTYPE_LEGACY_ADAPTER,
 };
 
 typedef struct GAMEINPUT_InternalDevice
@@ -84,6 +77,7 @@ typedef struct joystick_hwdata
 #if GAMEINPUT_API_VERSION < 4 // g_pGameInput->RegisterSystemButtonCallback no longer exists in GameInput v4, so no need for a callback token
     GameInputCallbackToken system_button_callback_token;
 #endif
+    SDL_GHLKeepAlive ghl_keepalive;
 } GAMEINPUT_InternalJoystickHwdata;
 
 static GAMEINPUT_InternalList g_GameInputList = { NULL };
@@ -155,57 +149,8 @@ static Uint8 GAMEINPUT_GetDeviceRawType(IGameInputDevice *pDevice)
     uint16_t productId = pDevice->GetProductId();
 
     if (supportedInput & GameInputKindRawDeviceReport) {
-        switch (vendorId) {
-            case USB_VENDOR_MADCATZ:
-                switch (productId) {
-                    case USB_PRODUCT_MADCATZ_XB1_STRATOCASTER_GUITAR:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_GUITAR;
-                    case USB_PRODUCT_MADCATZ_XB1_DRUM_KIT:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_DRUM_KIT;
-                    case USB_PRODUCT_MADCATZ_XB1_LEGACY_ADAPTER:
-                        return SDL_GAMEINPUT_RAWTYPE_LEGACY_ADAPTER;
-                    default:
-                        break;
-                }
-                break;
-            case USB_VENDOR_PDP:
-                switch (productId) {
-                    case USB_PRODUCT_PDP_XB1_JAGUAR_GUITAR:
-                    case USB_PRODUCT_PDP_XB1_RIFFMASTER_GUITAR:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_GUITAR;
-                    case USB_PRODUCT_PDP_XB1_DRUM_KIT:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_DRUM_KIT;
-                    default:
-                        break;
-                }
-                break;
-            case USB_VENDOR_CRKD:
-                switch (productId) {
-                    case USB_PRODUCT_RED_OCTANE_XB1_STAGE_TOUR_GUITAR:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_GUITAR;
-                    default:
-                        break;
-                }
-                break;
-            case USB_VENDOR_RED_OCTANE:
-                switch (productId) {
-                    case USB_PRODUCT_RED_OCTANE_XB1_GUITAR_HERO_LIVE_GUITAR:
-                        return SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR;
-                    default:
-                        break;
-                }
-                break;
-            case USB_VENDOR_RED_OCTANE_GAMES:
-                switch (productId) {
-                    case USB_PRODUCT_RED_OCTANE_XB1_STAGE_TOUR_GUITAR:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_GUITAR;
-                    case USB_PRODUCT_RED_OCTANE_XB1_STAGE_TOUR_DRUMS:
-                        return SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_DRUM_KIT;
-                    default:
-                        break;
-                }
-                break;
-        }
+        // The table is in SDL_gameinput_rawtype.h, where the offline tests read it
+        return (Uint8)SDL_GameInputRawTypeForDevice(vendorId, productId);
     }
 #endif // GAMEINPUT_API_VERSION >= 4
     return SDL_GAMEINPUT_RAWTYPE_NONE;
@@ -733,6 +678,35 @@ static void GAMEINPUT_UpdatePowerInfo(SDL_Joystick *joystick, IGameInputDevice *
 #endif
 }
 
+#if GAMEINPUT_API_VERSION >= 4
+/* The Guitar Hero Live guitar wants GIP message 0x22 every 8 s, or the strum
+   bar cuts out held frets. A failed send stays due for the next update.
+   RB4InstrumentMapper counts E_NOTIMPL from SendRawDeviceOutput as sent. */
+static void GAMEINPUT_SendGuitarHeroLiveKeepAlive(GAMEINPUT_InternalJoystickHwdata *hwdata)
+{
+    const Uint64 now = SDL_GetTicks();
+    IGameInputDevice *device = hwdata->devref->device;
+    IGameInputRawDeviceReport *report = NULL;
+    Uint8 payload[SDL_GHL_XBOX_KEEPALIVE_LENGTH];
+    bool sent = false;
+    HRESULT hr;
+
+    if (!SDL_GHL_KeepAliveDue(&hwdata->ghl_keepalive, now)) {
+        return;
+    }
+    SDL_GHL_BuildXboxKeepAlive(payload);
+    hr = device->CreateRawDeviceReport(SDL_GHL_XBOX_MESSAGE_OUTPUT, GameInputRawOutputReport, &report);
+    if (SUCCEEDED(hr) && report) {
+        if (report->SetRawData(sizeof(payload), payload)) {
+            hr = device->SendRawDeviceOutput(report);
+            sent = (SUCCEEDED(hr) || hr == E_NOTIMPL);
+        }
+        report->Release();
+    }
+    SDL_GHL_KeepAliveSent(&hwdata->ghl_keepalive, now, sent);
+}
+#endif // GAMEINPUT_API_VERSION >= 4
+
 static bool GAMEINPUT_JoystickOpen(SDL_Joystick *joystick, int device_index)
 {
     GAMEINPUT_InternalDevice *elem = GAMEINPUT_InternalFindByIndex(device_index);
@@ -789,6 +763,14 @@ static bool GAMEINPUT_JoystickOpen(SDL_Joystick *joystick, int device_index)
         joystick->nhats = info->controllerSwitchCount;
 #endif // GAMEINPUT_API_VERSION >= 4
     }
+
+#if GAMEINPUT_API_VERSION >= 4
+    if (elem->raw_type == SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR) {
+        // The first keep-alive goes at open
+        SDL_GHL_KeepAliveStart(&hwdata->ghl_keepalive, SDL_GetTicks());
+        GAMEINPUT_SendGuitarHeroLiveKeepAlive(hwdata);
+    }
+#endif // GAMEINPUT_API_VERSION >= 4
 
 #if GAMEINPUT_API_VERSION >= 4
     supportedRumbleMotors = device->GetSupportedRumbleMotors();
@@ -973,6 +955,50 @@ static void GAMEINPUT_GuitarUpdate(SDL_Joystick *joystick, IGameInputReading *re
 #endif // GAMEINPUT_API_VERSION >= 4
 }
 
+/* Message 0x21 carries the guitar in frame A, which SDL_ghl_proto.c
+   decodes. Message 0x20, the gamepad-shaped copy, is not read. The guide
+   button comes from the reading's system button state, as in
+   GAMEINPUT_GamepadUpdate. */
+static void GAMEINPUT_GuitarHeroLiveUpdate(SDL_Joystick *joystick, IGameInputReading *reading, Uint64 timestamp)
+{
+#if GAMEINPUT_API_VERSION >= 4
+    GameInputSystemButtons systemButtons;
+    if (reading->GetSystemButtonState(&systemButtons)) {
+        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_GUIDE, (systemButtons & GameInputSystemButtonGuide) != 0);
+    }
+
+    IGameInputRawDeviceReport *rawState = NULL;
+    if (reading->GetRawReport(&rawState) && rawState) {
+        GameInputRawDeviceReportInfo reportInfo;
+        Uint8 rawData[64];
+        SDL_GHLOutput output;
+        size_t len;
+
+        SDL_zero(reportInfo);
+        rawState->GetReportInfo(&reportInfo);
+        len = rawState->GetRawData(sizeof(rawData), rawData);
+        if (len > sizeof(rawData)) {
+            len = sizeof(rawData);
+        }
+        if (reportInfo.id <= 0xFF &&
+            SDL_GHL_DecodeXboxMessage((Uint8)reportInfo.id, rawData, len, &output)) {
+            Uint8 i;
+
+            for (i = 0; i < SDL_GHL_NUM_BUTTONS; ++i) {
+                if (output.button_mask & (1u << i)) {
+                    SDL_SendJoystickButton(timestamp, joystick, i, (output.buttons & (1u << i)) != 0);
+                }
+            }
+            for (i = 0; i < SDL_GHL_NUM_AXES; ++i) {
+                SDL_SendJoystickAxis(timestamp, joystick, i, output.axes[i]);
+            }
+            SDL_SendJoystickHat(timestamp, joystick, 0, output.hat);
+        }
+        rawState->Release();
+    }
+#endif // GAMEINPUT_API_VERSION >= 4
+}
+
 static void GAMEINPUT_GamepadUpdate(SDL_Joystick *joystick, IGameInputReading *reading, Uint64 timestamp) {
     GameInputGamepadState state;
     static WORD s_XInputButtons[] = {
@@ -1125,6 +1151,13 @@ static void GAMEINPUT_JoystickUpdate(SDL_Joystick *joystick)
     HRESULT hr;
 
 #if GAMEINPUT_API_VERSION >= 4
+    if (internal_device->raw_type == SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR) {
+        // Due whether or not a reading is waiting
+        GAMEINPUT_SendGuitarHeroLiveKeepAlive(hwdata);
+    }
+#endif // GAMEINPUT_API_VERSION >= 4
+
+#if GAMEINPUT_API_VERSION >= 4
     hr = g_pGameInput->GetCurrentReading(device->GetSupportedInput(), device, &reading);
 #else
     hr = g_pGameInput->GetCurrentReading(info->supportedInput, device, &reading);
@@ -1139,6 +1172,8 @@ static void GAMEINPUT_JoystickUpdate(SDL_Joystick *joystick)
         GAMEINPUT_GuitarUpdate(joystick, reading, timestamp);
     } else if (internal_device->raw_type == SDL_GAMEINPUT_RAWTYPE_ROCK_BAND_DRUM_KIT) {
         GAMEINPUT_DrumUpdate(joystick, reading, timestamp);
+    } else if (internal_device->raw_type == SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR) {
+        GAMEINPUT_GuitarHeroLiveUpdate(joystick, reading, timestamp);
     } else if (GAMEINPUT_InternalIsGamepad(device)) {
         GAMEINPUT_GamepadUpdate(joystick, reading, timestamp);
     } else {
