@@ -31,11 +31,20 @@
 #include "SDL_internal.h"
 
 #include "SDL_hidapi_c.h"
+#include "SDL_hidapi_vendorusb.h"
 #include "../joystick/usb_ids.h"
 #include "../joystick/SDL_joystick_c.h"
 #include "../SDL_hints_c.h"
 
 // Initial type declarations
+#if defined(SDL_PLATFORM_WIN32)
+#define SDL_VENDORUSB_THIS_PLATFORM SDL_VENDORUSB_PLATFORM_WINDOWS
+#elif defined(SDL_PLATFORM_MACOS)
+#define SDL_VENDORUSB_THIS_PLATFORM SDL_VENDORUSB_PLATFORM_MACOS
+#else
+#define SDL_VENDORUSB_THIS_PLATFORM SDL_VENDORUSB_PLATFORM_OTHER
+#endif
+
 #define HID_API_NO_EXPORT_DEFINE // do not export hidapi procedures
 #include "hidapi/hidapi.h"
 
@@ -543,8 +552,9 @@ static void HIDAPI_ShutdownDiscovery(void)
 // Platform HIDAPI Implementation
 
 #define HIDAPI_USING_SDL_RUNTIME
-#define HIDAPI_IGNORE_DEVICE(BUS, VID, PID, USAGE_PAGE, USAGE, LIBUSB, LIBUSB_XBOX) \
-        SDL_HIDAPI_ShouldIgnoreDevice(BUS, VID, PID, USAGE_PAGE, USAGE, LIBUSB, LIBUSB_XBOX)
+static bool HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_id, Uint16 usage_page, Uint16 usage, bool libusb, bool libusb_xbox, bool libusb_vendor);
+#define HIDAPI_IGNORE_DEVICE(BUS, VID, PID, USAGE_PAGE, USAGE, LIBUSB, LIBUSB_XBOX, LIBUSB_VENDOR) \
+        HIDAPI_ShouldIgnoreDevice(BUS, VID, PID, USAGE_PAGE, USAGE, LIBUSB, LIBUSB_XBOX, LIBUSB_VENDOR)
 
 struct PLATFORM_hid_device_;
 typedef struct PLATFORM_hid_device_ PLATFORM_hid_device;
@@ -777,7 +787,9 @@ typedef struct LIBUSB_hid_device_ LIBUSB_hid_device;
 #define read_thread                     LIBUSB_read_thread
 #define return_data                     LIBUSB_return_data
 
+#define HIDAPI_VENDOR_USB
 #include "SDL_hidapi_libusb.h"
+#undef HIDAPI_VENDOR_USB
 
 #undef libusb_init
 #undef libusb_exit
@@ -850,42 +862,10 @@ typedef struct LIBUSB_hid_device_ LIBUSB_hid_device;
  *
  * We do this by whitelisting devices we know to be accessible _exclusively_
  * via libusb; these are typically devices that look like HIDs but have a
- * quirk that requires direct access to the hardware.
+ * quirk that requires direct access to the hardware. The list, and the rules
+ * for devices whose input has no usable HID interface on Windows, are in
+ * SDL_hidapi_vendorusb.c.
  */
-static const struct {
-    Uint16 vendor;
-    Uint16 product;
-} SDL_libusb_required[] = {
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER },
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER },
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT },
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT },
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_PRO },
-    { USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER },
-};
-
-static bool RequiresLibUSB(Uint16 vendor, Uint16 product, bool libusb_xbox)
-{
-    for (int i = 0; i < SDL_arraysize(SDL_libusb_required); ++i) {
-        if (vendor == SDL_libusb_required[i].vendor &&
-            product == SDL_libusb_required[i].product) {
-            return true;
-        }
-    }
-
-#ifdef SDL_PLATFORM_MACOS
-    // On macOS we want to use libusb if possible for Xbox controllers
-    // that are not supported by the OS. Opening the device via libusb
-    // will fail if the device is supported (and opened) by the OS, so
-    // any devices we return here and can open are fair game.
-    if (libusb_xbox) {
-        return true;
-    }
-#endif // SDL_PLATFORM_MACOS
-
-    return false;
-}
-
 #if defined(HAVE_PLATFORM_BACKEND) || defined(HAVE_DRIVER_BACKEND)
 // We have another way to get HID devices, so use the whitelist to get devices where libusb is preferred
 #define SDL_HINT_HIDAPI_LIBUSB_WHITELIST_DEFAULT true
@@ -1140,39 +1120,20 @@ static void SDLCALL IgnoredDevicesChanged(void *userdata, const char *name, cons
     }
 }
 
-bool SDL_HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_id, Uint16 usage_page, Uint16 usage, bool libusb, bool libusb_xbox)
+static bool HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_id, Uint16 usage_page, Uint16 usage, bool libusb, bool libusb_xbox, bool libusb_vendor)
 {
-    if (libusb) {
-        if (use_libusb_whitelist && !RequiresLibUSB(vendor_id, product_id, libusb_xbox)) {
-            return true;
-        }
-        if (!use_libusb_gamecube &&
-            vendor_id == USB_VENDOR_NINTENDO && product_id == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER) {
-            return true;
-        }
-#ifdef SDL_PLATFORM_WIN32
-        // On Windows, libusb can't access HID interfaces owned by hidusb.sys.
-        // Route composite devices (e.g. Switch 2) to the platform HID backend
-        // for input; their drivers open WinUSB separately for bulk I/O.
-        // The GameCube adapter is purely vendor-specific (no HID) so it stays.
-        if (RequiresLibUSB(vendor_id, product_id, libusb_xbox) &&
-            !(vendor_id == USB_VENDOR_NINTENDO && product_id == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER)) {
-            return true;
-        }
-#endif
-    } else {
-#ifdef SDL_PLATFORM_WIN32
-        // On Windows, keep RequiresLibUSB devices in the platform backend
-        // since libusb can't claim HID interfaces from the Windows HID driver.
-        // Only filter the GameCube adapter (no HID interface, needs libusb).
-        if (vendor_id == USB_VENDOR_NINTENDO && product_id == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER) {
-            return true;
-        }
-#else
-        if (RequiresLibUSB(vendor_id, product_id, libusb_xbox)) {
-            return true;
-        }
-#endif
+    SDL_VendorUSBRouting routing;
+
+    routing.platform = SDL_VENDORUSB_THIS_PLATFORM;
+    routing.libusb = libusb;
+    routing.whitelist = use_libusb_whitelist;
+    routing.gamecube = use_libusb_gamecube;
+    routing.vendor = vendor_id;
+    routing.product = product_id;
+    routing.xbox = libusb_xbox;
+    routing.vendor_interface = libusb_vendor;
+    if (SDL_VendorUSB_Ignore(&routing)) {
+        return true;
     }
 
     // See if there are any devices we should skip in enumeration
@@ -1218,6 +1179,11 @@ bool SDL_HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_id,
         }
     }
     return false;
+}
+
+bool SDL_HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_id, Uint16 usage_page, Uint16 usage, bool libusb, bool libusb_xbox)
+{
+    return HIDAPI_ShouldIgnoreDevice(bus, vendor_id, product_id, usage_page, usage, libusb, libusb_xbox, false);
 }
 
 int SDL_hid_init(void)

@@ -27,6 +27,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
 #include "SDL_hidapi_xbox360.h"
+#include "SDL_hidapi_xbox360bb_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_XBOX360
 
@@ -41,12 +42,30 @@ enum
     SDL_GAMEPAD_NUM_XBOX360BB_BUTTONS,
 };
 
+/* The packet handling lives in SDL_hidapi_xbox360bb_proto.c, where the offline
+ * tests run it. Its button bits are these joystick buttons, and its hat bits
+ * are SDL's. */
+SDL_COMPILE_TIME_ASSERT(xbox360bb_pads, SDL_XBOX360BB_PADS == MAX_CONTROLLERS);
+SDL_COMPILE_TIME_ASSERT(xbox360bb_buttons, SDL_XBOX360BB_BUTTON_COUNT == SDL_GAMEPAD_NUM_XBOX360BB_BUTTONS);
+SDL_COMPILE_TIME_ASSERT(xbox360bb_a, SDL_XBOX360BB_BUTTON_A == (1 << SDL_GAMEPAD_BUTTON_SOUTH));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_b, SDL_XBOX360BB_BUTTON_B == (1 << SDL_GAMEPAD_BUTTON_EAST));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_x, SDL_XBOX360BB_BUTTON_X == (1 << SDL_GAMEPAD_BUTTON_WEST));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_y, SDL_XBOX360BB_BUTTON_Y == (1 << SDL_GAMEPAD_BUTTON_NORTH));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_back, SDL_XBOX360BB_BUTTON_BACK == (1 << SDL_GAMEPAD_BUTTON_BACK));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_guide, SDL_XBOX360BB_BUTTON_GUIDE == (1 << SDL_GAMEPAD_BUTTON_GUIDE));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_start, SDL_XBOX360BB_BUTTON_START == (1 << SDL_GAMEPAD_BUTTON_START));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_big, SDL_XBOX360BB_BUTTON_BIG == (1 << SDL_GAMEPAD_BUTTON_XBOX360_BIG_BUTTON));
+SDL_COMPILE_TIME_ASSERT(xbox360bb_hat_up, SDL_XBOX360BB_HAT_UP == SDL_HAT_UP);
+SDL_COMPILE_TIME_ASSERT(xbox360bb_hat_right, SDL_XBOX360BB_HAT_RIGHT == SDL_HAT_RIGHT);
+SDL_COMPILE_TIME_ASSERT(xbox360bb_hat_down, SDL_XBOX360BB_HAT_DOWN == SDL_HAT_DOWN);
+SDL_COMPILE_TIME_ASSERT(xbox360bb_hat_left, SDL_XBOX360BB_HAT_LEFT == SDL_HAT_LEFT);
+
 typedef struct
 {
     SDL_HIDAPI_Device *device;
     SDL_JoystickID joysticks[MAX_CONTROLLERS];
-    Uint8 last_state[MAX_CONTROLLERS][USB_PACKET_LENGTH];
-    Uint64 last_packet[MAX_CONTROLLERS];
+    SDL_Xbox360BBState state;
+    Uint64 timestamp; /* Of the event being sent */
 } SDL_DriverXbox360BB_Context;
 
 static void HIDAPI_DriverXBOX360BB_RegisterHints(SDL_HintCallback callback, void *userdata)
@@ -71,10 +90,49 @@ static bool HIDAPI_DriverXBOX360BB_IsSupportedDevice(SDL_HIDAPI_Device *device, 
     return (vendor_id == USB_VENDOR_MICROSOFT) && (product_id == USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER);
 }
 
+/* The sink the packet handling reports through. */
+static void Xbox360BB_Connect(void *userdata, int pad)
+{
+    SDL_DriverXbox360BB_Context *ctx = (SDL_DriverXbox360BB_Context *)userdata;
+
+    HIDAPI_JoystickConnected(ctx->device, &ctx->joysticks[pad]);
+}
+
+static void *Xbox360BB_Joystick(void *userdata, int pad)
+{
+    SDL_DriverXbox360BB_Context *ctx = (SDL_DriverXbox360BB_Context *)userdata;
+
+    /* NULL for a pad the application has not opened */
+    return SDL_GetJoystickFromID(ctx->joysticks[pad]);
+}
+
+static void Xbox360BB_Controls(void *userdata, void *handle, Uint8 buttons, Uint8 hat)
+{
+    SDL_DriverXbox360BB_Context *ctx = (SDL_DriverXbox360BB_Context *)userdata;
+    SDL_Joystick *joystick = (SDL_Joystick *)handle;
+    Uint8 i;
+
+    SDL_SendJoystickHat(ctx->timestamp, joystick, 0, hat);
+    for (i = 0; i < SDL_GAMEPAD_NUM_XBOX360BB_BUTTONS; ++i) {
+        SDL_SendJoystickButton(ctx->timestamp, joystick, i, (buttons & (1 << i)) != 0);
+    }
+}
+
+static SDL_Xbox360BBSink HIDAPI_DriverXBOX360BB_Sink(SDL_DriverXbox360BB_Context *ctx)
+{
+    SDL_Xbox360BBSink sink;
+
+    sink.userdata = ctx;
+    sink.connect = Xbox360BB_Connect;
+    sink.joystick = Xbox360BB_Joystick;
+    sink.controls = Xbox360BB_Controls;
+    return sink;
+}
+
 static bool HIDAPI_DriverXBOX360BB_InitDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverXbox360BB_Context *ctx;
-    Uint8 i;
+    SDL_Xbox360BBSink sink;
 
     HIDAPI_SetDeviceName(device, "Xbox 360 Big Button Controller");
 
@@ -86,9 +144,9 @@ static bool HIDAPI_DriverXBOX360BB_InitDevice(SDL_HIDAPI_Device *device)
 
     device->context = ctx;
 
-    for (i = 0; i < MAX_CONTROLLERS; ++i) {
-        HIDAPI_JoystickConnected(device, &ctx->joysticks[i]);
-    }
+    /* The receiver sends nothing for a pad at rest, so all four connect */
+    sink = HIDAPI_DriverXBOX360BB_Sink(ctx);
+    SDL_Xbox360BB_Attach(&ctx->state, &sink);
 
     return true;
 }
@@ -150,84 +208,10 @@ static bool HIDAPI_DriverXBOX360BB_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *
     return SDL_Unsupported();
 }
 
-static void HIDAPI_DriverXBOX360BB_HandleStatePacket(SDL_DriverXbox360BB_Context *ctx, Uint8 *data, int size)
-{
-    Uint64 timestamp = SDL_GetTicksNS();
-    SDL_Joystick *joystick;
-    Uint8 i;
-
-    i = data[2];
-    SDL_assert(i < MAX_CONTROLLERS);
-    joystick = SDL_GetJoystickFromID(ctx->joysticks[i]);
-    ctx->last_packet[i] = timestamp;
-
-    if (ctx->last_state[i][3] != data[3]) {
-        Uint8 hat = 0;
-
-        if (data[3] & 0x01) {
-            hat |= SDL_HAT_UP;
-        }
-        if (data[3] & 0x02) {
-            hat |= SDL_HAT_DOWN;
-        }
-        if (data[3] & 0x04) {
-            hat |= SDL_HAT_LEFT;
-        }
-        if (data[3] & 0x08) {
-            hat |= SDL_HAT_RIGHT;
-        }
-        SDL_SendJoystickHat(timestamp, joystick, 0, hat);
-
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_START, ((data[3] & 0x10) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_BACK,  ((data[3] & 0x20) != 0));
-    }
-
-    if (ctx->last_state[i][4] != data[4]) {
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_GUIDE,              ((data[4] & 0x04) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_XBOX360_BIG_BUTTON, ((data[4] & 0x08) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_SOUTH,              ((data[4] & 0x10) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_EAST,               ((data[4] & 0x20) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_WEST,               ((data[4] & 0x40) != 0));
-        SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_NORTH,              ((data[4] & 0x80) != 0));
-    }
-
-    SDL_memcpy(ctx->last_state[i], data, SDL_min(size, sizeof(ctx->last_state[i])));
-}
-
-static void HIDAPI_DriverXBOX360BB_HandleReleaseEvents(SDL_DriverXbox360BB_Context *ctx)
-{
-    Uint64 timestamp = SDL_GetTicksNS();
-    Uint8 i;
-
-    // The receiver only sends packets when a button is down, handle our own release logic
-    for (i = 0; i < MAX_CONTROLLERS; ++i) {
-        // FIXME: Even when a button is continuously pressed, we get _huge_
-        // delays between packets. This is the smallest number I could get
-        // without erroneous button releases. Yeesh.
-        // -flibit
-        const int XBOXBB_BUTTON_RELEASE_TIMEOUT_MS = 120;
-        if (SDL_NS_TO_MS(timestamp - ctx->last_packet[i]) >= XBOXBB_BUTTON_RELEASE_TIMEOUT_MS) {
-            SDL_Joystick *joystick = SDL_GetJoystickFromID(ctx->joysticks[i]);
-            if (joystick) {
-                SDL_SendJoystickHat(timestamp, joystick, 0, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_SOUTH, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_EAST, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_WEST, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_NORTH, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_BACK, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_GUIDE, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_START, 0);
-                SDL_SendJoystickButton(timestamp, joystick, SDL_GAMEPAD_BUTTON_XBOX360_BIG_BUTTON, 0);
-            }
-            SDL_zero(ctx->last_state[i]);
-            ctx->last_packet[i] = timestamp;
-        }
-    }
-}
-
 static bool HIDAPI_DriverXBOX360BB_UpdateDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverXbox360BB_Context *ctx = (SDL_DriverXbox360BB_Context *)device->context;
+    SDL_Xbox360BBSink sink = HIDAPI_DriverXBOX360BB_Sink(ctx);
     Uint8 data[USB_PACKET_LENGTH];
     int size;
 
@@ -235,12 +219,20 @@ static bool HIDAPI_DriverXBOX360BB_UpdateDevice(SDL_HIDAPI_Device *device)
 #ifdef DEBUG_XBOX_PROTOCOL
         HIDAPI_DumpPacket("Xbox 360 BigButton packet: size = %d", data, size);
 #endif
-        if (size == 5) {
-            HIDAPI_DriverXBOX360BB_HandleStatePacket(ctx, data, size);
-        }
+        /* Only 5-byte packets for pads 0 to 3 apply. A pad the application
+         * has not opened gets no events. */
+        ctx->timestamp = SDL_GetTicksNS();
+        SDL_Xbox360BB_HandlePacket(&ctx->state, data, (size_t)size, ctx->timestamp, &sink);
     }
 
-    HIDAPI_DriverXBOX360BB_HandleReleaseEvents(ctx);
+    // The receiver only sends packets when a button is down, handle our own release logic
+    // FIXME: Even when a button is continuously pressed, we get _huge_
+    // delays between packets. This is the smallest number I could get
+    // without erroneous button releases. Yeesh.
+    // -flibit
+    // The number is SDL_XBOX360BB_RELEASE_NS, 120 ms, in SDL_hidapi_xbox360bb_proto.h.
+    ctx->timestamp = SDL_GetTicksNS();
+    SDL_Xbox360BB_Expire(&ctx->state, ctx->timestamp, &sink);
 
     return (size >= 0);
 }
