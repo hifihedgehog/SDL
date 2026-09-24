@@ -1,0 +1,2 @@
+https://github.com/mdqinc/SDL_GameControllerDB
+c6d6e7ecca57ff106ef63350da3cc03728d88a5f
