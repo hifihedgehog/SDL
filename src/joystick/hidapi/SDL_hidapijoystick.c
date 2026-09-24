@@ -399,6 +399,31 @@ static bool HIDAPI_IsDeviceSupported(Uint16 vendor_id, Uint16 product_id, Uint16
     return false;
 }
 
+/* The same question for every driver, whether or not its hint enables it.
+ * build-scripts/gen_community_mappings.c and its test ask it, so that no
+ * community mapping is generated for a device a HIDAPI driver can read. */
+bool HIDAPI_IsDeviceSupportedByAnyDriver(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
+{
+    bool result = false;
+    int i;
+
+    SDL_LockJoysticks();
+    {
+        SDL_GamepadType type = SDL_GetJoystickGameControllerProtocol(name, vendor_id, product_id, -1, 0, 0, 0);
+
+        for (i = 0; i < SDL_arraysize(SDL_HIDAPI_drivers); ++i) {
+            SDL_HIDAPI_DeviceDriver *driver = SDL_HIDAPI_drivers[i];
+            if (driver->IsSupportedDevice(NULL, name, type, vendor_id, product_id, version, -1, 0, 0, 0)) {
+                result = true;
+                break;
+            }
+        }
+    }
+    SDL_UnlockJoysticks();
+
+    return result;
+}
+
 static SDL_HIDAPI_DeviceDriver *HIDAPI_GetDeviceDriver(SDL_HIDAPI_Device *device)
 {
     const Uint16 USAGE_PAGE_GENERIC_DESKTOP = 0x0001;

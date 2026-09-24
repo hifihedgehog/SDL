@@ -355,6 +355,10 @@ static const char *s_GamepadMappings[] = {
     "03000000830500006020000000000000,iBuffalo SNES Controller,a:b1,b:b0,back:b6,dpdown:+a1,dpleft:-a0,dpright:+a0,dpup:-a1,leftshoulder:b4,rightshoulder:b5,start:b7,x:b3,y:b2,hint:!SDL_GAMECONTROLLER_USE_BUTTON_LABELS:=1,",
     "030000004f04000003d0000000000000,run'n'drive,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b7,leftshoulder:a3,leftstick:b10,lefttrigger:b4,leftx:a0,lefty:a1,rightshoulder:a4,rightstick:b11,righttrigger:b5,rightx:a2,righty:a5,start:b9,x:b0,y:b3,",
     "03000000101c0000171c000000000000,uRage Gamepad,a:b2,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b4,leftstick:b10,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:b7,rightx:a2,righty:a3,start:b9,x:b3,y:b0,",
+    /* Community mappings for USB devices this file maps on no platform,
+       generated from the pinned SDL_GameControllerDB by
+       build-scripts/gen_community_mappings.c. */
+#include "SDL_gamepad_db_community.h"
 #endif
 #ifdef SDL_PLATFORM_MACOS
     "03000000c82d00001930000000000000,8BitDo 64 Bluetooth Controller,a:b0,b:b1,back:-a3,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,misc1:b17,misc2:+a2,misc3:b10,rightshoulder:b7,righttrigger:b9,start:b11,x:+a3,y:-a2,",

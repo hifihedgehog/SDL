@@ -1,0 +1,6 @@
+# The pinned community gamepad database stays byte for byte as its source
+# repository stores it, so its SHA-256 matches on every checkout.
+build-scripts/gamecontrollerdb/gamecontrollerdb.txt -text
+build-scripts/gamecontrollerdb/LICENSE.txt -text
+# The header generated from it is compared byte for byte by its test.
+src/joystick/SDL_gamepad_db_community.h text eol=lf
