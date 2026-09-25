@@ -45,6 +45,7 @@ typedef struct
     SDL_HIDAPI_Device *device;
     SDL_DJIRemoteState state;
     SDL_SerialIdentity identity; /* Of the joystick the device has */
+    bool send_snapshot;          /* A joystick opened since the last update */
 } SDL_DriverDJIRemote_Context;
 
 static void HIDAPI_DriverDJIRemote_RegisterHints(SDL_HintCallback callback, void *userdata)
@@ -161,6 +162,18 @@ static bool HIDAPI_DriverDJIRemote_UpdateDevice(SDL_HIDAPI_Device *device)
     Uint64 deadline;
     int size;
 
+    if (ctx->send_snapshot) {
+        /* The remote's state so far, since reports come only when it
+           changes. It goes before anything newer. */
+        const SDL_SerialSnapshot *snapshot = SDL_DJIRemoteBulkModule.GetSnapshot(&ctx->state, 0);
+        SDL_Joystick *joystick = (device->num_joysticks > 0) ? SDL_GetJoystickFromID(device->joysticks[0]) : NULL;
+
+        ctx->send_snapshot = false;
+        if (joystick && snapshot && snapshot->present) {
+            HIDAPI_DriverDJIRemote_SendControls(joystick, &ctx->identity, &snapshot->controls);
+        }
+    }
+
     while ((size = SDL_hid_read_timeout(device->dev, data, sizeof(data), 0)) > 0) {
         SDL_DJIRemoteBulkModule.Feed(&ctx->state, data, (size_t)size, SDL_GetTicks());
         HIDAPI_DriverDJIRemote_RunActions(ctx);
@@ -184,16 +197,13 @@ static bool HIDAPI_DriverDJIRemote_UpdateDevice(SDL_HIDAPI_Device *device)
 static bool HIDAPI_DriverDJIRemote_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
 {
     SDL_DriverDJIRemote_Context *ctx = (SDL_DriverDJIRemote_Context *)device->context;
-    const SDL_SerialSnapshot *snapshot = SDL_DJIRemoteBulkModule.GetSnapshot(&ctx->state, 0);
 
     SDL_AssertJoysticksLocked();
 
     joystick->naxes = ctx->identity.naxes;
     joystick->nbuttons = ctx->identity.nbuttons;
-    // The remote's state so far, since reports come only when it changes
-    if (snapshot && snapshot->present) {
-        HIDAPI_DriverDJIRemote_SendControls(joystick, &ctx->identity, &snapshot->controls);
-    }
+    // SDL allocates the axes and buttons after this returns, so the next update sends the state
+    ctx->send_snapshot = true;
     return true;
 }
 
