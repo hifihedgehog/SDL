@@ -29,6 +29,10 @@
 #include "../../joystick/SDL_sysjoystick.h" // accessing _SDL_Joystick
 
 #define SDL_HAPTIC_HIDAPI_LG4FF
+// I-Force force feedback, where the I-Force joystick driver is (hifihedgehog/SDL#33 Part 8)
+#ifdef HAVE_LIBUSB
+#define SDL_HAPTIC_HIDAPI_IFORCE
+#endif
 
 typedef struct SDL_HIDAPI_HapticDriver SDL_HIDAPI_HapticDriver;
 typedef struct SDL_HIDAPI_HapticDevice
@@ -66,5 +70,6 @@ struct SDL_HIDAPI_HapticDriver
 };
 
 extern SDL_HIDAPI_HapticDriver SDL_HIDAPI_HapticDriverLg4ff;
+extern SDL_HIDAPI_HapticDriver SDL_HIDAPI_HapticDriverIForce;
 
 #endif //SDL_hidapihaptic_c_h_

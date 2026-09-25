@@ -228,6 +228,9 @@ extern bool SDL_IsJoystickWheel(Uint16 vendor_id, Uint16 product_id, Uint16 crc)
 // Function to return whether a joystick only charges over USB and doesn't provide input
 extern bool SDL_IsJoystickUSBChargingOnly(Uint16 vendor_id, Uint16 product_id);
 
+// Function to return whether a joystick is a flight stick
+extern bool SDL_IsJoystickFlightStick(Uint16 vendor_id, Uint16 product_id);
+
 // Function to return whether a joystick should be ignored
 extern bool SDL_ShouldIgnoreJoystick(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
 

@@ -54,7 +54,7 @@
 #define SDL_SERIAL_NAME_LENGTH    64
 #define SDL_SERIAL_MAX_WRITE      64 /* bytes in one write action */
 #define SDL_SERIAL_MAX_ACTIONS    16 /* queued actions per module */
-#define SDL_SERIAL_MAX_EFFECT     8  /* bytes in one effect request */
+#define SDL_SERIAL_MAX_EFFECT     16 /* bytes in one effect request, an I-Force effect core the longest */
 #define SDL_SERIAL_PULSE_MS       100
 
 /* Hat bits, equal to SDL_HAT_UP, SDL_HAT_RIGHT, SDL_HAT_DOWN and SDL_HAT_LEFT */
@@ -66,6 +66,7 @@
 /* Joystick types, equal to the SDL_JoystickType values */
 #define SDL_SERIAL_TYPE_UNKNOWN      0
 #define SDL_SERIAL_TYPE_GAMEPAD      1
+#define SDL_SERIAL_TYPE_WHEEL        2
 #define SDL_SERIAL_TYPE_ARCADE_STICK 3
 #define SDL_SERIAL_TYPE_FLIGHT_STICK 4
 

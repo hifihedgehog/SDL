@@ -15,6 +15,7 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 | Xbox 360 Big Button receiver | 045E:02A0 | class 0xFF, subclass 0x5D, protocol 4 | the device or the interface child that carries that interface | `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` |
 | Gametrak, Windows only | 14B7:0982 | 0 | the device | `SDL_HINT_JOYSTICK_HIDAPI_GAMETRAK` |
 | DJI RC (RM330) | 2CA3:1023 | class 0xFF, subclass 0x43, any protocol | `USB\VID_2CA3&PID_1023&MI_01`, the DUML bulk interface | `SDL_HINT_JOYSTICK_HIDAPI_DJI_REMOTE` |
+| I-Force wheels and joysticks, Windows only | the 14 IDs in [README-iforce.md](README-iforce.md) | 0, any class | the device | `SDL_HINT_JOYSTICK_HIDAPI_IFORCE` |
 
 ## How the path works
 
@@ -43,6 +44,12 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   by class and subclass alone, as dji-firmware-tools and DJI-RC-Emulator find
   it, and its bulk writes go out unchanged. See
   [README-dji-remotes.md](README-dji-remotes.md).
+- A rule by interface number matches whatever the class. The I-Force rules
+  name interface 0 alone, since Linux's `iforce` driver takes those IDs by
+  vendor and product, and their commands go out unchanged. They serve
+  Windows only. Where a rule does not serve the platform, libusb treats the
+  device as if it had no rule, so on Linux the kernel's driver keeps it. See
+  [README-iforce.md](README-iforce.md).
 
 ## Known limits
 
@@ -55,7 +62,8 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 
 ## Adding a device
 
-1. Add its ID to `usb_ids.h`, its rule to `SDL_vendorusb_rules`, and its ID to
+1. Add its ID to `usb_ids.h` and its rule to `SDL_vendorusb_rules`. A device
+   that needs libusb on every platform also goes in
    `SDL_vendorusb_libusb_required`.
 2. Put the protocol in a pure module with no SDL runtime and no I/O, and keep
    the driver file to moving bytes between that module and SDL.
