@@ -100,6 +100,20 @@ extern bool SDL_VendorUSB_IsCandidate(uint16_t vendor, uint16_t product, uint8_t
                                       uint8_t interface_class, uint8_t interface_subclass,
                                       uint8_t interface_protocol, bool xbox);
 
+typedef struct SDL_VendorUSBEndpointInfo
+{
+    uint8_t address;    /* bEndpointAddress */
+    uint8_t attributes; /* bmAttributes */
+} SDL_VendorUSBEndpointInfo;
+
+/* An original Xbox XID interface: class 0x58, subclass 0x42, protocol 0, and
+ * exactly two endpoints, one interrupt IN and one interrupt OUT. The class
+ * alone admits it, whatever the vendor and product. The DVD remote's XID
+ * interface has one endpoint and fails the test. */
+extern bool SDL_VendorUSB_IsXIDInterface(uint8_t interface_class, uint8_t interface_subclass,
+                                         uint8_t interface_protocol,
+                                         const SDL_VendorUSBEndpointInfo *endpoints, int count);
+
 /* Whether the libusb enumeration skips an interface it could not open.
  * On Windows an Xbox interface that xusb22 or the GIP driver holds cannot be
  * opened, and skipping it keeps a pad Windows serves from appearing twice.

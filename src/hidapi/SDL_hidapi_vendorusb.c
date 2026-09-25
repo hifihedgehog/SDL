@@ -167,6 +167,33 @@ bool SDL_VendorUSB_IsCandidate(uint16_t vendor, uint16_t product, uint8_t interf
     return xbox || interface_class == 0x03; /* HID */
 }
 
+bool SDL_VendorUSB_IsXIDInterface(uint8_t interface_class, uint8_t interface_subclass,
+                                  uint8_t interface_protocol,
+                                  const SDL_VendorUSBEndpointInfo *endpoints, int count)
+{
+    int i, in = 0, out = 0;
+
+    /* Linux xpad matches the class, subclass and protocol and requires two
+       endpoints, both interrupt, one in each direction. */
+    if (interface_class != 0x58 || interface_subclass != 0x42 || interface_protocol != 0x00) {
+        return false;
+    }
+    if (count != 2 || !endpoints) {
+        return false;
+    }
+    for (i = 0; i < count; ++i) {
+        if ((endpoints[i].attributes & 0x03) != SDL_VENDORUSB_TRANSFER_INTERRUPT) {
+            return false;
+        }
+        if (endpoints[i].address & 0x80) {
+            ++in;
+        } else {
+            ++out;
+        }
+    }
+    return in == 1 && out == 1;
+}
+
 bool SDL_VendorUSB_SkipUnopened(SDL_VendorUSBPlatform platform, bool xbox, bool opened)
 {
     return platform == SDL_VENDORUSB_PLATFORM_WINDOWS && xbox && !opened;
