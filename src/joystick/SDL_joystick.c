@@ -76,6 +76,9 @@ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
 #ifdef SDL_JOYSTICK_DJI_TCP // PadForge fork: DJI screen remotes over TCP (issue #33)
     &SDL_DJITCP_JoystickDriver,
 #endif
+#ifdef SDL_JOYSTICK_RFCOMM // PadForge fork: Bluetooth RFCOMM controllers (issue #33)
+    &SDL_RFCOMM_JoystickDriver,
+#endif
 #ifdef SDL_JOYSTICK_WINMM
     &SDL_WINMM_JoystickDriver,
 #endif

@@ -272,6 +272,7 @@ extern SDL_JoystickDriver SDL_WGI_JoystickDriver;
 extern SDL_JoystickDriver SDL_BLE_JoystickDriver;
 extern SDL_JoystickDriver SDL_SERIAL_JoystickDriver;
 extern SDL_JoystickDriver SDL_DJITCP_JoystickDriver;
+extern SDL_JoystickDriver SDL_RFCOMM_JoystickDriver;
 extern SDL_JoystickDriver SDL_WINDOWS_JoystickDriver;
 extern SDL_JoystickDriver SDL_WINMM_JoystickDriver;
 extern SDL_JoystickDriver SDL_PS2_JoystickDriver;

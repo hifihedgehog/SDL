@@ -2773,6 +2773,9 @@ elseif(WINDOWS OR CYGWIN)
       "${SDL3_SOURCE_DIR}/src/joystick/dji/*.h"
     )
     set(SDL_JOYSTICK_DJI_TCP 1)
+    # PadForge fork: Bluetooth RFCOMM controllers, whose driver and modules
+    # the Windows joystick glob takes (hifihedgehog/SDL#33 Part 11)
+    set(SDL_JOYSTICK_RFCOMM 1)
     if(HAVE_GAMEINPUT_H)
       sdl_glob_sources("${SDL3_SOURCE_DIR}/src/joystick/gdk/*.cpp")
       set(SDL_JOYSTICK_GAMEINPUT 1)
