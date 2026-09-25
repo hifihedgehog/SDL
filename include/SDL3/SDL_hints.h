@@ -2550,6 +2550,237 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_STEEL_BATTALION "SDL_JOYSTICK_HIDAPI_STEEL_BATTALION"
 
 /**
+ * A variable controlling whether the HIDAPI driver for the Logitech Speed
+ * Force Wireless should be used.
+ *
+ * This is a PadForge fork addition. The wheel's USB receiver, 046D:C29C,
+ * does not bond with the wheel until the host sends two feature reports,
+ * which the driver sends at open. Axis 0 is the wheel and axes 1 and 2 the
+ * pedals.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_SPEEDFORCE "SDL_JOYSTICK_HIDAPI_SPEEDFORCE"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the PhoenixRC USB
+ * adapter should be used.
+ *
+ * This is a PadForge fork addition. The adapter, 1781:0898, passes a
+ * radio-control transmitter's eight channels as eight axes.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_RC_ADAPTER "SDL_JOYSTICK_HIDAPI_RC_ADAPTER"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Microsoft
+ * SideWinder Game Voice should be used.
+ *
+ * This is a PadForge fork addition. The Game Voice, 045E:003B, gives its
+ * eight buttons as joystick buttons.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_GAMEVOICE "SDL_JOYSTICK_HIDAPI_GAMEVOICE"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the P5 glove should
+ * be used.
+ *
+ * This is a PadForge fork addition. The glove, 0D7F:0100, gives its five
+ * finger bends as axes and its four buttons as buttons. The driver changes
+ * no glove setting, so mouse mode stays as it is.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_P5GLOVE "SDL_JOYSTICK_HIDAPI_P5GLOVE"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Dream Cheeky
+ * roll-up drum kit should be used.
+ *
+ * This is a PadForge fork addition. The kit's ID, 1941:8021, also belongs
+ * to a weather station and a missile launcher, so the driver is off unless
+ * this hint turns it on. Its six pads are buttons 0-5.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used. (default)
+ * - "1": HIDAPI driver is used.
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_DREAMCHEEKY "SDL_JOYSTICK_HIDAPI_DREAMCHEEKY"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the OCZ Neural
+ * Impulse Actuator should be used.
+ *
+ * This is a PadForge fork addition. The headband, 1234:0000 with the
+ * manufacturer string "Brain Actuated Technologies", gives its newest
+ * sample as axis 0.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_NIA "SDL_JOYSTICK_HIDAPI_NIA"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Gametrak should
+ * be used.
+ *
+ * This is a PadForge fork addition. The Gametrak for PlayStation, 14B7:0982,
+ * reports only after the host writes an unlock sequence and keeps a rolling
+ * key going, which the driver does. On Windows it is read through libusb,
+ * so WinUSB must be bound to it.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_GAMETRAK "SDL_JOYSTICK_HIDAPI_GAMETRAK"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Oculus Rift DK1
+ * head tracker should be used.
+ *
+ * This is a PadForge fork addition. The tracker, 2833:0001 with the
+ * manufacturer string "Oculus VR, Inc.", sends while the driver writes its
+ * keep-alive. Its accelerometer and gyroscope are SDL sensors, and axes 0-2
+ * are yaw, pitch and roll.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_RIFT_DK1 "SDL_JOYSTICK_HIDAPI_RIFT_DK1"
+
+/**
+ * A variable controlling whether the HIDAPI driver for Windows Mixed
+ * Reality motion controllers should be used.
+ *
+ * This is a PadForge fork addition. It covers controllers paired to the PC
+ * over Bluetooth, 045E:065B, 045E:065D and 045E:066A. The driver reads each
+ * controller's calibration at open, and the controller appears once that is
+ * done. The accelerometer and gyroscope are SDL sensors.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_WMR "SDL_JOYSTICK_HIDAPI_WMR"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the SteelSeries
+ * Nimbus should be used.
+ *
+ * This is a PadForge fork addition. The Nimbus, 0111:1420 over Bluetooth,
+ * is a gamepad that Windows leaves out of its game controllers.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_NIMBUS "SDL_JOYSTICK_HIDAPI_NIMBUS"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Creative
+ * Prodikeys PC-MIDI should be used.
+ *
+ * This is a PadForge fork addition. The keyboard, 041E:2801, keeps its
+ * typing keys on Windows. The driver gives its music keys as buttons 0-127
+ * by MIDI note, its other keys as buttons 128-151 and the latest key
+ * velocity as axis 0.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_PRODIKEYS "SDL_JOYSTICK_HIDAPI_PRODIKEYS"
+
+/**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One
  * (GIP) controllers should be used.
  *
