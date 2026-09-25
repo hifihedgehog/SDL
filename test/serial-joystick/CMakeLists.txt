@@ -117,6 +117,10 @@ serial_test(kettler "${SERIAL_SOURCE}/SDL_serial_kettler_proto.c")
 serial_test(iforce "${SERIAL_SOURCE}/SDL_serial_iforce_proto.c"
     "${SERIAL_SDL_ROOT}/src/joystick/SDL_iforce_proto.c")
 
+# hifihedgehog/SDL#33 Part 10: Pony Canyon's Master Controllers.
+serial_test(mastercontroller "${SERIAL_SOURCE}/SDL_serial_mastercontroller_proto.c"
+    "${SERIAL_SDL_ROOT}/src/joystick/hidapi/SDL_hidapi_train_proto.c")
+
 # hifihedgehog/SDL#33 Part 6: DJI remotes on the serial port, the USB bulk
 # interface and TCP.
 dji_test(duml)

@@ -224,6 +224,31 @@ static void TestRules(void)
     CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3));
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3, 0, 0xFF, 0x00, 0x00) == NULL);
     CHECK(!SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_WINDOWS, USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3, false, false));
+
+    /* Part 10: the five train controllers, interface 0 whatever its class,
+       on every platform */
+    {
+        static const uint16_t trains[][2] = {
+            { USB_VENDOR_TAITO, 0x0004 }, { USB_VENDOR_TAITO, 0x0005 }, { USB_VENDOR_TAITO, 0x0007 },
+            { USB_VENDOR_TAITO, 0x0101 }, { USB_VENDOR_TRAIN_MASCON, 0x77A7 },
+        };
+        size_t i;
+
+        CHECK(USB_VENDOR_TAITO == 0x0AE4 && USB_VENDOR_TRAIN_MASCON == 0x1C06);
+        for (i = 0; i < sizeof(trains) / sizeof(trains[0]); ++i) {
+            rule = SDL_VendorUSB_FindRule(trains[i][0], trains[i][1], 0, 0x03, 0x00, 0x00);
+            CHECK(rule && rule->flags == 0 && rule->interface_number == 0 && rule->alternate == 0);
+            CHECK(rule && rule->in_endpoint == 0 && rule->out_endpoint == 0 && rule->in_size == 0 && rule->out_size == 0);
+            CHECK(SDL_VendorUSB_FindRule(trains[i][0], trains[i][1], 0, 0x00, 0x00, 0x00) == rule);
+            CHECK(SDL_VendorUSB_FindRule(trains[i][0], trains[i][1], 1, 0x03, 0x00, 0x00) == NULL);
+            CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+            CHECK(SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_OTHER, trains[i][0], trains[i][1], false, false));
+        }
+        /* Other Taito IDs, including the HID DGOC-44U, stay off the path */
+        CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_TAITO, 0x0003));
+        CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_TAITO, 0x0006));
+        CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_TAITO, 0x0008));
+    }
 }
 
 static void TestIntelDescriptors(void)
@@ -495,6 +520,10 @@ static const Device devices[] = {
     { "Guillemot Force Feedback Racing Wheel", USB_VENDOR_GUILLEMOT, 0x0004, 0, 0x03, 0x00, 0x00, false },
     { "GunCon 2", USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 0, 0xFF, 0x6A, 0x00, false },
     { "GunCon 3", USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3, 0, 0xFF, 0x00, 0x00, false },
+    { "Taito Type 2", USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_TYPE2, 0, 0x03, 0x00, 0x00, false },
+    { "Multi Train Controller", USB_VENDOR_TAITO, USB_PRODUCT_TAITO_MULTI_TRAIN_CONTROLLER, 0, 0x00, 0x00, 0x00, false },
+    { "Train Mascon", USB_VENDOR_TRAIN_MASCON, USB_PRODUCT_TRAIN_MASCON, 0, 0x00, 0x00, 0x00, false },
+    { "DGOC-44U", USB_VENDOR_TAITO, 0x0003, 0, 0x03, 0x00, 0x00, false },
 };
 
 static bool NewLibUSBEnumerates(const SDL_VendorUSBRouting *r, const Device *d, bool opened)
@@ -666,6 +695,14 @@ static void TestRoutingTable(void)
         CHECK(!NewLibUSBEnumerates(&r, d, true));
     }
 
+    /* Part 10: the train controllers reach libusb everywhere, and no
+       platform backend keeps them. The HID DGOC-44U stays with Windows. */
+    CHECK(OnLibUSB(W, "Taito Type 2", true) && OnLibUSB(L, "Taito Type 2", true) && OnLibUSB(M, "Taito Type 2", true));
+    CHECK(OnLibUSB(W, "Multi Train Controller", true) && OnLibUSB(L, "Multi Train Controller", true));
+    CHECK(OnLibUSB(M, "Train Mascon", true) && OnLibUSB(W, "Train Mascon", true));
+    CHECK(PlatformIgnores(W, "Taito Type 2") && PlatformIgnores(L, "Taito Type 2") && PlatformIgnores(M, "Train Mascon"));
+    CHECK(!OnLibUSB(W, "DGOC-44U", true) && !PlatformIgnores(W, "DGOC-44U"));
+
     /* The GameCube hint still turns the adapter off. */
     {
         const Device *d = Find("GameCube adapter");
@@ -686,8 +723,9 @@ static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
     const bool iforce = ((d->vendor == USB_VENDOR_LOGITECH && d->product == 0xC291) ||
                          (d->vendor == USB_VENDOR_GUILLEMOT && d->product == 0x0004));
     const bool guncon2 = (d->vendor == USB_VENDOR_NAMCO && d->product == USB_PRODUCT_NAMCO_GUNCON2);
+    const bool train = ((d->vendor == USB_VENDOR_TAITO && d->product != 0x0003) || d->vendor == USB_VENDOR_TRAIN_MASCON);
 
-    if (intel || dji || guncon2) {
+    if (intel || dji || guncon2 || train) {
         return true; /* A new member of the path */
     }
     if ((gametrak || iforce) && r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {

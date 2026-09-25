@@ -45,6 +45,7 @@
 #include "../serial/SDL_serial_kettler_proto.h"
 #include "../serial/SDL_serial_iforce_proto.h"
 #include "../serial/SDL_serial_magellan_proto.h"
+#include "../serial/SDL_serial_mastercontroller_proto.h"
 #include "../serial/SDL_serial_spaceball_proto.h"
 #include "../serial/SDL_serial_spaceorb_proto.h"
 #include "../serial/SDL_serial_stinger_proto.h"
@@ -153,6 +154,7 @@ static const SDL_SerialModule *const serial_modules[] = {
     &SDL_SerialVRinsightModule,
     &SDL_SerialKettlerModule,
     &SDL_SerialIForceModule,
+    &SDL_SerialMasterControllerModule,
     &SDL_DJIRemoteRCN1Module,
     &SDL_DJIRemoteMavicMiniModule,
     &SDL_DJIRemotePhantom3Module,
