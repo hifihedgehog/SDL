@@ -209,6 +209,21 @@ static void TestRules(void)
     CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, 0, 0x03, 0, 0, false));
     CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_MACOS, USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 0, 0x03, 1, 1, false));
     CHECK(!SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 1, 0x03, 1, 2, false));
+
+    /* Part 9: the GunCon 2, interface 0 whatever its class, report numbers
+       stripped, on every platform. The GunCon 3 has no rule. */
+    CHECK(USB_VENDOR_NAMCO == 0x0B9A && USB_PRODUCT_NAMCO_GUNCON2 == 0x016A && USB_PRODUCT_NAMCO_GUNCON3 == 0x0800);
+    rule = SDL_VendorUSB_FindRule(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 0, 0xFF, 0x6A, 0x00);
+    CHECK(rule && rule->flags == 0 && rule->interface_number == 0 && rule->alternate == 0);
+    CHECK(rule && rule->in_endpoint == 0 && rule->out_endpoint == 0 && rule->in_size == 0 && rule->out_size == 0);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 0, 0x03, 0x00, 0x00) == rule);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 1, 0xFF, 0x6A, 0x00) == NULL);
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) &&
+          SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+    CHECK(SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, false, false));
+    CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3));
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3, 0, 0xFF, 0x00, 0x00) == NULL);
+    CHECK(!SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_WINDOWS, USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3, false, false));
 }
 
 static void TestIntelDescriptors(void)
@@ -478,6 +493,8 @@ static const Device devices[] = {
     { "DJI RC ADB", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 2, 0xFF, 0x42, 0x01, false },
     { "WingMan Formula Force", USB_VENDOR_LOGITECH, 0xC291, 0, 0xFF, 0x00, 0x00, false },
     { "Guillemot Force Feedback Racing Wheel", USB_VENDOR_GUILLEMOT, 0x0004, 0, 0x03, 0x00, 0x00, false },
+    { "GunCon 2", USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 0, 0xFF, 0x6A, 0x00, false },
+    { "GunCon 3", USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON3, 0, 0xFF, 0x00, 0x00, false },
 };
 
 static bool NewLibUSBEnumerates(const SDL_VendorUSBRouting *r, const Device *d, bool opened)
@@ -630,6 +647,25 @@ static void TestRoutingTable(void)
         CHECK(!NewLibUSBEnumerates(&r, d, true));
     }
 
+    /* Part 9: the GunCon 2 reaches libusb everywhere, with the whitelist
+       on or off, and no platform backend keeps it. The GunCon 3 stays off
+       libusb, as before. */
+    CHECK(OnLibUSB(W, "GunCon 2", true) && OnLibUSB(L, "GunCon 2", true) && OnLibUSB(M, "GunCon 2", true));
+    CHECK(PlatformIgnores(W, "GunCon 2") && PlatformIgnores(L, "GunCon 2") && PlatformIgnores(M, "GunCon 2"));
+    CHECK(!OnLibUSB(W, "GunCon 3", true) && !OnLibUSB(L, "GunCon 3", true) && !OnLibUSB(M, "GunCon 3", true));
+    CHECK(!PlatformIgnores(W, "GunCon 3") && !PlatformIgnores(L, "GunCon 3"));
+    {
+        const Device *d = Find("GunCon 2");
+        SDL_VendorUSBRouting r = Route(L, true, d);
+
+        r.whitelist = false;
+        CHECK(NewLibUSBEnumerates(&r, d, true));
+        d = Find("GunCon 3");
+        r = Route(W, true, d);
+        r.whitelist = false;
+        CHECK(!NewLibUSBEnumerates(&r, d, true));
+    }
+
     /* The GameCube hint still turns the adapter off. */
     {
         const Device *d = Find("GameCube adapter");
@@ -649,8 +685,9 @@ static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
     const bool dji = (d->vendor == USB_VENDOR_DJI && d->product == USB_PRODUCT_DJI_RC_RM330);
     const bool iforce = ((d->vendor == USB_VENDOR_LOGITECH && d->product == 0xC291) ||
                          (d->vendor == USB_VENDOR_GUILLEMOT && d->product == 0x0004));
+    const bool guncon2 = (d->vendor == USB_VENDOR_NAMCO && d->product == USB_PRODUCT_NAMCO_GUNCON2);
 
-    if (intel || dji) {
+    if (intel || dji || guncon2) {
         return true; /* A new member of the path */
     }
     if ((gametrak || iforce) && r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {
