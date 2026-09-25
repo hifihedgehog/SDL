@@ -27,6 +27,9 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 - Xbox 360 and Xbox One interfaces on Windows are enumerated only when libusb
   can open them. A pad that xusb22 or the GIP driver holds cannot be opened and
   does not appear twice. A pad bound to WinUSB is read by SDL's Xbox drivers.
+- Original Xbox XID interfaces, class 0x58, follow the same rule. Windows has
+  no driver for them, so one appears only once WinUSB is bound. See
+  [README-xid.md](README-xid.md).
 - The Switch 2 controllers keep their input on the platform HID backend. Their
   drivers open WinUSB separately for bulk I/O.
 

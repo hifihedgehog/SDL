@@ -44,6 +44,11 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #ifdef SDL_JOYSTICK_HIDAPI_INTEL_WIRELESS
     &SDL_HIDAPI_DriverIntelWireless,
 #endif
+#ifdef SDL_JOYSTICK_HIDAPI_XID
+    // Original Xbox XID interfaces, class 0x58, which no other driver serves
+    &SDL_HIDAPI_DriverXboxOriginal,
+    &SDL_HIDAPI_DriverSteelBattalion,
+#endif
 #ifdef SDL_JOYSTICK_HIDAPI_LUNA
     &SDL_HIDAPI_DriverLuna,
 #endif
@@ -1486,6 +1491,23 @@ SDL_GamepadType HIDAPI_GetGamepadTypeFromGUID(SDL_GUID guid)
     SDL_UnlockJoysticks();
 
     return type;
+}
+
+int HIDAPI_GetInterfaceClassFromGUID(SDL_GUID guid)
+{
+    SDL_HIDAPI_Device *device;
+    int interface_class = -1;
+
+    SDL_LockJoysticks();
+    for (device = SDL_HIDAPI_devices; device; device = device->next) {
+        if (SDL_memcmp(&guid, &device->guid, sizeof(guid)) == 0) {
+            interface_class = device->interface_class;
+            break;
+        }
+    }
+    SDL_UnlockJoysticks();
+
+    return interface_class;
 }
 
 static void HIDAPI_JoystickDetect(void)
