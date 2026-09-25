@@ -17,6 +17,7 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 | DJI RC (RM330) | 2CA3:1023 | class 0xFF, subclass 0x43, any protocol | `USB\VID_2CA3&PID_1023&MI_01`, the DUML bulk interface | `SDL_HINT_JOYSTICK_HIDAPI_DJI_REMOTE` |
 | I-Force wheels and joysticks, Windows only | the 14 IDs in [README-iforce.md](README-iforce.md) | 0, any class | the device | `SDL_HINT_JOYSTICK_HIDAPI_IFORCE` |
 | Namco GunCon 2 and EMS LCD TopGun | 0B9A:016A | 0, any class | the device | `SDL_HINT_JOYSTICK_HIDAPI_GUNCON` |
+| Train controllers | 0AE4:0004, 0005, 0007, 0101 and 1C06:77A7 | 0, any class | the device | `SDL_HINT_JOYSTICK_HIDAPI_TRAIN` |
 
 ## How the path works
 
@@ -55,6 +56,10 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   SET_REPORT on the control pipe, as the Gametrak's writes do. No platform
   has a driver for it, so its rule serves every platform. See
   [README-guncon.md](README-guncon.md).
+- The train controllers send their outputs as vendor control transfers on
+  the handle the libusb backend holds. The Taito units declare HID class
+  with no HID class descriptor, and SDL asks them for no report descriptor.
+  See [README-train.md](README-train.md).
 
 ## Known limits
 

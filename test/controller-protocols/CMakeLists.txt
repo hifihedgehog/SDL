@@ -151,3 +151,7 @@ protocol_test(iforce "${PROTOCOL_TESTS}/testiforce.c"
 # checksum and layout.
 protocol_test(guncon "${PROTOCOL_TESTS}/testguncon.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_guncon_proto.c")
+
+# hifihedgehog/SDL#33 Part 10: the train controllers.
+protocol_test(train "${PROTOCOL_TESTS}/testtrain.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_train_proto.c")
