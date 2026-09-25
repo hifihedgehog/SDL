@@ -495,6 +495,19 @@ static void TestKnownDevices(void)
     }
     CHECK(total == 63);
     CHECK(!SDL_XID_FindKnownDevice(0x0A7B, 0xD000)); // the Steel Battalion goes by its descriptor or kind
+
+    // The IDs whose HIDAPI GUIDs only the XID drivers make: the table and the Steel Battalion
+    for (i = 0; i < sizeof(flagged) / sizeof(flagged[0]); ++i) {
+        CHECK(SDL_XID_IsKnownID(flagged[i].vendor, flagged[i].product));
+    }
+    for (i = 0; i < sizeof(plain) / sizeof(plain[0]); ++i) {
+        CHECK(SDL_XID_IsKnownID(plain[i][0], plain[i][1]));
+    }
+    CHECK(SDL_XID_IsKnownID(0x0A7B, 0xD000));
+    CHECK(!SDL_XID_IsKnownID(0x0A7B, 0xD001));
+    CHECK(!SDL_XID_IsKnownID(0x045E, 0x028E)); // the Xbox 360 pad
+    CHECK(!SDL_XID_IsKnownID(0x045E, 0x02A0)); // the Big Button receiver
+    CHECK(!SDL_XID_IsKnownID(0x1234, 0x5678));
 }
 
 /* ------------------------------------------------------------------------ */
