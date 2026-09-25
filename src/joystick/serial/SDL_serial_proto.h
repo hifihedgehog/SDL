@@ -273,6 +273,9 @@ extern const SDL_SerialSnapshot *SDL_Serial_GetSnapshot(void *state, int sub);
 
 /* Presents a sub-device with all controls at rest and emits it */
 extern void SDL_Serial_Present(SDL_SerialBase *base, int sub, const SDL_SerialIdentity *identity);
+/* Presents a sub-device with the given controls in its first snapshot, for
+   a device whose first packet is also its first state. NULL is at rest. */
+extern void SDL_Serial_PresentWith(SDL_SerialBase *base, int sub, const SDL_SerialIdentity *identity, const SDL_SerialControls *controls);
 /* Clears presence and pulses, emitting when the sub-device was present */
 extern void SDL_Serial_Absent(SDL_SerialBase *base, int sub);
 extern void SDL_Serial_AbsentAll(SDL_SerialBase *base);

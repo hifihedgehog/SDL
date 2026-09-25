@@ -2943,6 +2943,110 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_TRAIN "SDL_JOYSTICK_HIDAPI_TRAIN"
 
 /**
+ * A variable controlling whether the driver for controllers that send their
+ * input over a Bluetooth RFCOMM channel should be used.
+ *
+ * This is a PadForge fork addition, for Windows. It covers the PowerA MOGA
+ * in Mode A, the Zeemote JS1, the Chainpus BGP100 and the 2011 Phonejoy,
+ * found by name among the devices paired in Windows. The driver reads the
+ * paired list every 3 seconds and connects to each matching controller. Each
+ * family has its own hint, which defaults to this one.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver connects to no controller.
+ * - "1": The driver connects to the controllers of every family whose hint is
+ *   not set to "0". (default)
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_RFCOMM "SDL_JOYSTICK_RFCOMM"
+
+/**
+ * A variable controlling whether the RFCOMM driver connects to PowerA MOGA
+ * controllers in Mode A.
+ *
+ * This is a PadForge fork addition, for Windows. It takes paired devices
+ * named "BD&A", "BDA" or "MOGA", in any case, whose name does not contain
+ * "HID".
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves MOGA controllers alone.
+ * - "1": The driver connects to MOGA controllers.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_RFCOMM.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_RFCOMM_MOGA "SDL_JOYSTICK_RFCOMM_MOGA"
+
+/**
+ * A variable controlling whether the RFCOMM driver connects to the Zeemote
+ * JS1.
+ *
+ * This is a PadForge fork addition, for Windows. It takes paired devices
+ * whose name starts with "Zeemote JS1".
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Zeemote alone.
+ * - "1": The driver connects to the Zeemote.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_RFCOMM.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_RFCOMM_ZEEMOTE "SDL_JOYSTICK_RFCOMM_ZEEMOTE"
+
+/**
+ * A variable controlling whether the RFCOMM driver connects to the Chainpus
+ * BGP100.
+ *
+ * This is a PadForge fork addition, for Windows. It takes paired devices
+ * whose name starts with "GAMEPAD" in capitals, and shows no joystick until
+ * the device sends a valid key event.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves these devices alone.
+ * - "1": The driver connects to these devices.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_RFCOMM.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_RFCOMM_BGP100 "SDL_JOYSTICK_RFCOMM_BGP100"
+
+/**
+ * A variable controlling whether the RFCOMM driver connects to the 2011
+ * Phonejoy.
+ *
+ * This is a PadForge fork addition, for Windows. It takes paired devices
+ * whose name starts with "Phonejoy", in any case.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Phonejoy alone.
+ * - "1": The driver connects to the Phonejoy.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_RFCOMM.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_RFCOMM_PHONEJOY "SDL_JOYSTICK_RFCOMM_PHONEJOY"
+
+/**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One
  * (GIP) controllers should be used.
  *

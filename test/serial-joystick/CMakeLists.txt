@@ -88,6 +88,25 @@ function(dji_test name)
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endfunction()
 
+# An RFCOMM test: test/testrfcomm<name>.c with the serial contract, the
+# RFCOMM link and the family modules of hifihedgehog/SDL#33 Part 11.
+set(SERIAL_RFCOMM "${SERIAL_SDL_ROOT}/src/joystick/windows")
+function(rfcomm_test name)
+    set(target "testrfcomm${name}")
+    add_executable(${target} "${SERIAL_TESTS}/testrfcomm${name}.c"
+        "${SERIAL_SOURCE}/SDL_serial_engine.c"
+        "${SERIAL_SOURCE}/SDL_serial_proto.c"
+        "${SERIAL_RFCOMM}/SDL_rfcomm_proto.c"
+        "${SERIAL_RFCOMM}/SDL_rfcomm_moga_proto.c"
+        "${SERIAL_RFCOMM}/SDL_rfcomm_zeemote_proto.c"
+        "${SERIAL_RFCOMM}/SDL_rfcomm_bgp100_proto.c")
+    serial_configure(${target})
+    add_test(NAME "serial-joystick.rfcomm${name}" COMMAND ${target})
+    set_tests_properties("serial-joystick.rfcomm${name}" PROPERTIES
+        TIMEOUT 120 LABELS "serial-joystick;offline"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endfunction()
+
 # hifihedgehog/SDL#33 Part 5: the serial transport and its devices.
 serial_test(engine)
 
@@ -120,6 +139,16 @@ serial_test(iforce "${SERIAL_SOURCE}/SDL_serial_iforce_proto.c"
 # hifihedgehog/SDL#33 Part 10: Pony Canyon's Master Controllers.
 serial_test(mastercontroller "${SERIAL_SOURCE}/SDL_serial_mastercontroller_proto.c"
     "${SERIAL_SDL_ROOT}/src/joystick/SDL_train_proto.c")
+
+# hifihedgehog/SDL#33 Part 11: Bluetooth RFCOMM controllers, the MOGA, the
+# Zeemote JS1, the Chainpus BGP100 and the Phonejoy.
+rfcomm_test(link)
+
+rfcomm_test(moga)
+
+rfcomm_test(zeemote)
+
+rfcomm_test(bgp100)
 
 # hifihedgehog/SDL#33 Part 6: DJI remotes on the serial port, the USB bulk
 # interface and TCP.
