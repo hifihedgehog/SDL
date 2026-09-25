@@ -10,13 +10,13 @@
   freely.
 */
 
-/* Replay tests for src/joystick/hidapi/SDL_hidapi_train_proto.c, the train
+/* Replay tests for src/joystick/SDL_train_proto.c, the train
    controllers of hifihedgehog/SDL#33 Part 10. Test numbers follow the part's
    three sections. No capture of any report exists, so the reports are
    constructed from the Train Controller Database's tables and OpenBVE's
    decoders. */
 
-#include "../src/joystick/hidapi/SDL_hidapi_train_proto.h"
+#include "../src/joystick/SDL_train_proto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
