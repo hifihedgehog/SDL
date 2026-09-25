@@ -36,6 +36,7 @@
 #define USB_VENDOR_CORSAIR      0x1b1c
 #define USB_VENDOR_CREATIVE     0x041e
 #define USB_VENDOR_GAMESIR      0x3537
+#define USB_VENDOR_DJI          0x2ca3
 #define USB_VENDOR_DRAGONRISE   0x0079
 #define USB_VENDOR_DREAMCHEEKY  0x1941
 #define USB_VENDOR_FLYDIGI_V1   0x04b4
@@ -99,6 +100,8 @@
 #define USB_PRODUCT_BDA_XB1_FIGHTPAD                      0x791a
 #define USB_PRODUCT_BDA_XB1_SPECTRA_PRO                   0x592a
 #define USB_PRODUCT_CREATIVE_PRODIKEYS                    0x2801
+#define USB_PRODUCT_DJI_RC231                             0x1020 // From a user report, not a descriptor capture
+#define USB_PRODUCT_DJI_RC_RM330                          0x1023
 #define USB_PRODUCT_DREAMCHEEKY_DRUM_KIT                  0x8021 // Shared with a weather station and a missile launcher
 #define USB_PRODUCT_CAPCOM_STEEL_BATTALION                0xd000
 #define USB_PRODUCT_GOOGLE_STADIA_CONTROLLER              0x9400

@@ -234,6 +234,8 @@ typedef unsigned int uintptr_t;
 #define SDL_JOYSTICK_BLE 1
 // PadForge fork: joysticks on COM ports (hifihedgehog/SDL#33 Part 5)
 #define SDL_JOYSTICK_SERIAL 1
+// PadForge fork: DJI screen remotes over TCP (hifihedgehog/SDL#33 Part 6)
+#define SDL_JOYSTICK_DJI_TCP 1
 #define SDL_JOYSTICK_XINPUT 1
 #define SDL_HAPTIC_DINPUT 1
 

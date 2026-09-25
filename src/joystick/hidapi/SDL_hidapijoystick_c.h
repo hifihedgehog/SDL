@@ -66,6 +66,11 @@
 #define SDL_JOYSTICK_HIDAPI_WMR
 #define SDL_JOYSTICK_HIDAPI_NIMBUS
 #define SDL_JOYSTICK_HIDAPI_PRODIKEYS
+// The DJI RC's bulk interface, run by the DJI remote module, which the
+// build compiles where the serial driver is (hifihedgehog/SDL#33 Part 6)
+#ifdef SDL_JOYSTICK_SERIAL
+#define SDL_JOYSTICK_HIDAPI_DJI_REMOTE
+#endif
 
 // Joystick capability definitions
 #define SDL_JOYSTICK_CAP_MONO_LED       0x00000001
@@ -203,6 +208,7 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverGametrak;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverRiftDK1;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverWMR;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverNimbus;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverDJIRemote;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverProdikeys;
 
 #define LOAD16(A, B)       (Sint16)((Uint16)(A) | (((Uint16)(B)) << 8))

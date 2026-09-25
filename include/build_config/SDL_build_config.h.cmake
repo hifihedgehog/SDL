@@ -327,6 +327,7 @@
 #cmakedefine SDL_JOYSTICK_WGI 1
 #cmakedefine SDL_JOYSTICK_BLE 1
 #cmakedefine SDL_JOYSTICK_SERIAL 1
+#cmakedefine SDL_JOYSTICK_DJI_TCP 1
 #cmakedefine SDL_JOYSTICK_XINPUT 1
 #cmakedefine SDL_JOYSTICK_XINPUT_PADDLES 1
 

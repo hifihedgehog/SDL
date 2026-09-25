@@ -49,6 +49,8 @@ typedef enum SDL_VendorUSBPlatform
 /* The rule serves Windows only. Elsewhere the platform HID backend keeps
  * the device, and libusb treats the interface as it treats any other. */
 #define SDL_VENDORUSB_WINDOWS_ONLY 0x04
+/* With SDL_VENDORUSB_MATCH_CLASS: any protocol matches */
+#define SDL_VENDORUSB_ANY_PROTOCOL 0x08
 
 /* One vendor interface of one device. */
 typedef struct SDL_VendorUSBRule
