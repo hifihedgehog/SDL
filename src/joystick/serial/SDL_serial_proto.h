@@ -117,7 +117,9 @@ typedef enum SDL_SerialMapKind
     SDL_SERIAL_MAP_NONE,
     SDL_SERIAL_MAP_BUTTON,
     SDL_SERIAL_MAP_AXIS,
-    SDL_SERIAL_MAP_HAT
+    SDL_SERIAL_MAP_HAT,
+    SDL_SERIAL_MAP_AXIS_POSITIVE, /* The positive half of an axis, as +aN */
+    SDL_SERIAL_MAP_AXIS_NEGATIVE  /* The negative half of an axis, as -aN */
 } SDL_SerialMapKind;
 
 /* One gamepad input: a joystick button or axis index, or for a hat
@@ -296,6 +298,7 @@ extern void SDL_Serial_SetIdentity(SDL_SerialIdentity *identity, const char *nam
 extern SDL_SerialMapInput SDL_Serial_MapButton(int button);
 extern SDL_SerialMapInput SDL_Serial_MapAxis(int axis);
 extern SDL_SerialMapInput SDL_Serial_MapHat(int hat, uint8_t bit);
+extern SDL_SerialMapInput SDL_Serial_MapHalfAxis(int axis, bool positive);
 
 /* A line of the given settings */
 extern SDL_SerialLine SDL_Serial_Line(uint32_t rate, int data_bits, SDL_SerialParity parity, int stop_bits, SDL_SerialFlow flow, bool dtr, bool rts);

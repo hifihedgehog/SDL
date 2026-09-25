@@ -150,6 +150,23 @@ static void TestRules(void)
     CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
     rule = SDL_VendorUSB_FindRule(USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 0, 3, 1, 1);
     CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
+
+    /* Part 6: the DJI RC's DUML interface, class 0xFF and subclass 0x43 on
+       any interface number and with any protocol. MTP and ADB stay out. */
+    rule = SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01);
+    CHECK(rule && (rule->flags & SDL_VENDORUSB_MATCH_CLASS) && (rule->flags & SDL_VENDORUSB_ANY_PROTOCOL) &&
+          (rule->flags & SDL_VENDORUSB_RAW_OUTPUT) && !(rule->flags & SDL_VENDORUSB_WINDOWS_ONLY));
+    CHECK(rule && rule->in_endpoint == 0x83 && rule->out_endpoint == 0x02 && rule->alternate == 0);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 0, 0xFF, 0x43, 0x00) == rule);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x7F) == rule);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 2, 0xFF, 0x42, 0x01) == NULL);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 0, 0x06, 0x01, 0x01) == NULL);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFE, 0x43, 0x01) == NULL);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, 0x1021, 0, 0xFF, 0x43, 0x01) == NULL);
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER));
+    CHECK(SDL_VendorUSB_IsVendorDevice(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330));
+    /* Without the flag the protocol still counts, as for the Big Button receiver */
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER, 0, 0xFF, 0x5D, 0x05) == NULL);
 }
 
 static void TestIntelDescriptors(void)
@@ -315,6 +332,24 @@ static void TestOtherSelections(void)
         }
     }
 
+    /* Constructed from dji-rc-joystick's endpoints: the DJI RC's bulk
+     * interface 1, bulk OUT 0x02 and bulk IN 0x83 of 512 bytes at high
+     * speed. */
+    {
+        static const unsigned char rm330[] = {
+            9, 4, 1, 0, 2, 0xFF, 0x43, 0x01, 0,
+            7, 5, 0x02, 2, 0x00, 0x02, 0,
+            7, 5, 0x83, 2, 0x00, 0x02, 0,
+        };
+        const SDL_VendorUSBRule *dji = SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01);
+
+        CHECK(dji && Select(dji, 1, rm330, sizeof(rm330), &selection));
+        CHECK(selection.in.address == 0x83 && selection.in.transfer == SDL_VENDORUSB_TRANSFER_BULK && selection.in.read_size == 512);
+        CHECK(selection.out.address == 0x02 && selection.out.transfer == SDL_VENDORUSB_TRANSFER_BULK);
+        /* Without its IN endpoint the interface cannot be used */
+        CHECK(dji && !SDL_VendorUSB_SelectEndpoints(dji, 1, rm330, 16, &selection));
+    }
+
     /* Null and empty inputs fail cleanly. */
     memset(&rule, 0, sizeof(rule));
     CHECK(!SDL_VendorUSB_SelectEndpoints(NULL, 0, intel_interface0, sizeof(intel_interface0), &selection));
@@ -396,6 +431,9 @@ static const Device devices[] = {
     { "Vendor interface, no rule", 0x1234, 0x5678, 0, 0xFF, 0, 0, false },
     { "HID keyboard", 0x046D, 0xC31C, 0, 3, 1, 1, false },
     { "Gametrak", USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, 0, 3, 0, 0, false },
+    { "DJI RC MTP", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 0, 0x06, 0x01, 0x01, false },
+    { "DJI RC bulk", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01, false },
+    { "DJI RC ADB", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 2, 0xFF, 0x42, 0x01, false },
 };
 
 static bool NewLibUSBEnumerates(const SDL_VendorUSBRouting *r, const Device *d, bool opened)
@@ -514,6 +552,16 @@ static void TestRoutingTable(void)
     CHECK(!OnLibUSB(M, "Gametrak", true));
     CHECK(!PlatformIgnores(M, "Gametrak"));
 
+    /* Part 6: the DJI RC's bulk interface reaches libusb on every platform,
+     * its MTP and ADB interfaces never do. */
+    CHECK(OnLibUSB(W, "DJI RC bulk", true));
+    CHECK(!OnLibUSB(W, "DJI RC MTP", true));
+    CHECK(!OnLibUSB(W, "DJI RC ADB", true));
+    CHECK(PlatformIgnores(W, "DJI RC bulk"));
+    CHECK(OnLibUSB(L, "DJI RC bulk", true));
+    CHECK(OnLibUSB(M, "DJI RC bulk", true));
+    CHECK(!OnLibUSB(L, "DJI RC ADB", true));
+
     /* The GameCube hint still turns the adapter off. */
     {
         const Device *d = Find("GameCube adapter");
@@ -530,8 +578,9 @@ static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
     const bool intel = (d->vendor == USB_VENDOR_INTEL && d->product == USB_PRODUCT_INTEL_WIRELESS_SERIES);
     const bool bigbutton = (d->vendor == USB_VENDOR_MICROSOFT && d->product == USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER);
     const bool gametrak = (d->vendor == USB_VENDOR_IN2GAMES && d->product == USB_PRODUCT_IN2GAMES_GAMETRAK);
+    const bool dji = (d->vendor == USB_VENDOR_DJI && d->product == USB_PRODUCT_DJI_RC_RM330);
 
-    if (intel) {
+    if (intel || dji) {
         return true; /* A new member of the path */
     }
     if (gametrak && r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {

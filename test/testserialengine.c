@@ -634,6 +634,50 @@ static void TestAutoRules(void)
     CHECK(SDL_Serial_MatchAuto(NULL, 3, "USB") == NULL && SDL_Serial_MatchAuto(rules, 3, NULL) == NULL);
 }
 
+/* Part 6: ? in a rule matches any one character, as the DJI rule matches
+ * any PID on interface 2 */
+static void TestAutoWildcard(void)
+{
+    static const SDL_SerialAutoRule rules[1] = {
+        { "USB\\VID_2CA3&PID_????&MI_02\\", "dji", 0x2CA3, 0 }
+    };
+    uint16_t vendor = 0, product = 0;
+
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA3&PID_1020&MI_02\\7&2F&0&0002") == &rules[0]);
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA3&PID_1030&MI_02\\1") == &rules[0]);
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "usb\\vid_2ca3&pid_001f&mi_02\\1") == &rules[0]);
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA3&PID_1020&MI_04\\1") == NULL);
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA4&PID_1020&MI_02\\1") == NULL);
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA3&PID_10200&MI_02\\1") == NULL);
+    /* ? needs a character: an ID that ends inside the pattern fails */
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA3&PID_10") == NULL);
+    CHECK(SDL_Serial_MatchAuto(rules, 1, "USB\\VID_2CA3&PID_1020&MI_02") == NULL);
+    /* A hint prefix still compares ? as itself */
+    CHECK(!SDL_Serial_InstanceMatches("USB\\VID_2CA3&PID_????", "USB\\VID_2CA3&PID_1020"));
+    CHECK(SDL_Serial_InstanceMatches("USB\\VID_2CA3&PID_????", "USB\\VID_2CA3&PID_????&MI_02"));
+
+    CHECK(SDL_Serial_ParseUSBIds("USB\\VID_2CA3&PID_1020&MI_02\\7&2F&0&0002", &vendor, &product) && vendor == 0x2CA3 && product == 0x1020);
+    CHECK(SDL_Serial_ParseUSBIds("usb\\vid_2ca3&pid_001f\\1", &vendor, &product) && vendor == 0x2CA3 && product == 0x001F);
+    CHECK(SDL_Serial_ParseUSBIds("FTDIBUS\\VID_0403+PID_6001+A1B2C3D4A\\0000", &vendor, &product) && vendor == 0x0403 && product == 0x6001);
+    vendor = product = 7;
+    CHECK(!SDL_Serial_ParseUSBIds("USB\\VID_2CA3&PID_10G0", &vendor, &product) && vendor == 7 && product == 7);
+    CHECK(!SDL_Serial_ParseUSBIds("USB\\VID_2CA3&PID_102", &vendor, &product));
+    CHECK(!SDL_Serial_ParseUSBIds("USB\\VID_2CA3", &vendor, &product));
+    CHECK(!SDL_Serial_ParseUSBIds("USB\\PID_1020", &vendor, &product));
+    CHECK(!SDL_Serial_ParseUSBIds(NULL, &vendor, &product));
+    CHECK(!SDL_Serial_ParseUSBIds("", &vendor, &product));
+}
+
+/* Part 6: a half axis in a gamepad mapping */
+static void TestHalfAxis(void)
+{
+    const SDL_SerialMapInput positive = SDL_Serial_MapHalfAxis(4, true);
+    const SDL_SerialMapInput negative = SDL_Serial_MapHalfAxis(5, false);
+
+    CHECK(positive.kind == SDL_SERIAL_MAP_AXIS_POSITIVE && positive.target == 4);
+    CHECK(negative.kind == SDL_SERIAL_MAP_AXIS_NEGATIVE && negative.target == 5);
+}
+
 static void TestScaling(void)
 {
     CHECK(SDL_Serial_ScaleSigned(0, -64, 63) == 0);
@@ -720,6 +764,8 @@ int main(void)
     TestQueue();
     TestHint();
     TestAutoRules();
+    TestAutoWildcard();
+    TestHalfAxis();
     TestScaling();
     TestBase();
     return H_Finish();

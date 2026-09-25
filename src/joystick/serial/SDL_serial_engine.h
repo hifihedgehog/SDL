@@ -221,14 +221,18 @@ extern bool SDL_Serial_InstanceMatches(const char *prefix, const char *instance_
  * such devices add rows to the driver's table. */
 typedef struct SDL_SerialAutoRule
 {
-    const char *prefix; /* Device instance ID prefix */
+    const char *prefix; /* Device instance ID prefix, where ? matches any one character */
     const char *token;  /* Protocol token */
     uint16_t vendor_id;
-    uint16_t product_id;
+    uint16_t product_id; /* 0 takes the PID from the instance ID */
 } SDL_SerialAutoRule;
 
 /* The first rule whose prefix starts the instance ID, ignoring case, or NULL */
 extern const SDL_SerialAutoRule *SDL_Serial_MatchAuto(const SDL_SerialAutoRule *rules, int nrules, const char *instance_id);
+
+/* The VID_ and PID_ fields of a USB device instance ID, four hex digits
+ * each. False when either is missing or malformed. */
+extern bool SDL_Serial_ParseUSBIds(const char *instance_id, uint16_t *vendor_id, uint16_t *product_id);
 
 typedef enum SDL_SerialPortChange
 {

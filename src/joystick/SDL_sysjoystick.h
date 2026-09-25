@@ -271,6 +271,7 @@ extern SDL_JoystickDriver SDL_XINPUT_JoystickDriver;
 extern SDL_JoystickDriver SDL_DINPUT_JoystickDriver;
 extern SDL_JoystickDriver SDL_BLE_JoystickDriver;
 extern SDL_JoystickDriver SDL_SERIAL_JoystickDriver;
+extern SDL_JoystickDriver SDL_DJITCP_JoystickDriver;
 extern SDL_JoystickDriver SDL_PS2_JoystickDriver;
 extern SDL_JoystickDriver SDL_PSP_JoystickDriver;
 extern SDL_JoystickDriver SDL_VITA_JoystickDriver;

@@ -14,6 +14,7 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 | Intel Wireless Series base station | 8086:C013 | 0, alternate setting 1 | `USB\VID_8086&PID_C013&MI_00` if Windows lists the device as composite, otherwise the device | `SDL_HINT_JOYSTICK_HIDAPI_INTEL_WIRELESS` |
 | Xbox 360 Big Button receiver | 045E:02A0 | class 0xFF, subclass 0x5D, protocol 4 | the device or the interface child that carries that interface | `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` |
 | Gametrak, Windows only | 14B7:0982 | 0 | the device | `SDL_HINT_JOYSTICK_HIDAPI_GAMETRAK` |
+| DJI RC (RM330) | 2CA3:1023 | class 0xFF, subclass 0x43, any protocol | `USB\VID_2CA3&PID_1023&MI_01`, the DUML bulk interface | `SDL_HINT_JOYSTICK_HIDAPI_DJI_REMOTE` |
 
 ## How the path works
 
@@ -38,6 +39,10 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   endpoint, so each write goes out as SET_REPORT with its first byte in
   wValue. On Linux and macOS the platform backend keeps it. See
   [README-hid-devices.md](README-hid-devices.md).
+- A class rule can ignore the protocol. The DJI RC's DUML interface is found
+  by class and subclass alone, as dji-firmware-tools and DJI-RC-Emulator find
+  it, and its bulk writes go out unchanged. See
+  [README-dji-remotes.md](README-dji-remotes.md).
 
 ## Known limits
 
