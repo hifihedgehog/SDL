@@ -19,10 +19,10 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 
-/* Train controllers. See SDL_hidapi_train_proto.h. */
+/* Train controllers. See SDL_train_proto.h. */
 
-#include "SDL_hidapi_train_proto.h"
-#include "../usb_ids.h"
+#include "SDL_train_proto.h"
+#include "usb_ids.h"
 
 #include <string.h>
 

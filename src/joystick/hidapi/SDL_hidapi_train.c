@@ -26,7 +26,7 @@
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
 #include "../../hidapi/SDL_hidapi_c.h"
-#include "SDL_hidapi_train_proto.h"
+#include "../SDL_train_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_TRAIN
 
@@ -38,7 +38,7 @@
  * no HID class descriptor, read through libusb once WinUSB is bound. The
  * reports need no request, and the driver asks for no report descriptor.
  * Every output is a vendor control transfer on the handle the libusb
- * backend holds. The protocol lives in SDL_hidapi_train_proto.c, where the
+ * backend holds. The protocol lives in SDL_train_proto.c, where the
  * offline tests run it. */
 
 SDL_COMPILE_TIME_ASSERT(train_hat_up, SDL_TRAIN_HAT_UP == SDL_HAT_UP);
