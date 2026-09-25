@@ -50,6 +50,7 @@
 #include "../serial/SDL_serial_vrinsight_proto.h"
 #include "../serial/SDL_serial_warrior_proto.h"
 #include "../serial/SDL_serial_zhenhua_proto.h"
+#include "../dji/SDL_dji_remote_proto.h"
 
 /* The pure engine carries the Windows values */
 SDL_COMPILE_TIME_ASSERT(serial_noparity, NOPARITY == SDL_SERIAL_NOPARITY);
@@ -149,12 +150,20 @@ static const SDL_SerialModule *const serial_modules[] = {
     &SDL_SerialIBusModule,
     &SDL_SerialJVSModule,
     &SDL_SerialVRinsightModule,
-    &SDL_SerialKettlerModule
+    &SDL_SerialKettlerModule,
+    &SDL_DJIRemoteRCN1Module,
+    &SDL_DJIRemoteMavicMiniModule,
+    &SDL_DJIRemotePhantom3Module,
+    &SDL_DJIRemotePhantom2Module
 };
 
 /* Ports whose device identifies itself, by device instance ID prefix. The
  * parts that add such devices add rows. The last row is empty. */
 static const SDL_SerialAutoRule serial_auto_rules[] = {
+    /* The protocol port of the DJI RC-N1 family, interface 2. DJI's VCOM
+       driver binds it on PIDs 1020 and 1030, and other RC-N1 PIDs are not
+       recorded, so any DJI PID matches (hifihedgehog/SDL#33 Part 6). */
+    { "USB\\VID_2CA3&PID_????&MI_02\\", "dji", 0x2CA3, 0 },
     { NULL, NULL, 0, 0 }
 };
 
@@ -180,6 +189,8 @@ typedef struct SERIAL_Port
     char key[SDL_SERIAL_KEY_LENGTH]; /* As written in the hint, or an instance ID */
     const SDL_SerialModule *module;
     const SDL_SerialAutoRule *rule; /* For a port that identifies itself */
+    uint16_t usb_vendor;            /* For a port that identifies itself */
+    uint16_t usb_product;
     bool auto_seen;                 /* Its device was present at the last scan */
     void *module_state;
     SDL_SerialEngine engine;
@@ -862,6 +873,17 @@ static SERIAL_Port *SERIAL_StartPort(const char *key, const SDL_SerialModule *mo
     SDL_strlcpy(port->key, key, sizeof(port->key));
     port->module = module;
     port->rule = rule;
+    if (rule) {
+        port->usb_vendor = rule->vendor_id;
+        port->usb_product = rule->product_id;
+        if (!port->usb_product) {
+            uint16_t vendor, product;
+
+            if (SDL_Serial_ParseUSBIds(key, &vendor, &product)) {
+                port->usb_product = product;
+            }
+        }
+    }
     port->handle = INVALID_HANDLE_VALUE;
     port->module_state = SDL_calloc(1, module->state_size);
     port->mutex = SDL_CreateMutex();
@@ -1123,7 +1145,7 @@ static void SERIAL_CheckPresence(SERIAL_Port *port)
             s->joystick_identity = identity;
             s->instance_id = SDL_GetNextObjectID();
             if (port->rule) {
-                s->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_USB, port->rule->vendor_id, port->rule->product_id, 0, NULL, identity.name, 's', identity.type);
+                s->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_USB, port->usb_vendor, port->usb_product, 0, NULL, identity.name, 's', identity.type);
             } else {
                 s->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_SERIAL, 0, 0, 0, NULL, identity.name, 's', identity.type);
             }
@@ -1505,6 +1527,14 @@ static void SERIAL_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
         break;
     case SDL_SERIAL_MAP_HAT:
         out->kind = EMappingKind_Hat;
+        break;
+    case SDL_SERIAL_MAP_AXIS_POSITIVE:
+        out->kind = EMappingKind_Axis;
+        out->half_axis_positive = true;
+        break;
+    case SDL_SERIAL_MAP_AXIS_NEGATIVE:
+        out->kind = EMappingKind_Axis;
+        out->half_axis_negative = true;
         break;
     default:
         out->kind = EMappingKind_None;

@@ -618,6 +618,23 @@ int SDL_Serial_ParseHint(const char *hint, const SDL_SerialModule *const *module
     return count;
 }
 
+/* Like SDL_Serial_InstanceMatches, and ? in the pattern matches any one
+ * character */
+static bool Serial_PatternMatches(const char *pattern, const char *instance_id)
+{
+    if (!pattern || !instance_id || !*pattern) {
+        return false;
+    }
+    while (*pattern) {
+        if (!*instance_id || (*pattern != '?' && Serial_Lower(*pattern) != Serial_Lower(*instance_id))) {
+            return false;
+        }
+        ++pattern;
+        ++instance_id;
+    }
+    return true;
+}
+
 const SDL_SerialAutoRule *SDL_Serial_MatchAuto(const SDL_SerialAutoRule *rules, int nrules, const char *instance_id)
 {
     int i;
@@ -626,11 +643,53 @@ const SDL_SerialAutoRule *SDL_Serial_MatchAuto(const SDL_SerialAutoRule *rules, 
         return NULL;
     }
     for (i = 0; i < nrules; ++i) {
-        if (SDL_Serial_InstanceMatches(rules[i].prefix, instance_id)) {
+        if (Serial_PatternMatches(rules[i].prefix, instance_id)) {
             return &rules[i];
         }
     }
     return NULL;
+}
+
+static bool Serial_ParseHexField(const char *text, const char *field, uint16_t *value)
+{
+    const size_t field_length = strlen(field);
+    uint16_t result = 0;
+    size_t i, j;
+
+    for (i = 0; text[i]; ++i) {
+        for (j = 0; j < field_length && text[i + j] && Serial_Lower(text[i + j]) == Serial_Lower(field[j]); ++j) {
+        }
+        if (j < field_length) {
+            continue;
+        }
+        for (j = 0; j < 4; ++j) {
+            const char c = Serial_Lower(text[i + field_length + j]);
+
+            if (c >= '0' && c <= '9') {
+                result = (uint16_t)((result << 4) | (uint16_t)(c - '0'));
+            } else if (c >= 'a' && c <= 'f') {
+                result = (uint16_t)((result << 4) | (uint16_t)(c - 'a' + 10));
+            } else {
+                return false;
+            }
+        }
+        *value = result;
+        return true;
+    }
+    return false;
+}
+
+bool SDL_Serial_ParseUSBIds(const char *instance_id, uint16_t *vendor_id, uint16_t *product_id)
+{
+    uint16_t vendor, product;
+
+    if (!instance_id || !Serial_ParseHexField(instance_id, "VID_", &vendor) ||
+        !Serial_ParseHexField(instance_id, "PID_", &product)) {
+        return false;
+    }
+    *vendor_id = vendor;
+    *product_id = product;
+    return true;
 }
 
 void SDL_Serial_DiffPorts(const SDL_SerialPortEntry *old_entries, int nold, const SDL_SerialPortEntry *new_entries, int nnew, SDL_SerialPortChange *old_changes, SDL_SerialPortChange *new_changes)

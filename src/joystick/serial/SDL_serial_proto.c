@@ -419,6 +419,15 @@ SDL_SerialMapInput SDL_Serial_MapHat(int hat, uint8_t bit)
     return input;
 }
 
+SDL_SerialMapInput SDL_Serial_MapHalfAxis(int axis, bool positive)
+{
+    SDL_SerialMapInput input;
+
+    input.kind = positive ? SDL_SERIAL_MAP_AXIS_POSITIVE : SDL_SERIAL_MAP_AXIS_NEGATIVE;
+    input.target = (uint8_t)axis;
+    return input;
+}
+
 SDL_SerialLine SDL_Serial_Line(uint32_t rate, int data_bits, SDL_SerialParity parity, int stop_bits, SDL_SerialFlow flow, bool dtr, bool rts)
 {
     SDL_SerialLine line;
