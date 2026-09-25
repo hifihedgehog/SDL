@@ -139,12 +139,33 @@ static void TestFraming(void)
     CHECK(!SDL_Nimbus_DecodeReport(test1, 18, true, NULL));
 }
 
+/* 5: the decode keeps no state, so nothing outlives a reconnect: after a
+   report with every control held, one with none releases everything */
+static void TestReconnect(void)
+{
+    uint8_t r[18];
+    SDL_NimbusState s;
+    int i;
+
+    memset(r, 0x7F, sizeof(r));
+    r[0] = 0x01;
+    CHECK(Decode(r, sizeof(r), true, &s) && s.buttons == 0x7F && s.hat == 0);
+    memset(r, 0x00, sizeof(r));
+    r[0] = 0x01;
+    CHECK(Decode(r, sizeof(r), true, &s) && s.buttons == 0 && s.hat == 0);
+    for (i = 0; i < 4; ++i) {
+        CHECK(s.axes[i] == 0);
+    }
+    CHECK(s.axes[4] == -32768 && s.axes[5] == -32768);
+}
+
 int main(void)
 {
     TestControls(true);
     TestControls(false);
     TestSticks();
     TestFraming();
+    TestReconnect();
 
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);
