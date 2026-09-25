@@ -229,6 +229,9 @@ struct joystick_hwdata
     int sub;
     uint32_t generation;
     uint64_t sequence; /* The last snapshot sent */
+    bool send_initial; /* The state Open took is not sent yet */
+    Uint64 initial_stamp;
+    SDL_SerialControls initial;
 };
 
 static SDL_Mutex *serial_lock; /* The hint string, and the port list for the notification callback */
@@ -1336,12 +1339,24 @@ static void SERIAL_SendControls(SDL_Joystick *joystick, const SDL_SerialControls
     }
 }
 
+/* The state Open took goes out before anything newer. SDL allocates a
+ * joystick's axes and buttons only after Open returns, so Open sends
+ * nothing itself. */
+static void SERIAL_SendInitial(SDL_Joystick *joystick)
+{
+    struct joystick_hwdata *hwdata = joystick->hwdata;
+
+    if (hwdata->send_initial) {
+        hwdata->send_initial = false;
+        SERIAL_SendControls(joystick, &hwdata->initial, hwdata->initial_stamp);
+    }
+}
+
 static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
 {
     SERIAL_Port *port;
     SERIAL_Sub *s;
     struct joystick_hwdata *hwdata;
-    SDL_SerialControls latest;
     int sub;
 
     if (!SERIAL_GetDevice(device_index, &port, &sub)) {
@@ -1365,12 +1380,17 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
         SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
     }
 
-    /* The state so far. Queued snapshots up to it are skipped. */
+    /* The state so far, sent by the first update. Queued snapshots up to it
+       are skipped. */
     SDL_LockMutex(port->mutex);
-    latest = s->latest;
+    hwdata->initial = s->latest;
     hwdata->sequence = s->latest_sequence;
     SDL_UnlockMutex(port->mutex);
-    SERIAL_SendControls(joystick, &latest, SDL_GetTicksNS());
+    /* A ball reports motion, and motion from before the open is not state */
+    hwdata->initial.ball[0] = 0;
+    hwdata->initial.ball[1] = 0;
+    hwdata->initial_stamp = SDL_GetTicksNS();
+    hwdata->send_initial = true;
     return true;
 }
 
@@ -1463,6 +1483,7 @@ static void SERIAL_JoystickUpdate(SDL_Joystick *joystick)
     if (!hwdata || !hwdata->port) {
         return;
     }
+    SERIAL_SendInitial(joystick);
     port = hwdata->port;
     SDL_LockMutex(port->mutex);
     while (count < SDL_SERIAL_QUEUE_ENTRIES && SDL_Serial_PopQueue(&port->queue, &entries[count])) {
@@ -1482,6 +1503,7 @@ static void SERIAL_JoystickUpdate(SDL_Joystick *joystick)
             entry->sequence <= target->hwdata->sequence) {
             continue;
         }
+        SERIAL_SendInitial(target);
         target->hwdata->sequence = entry->sequence;
         SERIAL_SendControls(target, &entry->controls, entry->stamp_ns);
     }
