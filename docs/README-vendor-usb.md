@@ -16,6 +16,7 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 | Gametrak, Windows only | 14B7:0982 | 0 | the device | `SDL_HINT_JOYSTICK_HIDAPI_GAMETRAK` |
 | DJI RC (RM330) | 2CA3:1023 | class 0xFF, subclass 0x43, any protocol | `USB\VID_2CA3&PID_1023&MI_01`, the DUML bulk interface | `SDL_HINT_JOYSTICK_HIDAPI_DJI_REMOTE` |
 | I-Force wheels and joysticks, Windows only | the 14 IDs in [README-iforce.md](README-iforce.md) | 0, any class | the device | `SDL_HINT_JOYSTICK_HIDAPI_IFORCE` |
+| Namco GunCon 2 and EMS LCD TopGun | 0B9A:016A | 0, any class | the device | `SDL_HINT_JOYSTICK_HIDAPI_GUNCON` |
 
 ## How the path works
 
@@ -50,6 +51,10 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   Windows only. Where a rule does not serve the platform, libusb treats the
   device as if it had no rule, so on Linux the kernel's driver keeps it. See
   [README-iforce.md](README-iforce.md).
+- The GunCon 2 has no OUT endpoint, so its mode request goes out as
+  SET_REPORT on the control pipe, as the Gametrak's writes do. No platform
+  has a driver for it, so its rule serves every platform. See
+  [README-guncon.md](README-guncon.md).
 
 ## Known limits
 

@@ -146,3 +146,8 @@ protocol_test(ringcon "${PROTOCOL_TESTS}/testringcon.c"
 # in src/joystick, since the serial driver uses it too.
 protocol_test(iforce "${PROTOCOL_TESTS}/testiforce.c"
     "${PROTOCOL_JOYSTICK_SHARED}/SDL_iforce_proto.c")
+
+# hifihedgehog/SDL#33 Part 9: the GunCon 2, and the GunCon 3's key,
+# checksum and layout.
+protocol_test(guncon "${PROTOCOL_TESTS}/testguncon.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_guncon_proto.c")
