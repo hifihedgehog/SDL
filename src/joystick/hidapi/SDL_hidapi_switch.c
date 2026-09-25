@@ -30,6 +30,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
 #include "SDL_hidapi_nintendo.h"
+#include "SDL_hidapi_switch_ringcon_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_SWITCH
 
@@ -117,6 +118,12 @@ typedef enum
     k_eSwitchSubcommandIDs_EnableIMU = 0x40,
     k_eSwitchSubcommandIDs_SetIMUSensitivity = 0x41,
     k_eSwitchSubcommandIDs_EnableVibration = 0x48,
+    // The external device on the rail, the Ring-Con (eden's names)
+    k_eSwitchSubcommandIDs_SetExternalConfig = 0x58,
+    k_eSwitchSubcommandIDs_GetExternalDeviceInfo = 0x59,
+    k_eSwitchSubcommandIDs_EnableExternalPolling = 0x5A,
+    k_eSwitchSubcommandIDs_DisableExternalPolling = 0x5B,
+    k_eSwitchSubcommandIDs_SetExternalFormatConfig = 0x5C,
 } ESwitchSubcommandIDs;
 
 typedef enum
@@ -290,6 +297,19 @@ typedef struct
 } SwitchProprietaryOutputPacket_t;
 #pragma pack()
 
+// The Ring-Con module's constants must match the driver's
+SDL_COMPILE_TIME_ASSERT(ringcon_input_mode, SDL_RINGCON_SUBCMD_SET_INPUT_MODE == k_eSwitchSubcommandIDs_SetInputReportMode);
+SDL_COMPILE_TIME_ASSERT(ringcon_mcu_config, SDL_RINGCON_SUBCMD_SET_MCU_CONFIG == k_eSwitchSubcommandIDs_SetMCUConfig);
+SDL_COMPILE_TIME_ASSERT(ringcon_mcu_state, SDL_RINGCON_SUBCMD_SET_MCU_STATE == k_eSwitchSubcommandIDs_SetMCUState);
+SDL_COMPILE_TIME_ASSERT(ringcon_external_config, SDL_RINGCON_SUBCMD_SET_EXTERNAL_CONFIG == k_eSwitchSubcommandIDs_SetExternalConfig);
+SDL_COMPILE_TIME_ASSERT(ringcon_device_info, SDL_RINGCON_SUBCMD_GET_EXTERNAL_DEVICE_INFO == k_eSwitchSubcommandIDs_GetExternalDeviceInfo);
+SDL_COMPILE_TIME_ASSERT(ringcon_polling_on, SDL_RINGCON_SUBCMD_ENABLE_EXTERNAL_POLLING == k_eSwitchSubcommandIDs_EnableExternalPolling);
+SDL_COMPILE_TIME_ASSERT(ringcon_polling_off, SDL_RINGCON_SUBCMD_DISABLE_EXTERNAL_POLLING == k_eSwitchSubcommandIDs_DisableExternalPolling);
+SDL_COMPILE_TIME_ASSERT(ringcon_format, SDL_RINGCON_SUBCMD_SET_EXTERNAL_FORMAT_CONFIG == k_eSwitchSubcommandIDs_SetExternalFormatConfig);
+SDL_COMPILE_TIME_ASSERT(ringcon_reply, SDL_RINGCON_REPORT_REPLY == k_eSwitchInputReportIDs_SubcommandReply);
+SDL_COMPILE_TIME_ASSERT(ringcon_full, SDL_RINGCON_REPORT_FULL == k_eSwitchInputReportIDs_FullControllerState);
+SDL_COMPILE_TIME_ASSERT(ringcon_args, SDL_RINGCON_ARGS_MAX == sizeof(((SwitchSubcommandOutputPacket_t *)0)->rgucSubcommandData));
+
 /* Enhanced report hint mode:
  * "0": enhanced features are never used
  * "1": enhanced features are always used
@@ -353,6 +373,8 @@ typedef struct
     Uint8 m_ucNfcStatusMisses;  // consecutive failed presence reads while a tag is published
     Uint64 m_ulNfcMissTicks;    // last counted failure, one count per outstanding read
     Uint64 m_ulNfcReadTicks;    // last timer-driven solicitation (0x04 scanning / 0x06 presence read)
+    // Ring-Con on a right Joy-Con's rail (hifihedgehog/SDL#33 Part 13), lowest MCU priority
+    SDL_RingConMachine m_RingCon;
     Uint64 m_ulForceUSBTicks;   // last ForceUSB keepalive nudge (rate bound)
     bool m_bHasSensorData;
     Uint64 m_ulLastInput;
@@ -1009,6 +1031,9 @@ static void UpdateInputMode(SDL_DriverSwitch_Context *ctx)
         // which also carries the full controller state, so buttons/sticks/IMU
         // keep flowing.
         input_mode = k_eSwitchInputReportIDs_FullControllerAndMcuState;
+    } else if (SDL_RingCon_Engaged(&ctx->m_RingCon)) {
+        // The Ring-Con's strain rides in the standard full report
+        input_mode = k_eSwitchInputReportIDs_FullControllerState;
     } else if (ctx->m_bReportSensors) {
         input_mode = GetSensorInputMode(ctx);
     } else {
@@ -1479,6 +1504,13 @@ static void UpdateNfc(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uin
        Idle and Failed paths clear the tag on entry. */
     if (ctx->m_bNfcTagPresent && now >= ctx->m_ulNfcLastTagTicks + SWITCH_NFC_TAG_GONE_MS) {
         SetNfcTagUid(ctx, joystick, NULL);
+    }
+
+    /* The Ring-Con hands the MCU over on its own update, with a stop of up to
+       four commands. Take the MCU once that stop is done. */
+    if ((ctx->m_ucNfcState == k_eSwitchNfcState_Idle || ctx->m_ucNfcState == k_eSwitchNfcState_Failed) &&
+        SDL_RingCon_Engaged(&ctx->m_RingCon)) {
+        return;
     }
 
     switch (ctx->m_ucNfcState) {
@@ -2017,6 +2049,12 @@ static void UpdateIR(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint
         return;
     }
 
+    // The Ring-Con hands the MCU over on its own update: take it once its stop is done
+    if ((ctx->m_ucIRState == k_eSwitchIRState_Idle || ctx->m_ucIRState == k_eSwitchIRState_Failed) &&
+        SDL_RingCon_Engaged(&ctx->m_RingCon)) {
+        return;
+    }
+
     switch (ctx->m_ucIRState) {
     case k_eSwitchIRState_Idle:
         /* Take the MCU. If the NFC machine holds it powered, suspend first:
@@ -2058,6 +2096,129 @@ static void UpdateIR(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint
         }
         break;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Ring Fit Adventure Ring-Con (hifihedgehog/SDL#33 Part 13).
+ *
+ * The Ring-Con rides a right Joy-Con's rail and reports one strain value
+ * through it. SDL_hidapi_switch_ringcon_proto.c holds the commands, the reply
+ * gates, the strain decode and the machine, which takes one step per update
+ * tick like the NFC machine. This part sends what the machine returns, routes
+ * the 0x21 replies and 0x30 reports to it, and posts the strain as axis
+ * SDL_GAMEPAD_AXIS_COUNT + 1. The MCU goes to the NIR camera first, NFC
+ * second and the Ring-Con last, the order eden applies. Opt-in by hint,
+ * because the MCU costs battery.
+ * ------------------------------------------------------------------------- */
+
+#define SWITCH_RINGCON_AXIS (SDL_GAMEPAD_AXIS_COUNT + 1)
+
+/* A right Joy-Con over Bluetooth, standalone or the right half of a pair: a
+   Joy-Con on the Ring-Con's rail cannot sit in the charging grip. */
+static bool IsRingConSupported(SDL_DriverSwitch_Context *ctx)
+{
+    return !ctx->m_bInputOnly && ctx->device->is_bluetooth &&
+           ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight;
+}
+
+// True while the NIR camera or NFC holds the MCU or has demand for it
+static bool IsMcuWantedAboveRingCon(SDL_DriverSwitch_Context *ctx)
+{
+    if (IsIROwningMcu(ctx) || ctx->m_bNfcActive) {
+        return true;
+    }
+    if (IsIRSupported(ctx) && ctx->m_bReportSensors &&
+        SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR, false)) {
+        return true;
+    }
+    return IsNfcSupported(ctx) && SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC, false);
+}
+
+static const char *GetRingConStopName(int reason)
+{
+    switch (reason) {
+    case SDL_RINGCON_STOP_DISABLED:
+        return "the hint is off";
+    case SDL_RINGCON_STOP_YIELD:
+        return "the NIR camera or NFC wants the MCU";
+    case SDL_RINGCON_STOP_ABSENT:
+        return "no Ring-Con answered";
+    case SDL_RINGCON_STOP_FAILED:
+        return "a command went unanswered";
+    case SDL_RINGCON_STOP_WATCHDOG:
+        return "no strain for 2 s";
+    default:
+        return "unknown";
+    }
+}
+
+static void ApplyRingConOutput(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, const SDL_RingConOutput *out)
+{
+    if (out->start_began) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con Ring-Con: starting");
+    }
+    if (out->stop_began) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con Ring-Con: stopping, %s", GetRingConStopName(out->stop_began));
+    }
+    if (out->send) {
+        if (out->command.subcommand == k_eSwitchSubcommandIDs_SetInputReportMode) {
+            // Keep the mode bookkeeping in agreement so nothing reverts it
+            ctx->m_nCurrentInputMode = out->command.args[0];
+        }
+        SendSubcommandAsync(ctx, (ESwitchSubcommandIDs)out->command.subcommand, out->command.args, out->command.length);
+    }
+    if (out->polling_changed && joystick) {
+        SDL_PropertiesID props = SDL_GetJoystickProperties(joystick);
+
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Joy-Con Ring-Con: %s", out->polling ? "polling" : "not polling");
+        SDL_SetBooleanProperty(props, SDL_RINGCON_PROP_ACTIVE, out->polling);
+        if (!out->polling) {
+            // The axis reads 0 while no Ring-Con polls
+            SDL_SetNumberProperty(props, SDL_RINGCON_PROP_REST, 0);
+            SDL_SendJoystickAxis(SDL_GetTicksNS(), joystick, SWITCH_RINGCON_AXIS, 0);
+        }
+    }
+}
+
+static void HandleRingConReply(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now, int size)
+{
+    SDL_RingConOutput out;
+
+    SDL_RingCon_OnReply(&ctx->m_RingCon, ctx->m_rgucReadBuffer, (size_t)size, now, &out);
+    ApplyRingConOutput(ctx, joystick, &out);
+}
+
+static void HandleRingConReport(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now, int size)
+{
+    SDL_RingConStrain strain;
+
+    SDL_RingCon_OnFullReport(&ctx->m_RingCon, ctx->m_rgucReadBuffer, (size_t)size, now, &strain);
+    if (strain.post) {
+        /* Data axis: seed past the analog anti-jitter gate, as the NIR axis
+           does (hifihedgehog/SDL#14). The axis keeps its value through the
+           0x0000 samples the module does not post. */
+        SDL_SeedJoystickDataAxis(joystick, SWITCH_RINGCON_AXIS, strain.value);
+        SDL_SendJoystickAxis(SDL_GetTicksNS(), joystick, SWITCH_RINGCON_AXIS, strain.value);
+    }
+    if (strain.rest_changed) {
+        SDL_SetNumberProperty(SDL_GetJoystickProperties(joystick), SDL_RINGCON_PROP_REST, strain.rest);
+    }
+}
+
+// One machine step per update tick. The hint is read here, as the NFC machine reads its own.
+static void UpdateRingCon(SDL_DriverSwitch_Context *ctx, SDL_Joystick *joystick, Uint64 now)
+{
+    SDL_RingConOutput out;
+    Uint8 ucRestoreMode;
+
+    if (!IsRingConSupported(ctx)) {
+        return;
+    }
+    ucRestoreMode = ctx->m_bReportSensors ? GetSensorInputMode(ctx) : GetDefaultInputMode(ctx);
+    SDL_RingCon_Update(&ctx->m_RingCon, now,
+                       SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_JOYCON_RINGCON, false),
+                       IsMcuWantedAboveRingCon(ctx), ucRestoreMode, &out);
+    ApplyRingConOutput(ctx, joystick, &out);
 }
 
 static void SetEnhancedModeAvailable(SDL_DriverSwitch_Context *ctx)
@@ -2889,6 +3050,11 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     ctx->m_bNfcTagPresent = false;
     ctx->m_ucNfcRounds = 0;
 
+    /* Ring-Con machine: fresh per open. With the hint on, a start waits for
+       the first update tick and a free MCU. */
+    SDL_RingCon_Open(&ctx->m_RingCon, IsRingConSupported(ctx) &&
+                                          SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_JOYCON_RINGCON, false));
+
     // Initialize the joystick capabilities
     if (ctx->m_bSwitch2) {
         joystick->nbuttons = SDL_GAMEPAD_NUM_SWITCH2_BUTTONS;
@@ -2897,21 +3063,27 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     } else {
         joystick->nbuttons = SDL_GAMEPAD_NUM_SWITCH_BUTTONS;
     }
-    /* A right Joy-Con exposes one extra axis beyond the gamepad axes for
-       the NIR camera's average-intensity scalar (0 until the camera is
-       enabled via SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR + sensors),
+    /* A right Joy-Con exposes two extra axes beyond the gamepad axes: the
+       NIR camera's average-intensity scalar at SDL_GAMEPAD_AXIS_COUNT (0
+       until the camera is enabled via SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR
+       + sensors) and the Ring-Con's strain at SDL_GAMEPAD_AXIS_COUNT + 1 (0
+       until a Ring-Con polls, SDL_HINT_JOYSTICK_HIDAPI_JOYCON_RINGCON),
        standalone or as the right half of a combined pair (fork issue #26).
        Both halves of a pair run this open against the one shared joystick,
        so the sibling's pass must never shrink a count the right half
        already registered: grow-only, order-proof either way around. The
        Switch 2 family never reports this controller type, so gen-2 pairs
        end at the plain count. */
-    if (ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight) {
-        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT + 1;
-    } else if (joystick->naxes < SDL_GAMEPAD_AXIS_COUNT) {
-        joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
-    }
+    joystick->naxes = SDL_RingCon_AxisCount(ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight,
+                                            joystick->naxes, SDL_GAMEPAD_AXIS_COUNT);
     joystick->nhats = 1;
+
+    if (IsRingConSupported(ctx)) {
+        SDL_PropertiesID props = SDL_GetJoystickProperties(joystick);
+
+        SDL_SetBooleanProperty(props, SDL_RINGCON_PROP_ACTIVE, false);
+        SDL_SetNumberProperty(props, SDL_RINGCON_PROP_REST, 0);
+    }
 
     // Set up for input
     ctx->m_bSyncWrite = false;
@@ -4023,11 +4195,17 @@ static void HandleFullControllerState(SDL_Joystick *joystick, SDL_DriverSwitch_C
         if (bHasSensorData) {
             const Uint32 IMU_UPDATE_RATE_SAMPLE_FREQUENCY = 1000;
             Uint64 sensor_timestamp[3];
+            /* Oldest first. While the Ring-Con's format is set, bytes 37-48
+               hold its data in place of the oldest sample, so only the samples
+               at bytes 25-36 and 13-24 post. */
+            int rgnSample[3];
+            int nSamples = SDL_RingCon_ImuPostOrder(&ctx->m_RingCon, rgnSample);
+            int i;
 
             ctx->m_bHasSensorData = true;
 
-            // We got three IMU samples, calculate the IMU update rate and timestamps
-            ctx->m_unIMUSamples += 3;
+            // Calculate the IMU update rate and timestamps from the samples this report carries
+            ctx->m_unIMUSamples += (Uint32)nSamples;
             if (ctx->m_unIMUSamples >= IMU_UPDATE_RATE_SAMPLE_FREQUENCY) {
                 Uint64 now = SDL_GetTicksNS();
                 Uint64 elapsed = (now - ctx->m_ulIMUSampleTimestampNS);
@@ -4039,46 +4217,32 @@ static void HandleFullControllerState(SDL_Joystick *joystick, SDL_DriverSwitch_C
                 ctx->m_ulIMUSampleTimestampNS = now;
             }
 
-            ctx->m_ulTimestampNS += ctx->m_ulIMUUpdateIntervalNS;
-            sensor_timestamp[0] = ctx->m_ulTimestampNS;
-            ctx->m_ulTimestampNS += ctx->m_ulIMUUpdateIntervalNS;
-            sensor_timestamp[1] = ctx->m_ulTimestampNS;
-            ctx->m_ulTimestampNS += ctx->m_ulIMUUpdateIntervalNS;
-            sensor_timestamp[2] = ctx->m_ulTimestampNS;
+            for (i = 0; i < nSamples; ++i) {
+                ctx->m_ulTimestampNS += ctx->m_ulIMUUpdateIntervalNS;
+                sensor_timestamp[i] = ctx->m_ulTimestampNS;
+            }
 
             if (!ctx->device->parent ||
                 ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight) {
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO, sensor_timestamp[0], &imuState[2].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL, sensor_timestamp[0], &imuState[2].sAccelX);
-
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO, sensor_timestamp[1], &imuState[1].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL, sensor_timestamp[1], &imuState[1].sAccelX);
-
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO, sensor_timestamp[2], &imuState[0].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL, sensor_timestamp[2], &imuState[0].sAccelX);
+                for (i = 0; i < nSamples; ++i) {
+                    SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO, sensor_timestamp[i], &imuState[rgnSample[i]].sGyroX);
+                    SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL, sensor_timestamp[i], &imuState[rgnSample[i]].sAccelX);
+                }
             }
 
             if (ctx->device->parent &&
                 ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConLeft) {
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_L, sensor_timestamp[0], &imuState[2].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_L, sensor_timestamp[0], &imuState[2].sAccelX);
-
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_L, sensor_timestamp[1], &imuState[1].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_L, sensor_timestamp[1], &imuState[1].sAccelX);
-
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_L, sensor_timestamp[2], &imuState[0].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_L, sensor_timestamp[2], &imuState[0].sAccelX);
+                for (i = 0; i < nSamples; ++i) {
+                    SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_L, sensor_timestamp[i], &imuState[rgnSample[i]].sGyroX);
+                    SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_L, sensor_timestamp[i], &imuState[rgnSample[i]].sAccelX);
+                }
             }
             if (ctx->device->parent &&
                 ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight) {
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_R, sensor_timestamp[0], &imuState[2].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_R, sensor_timestamp[0], &imuState[2].sAccelX);
-
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_R, sensor_timestamp[1], &imuState[1].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_R, sensor_timestamp[1], &imuState[1].sAccelX);
-
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_R, sensor_timestamp[2], &imuState[0].sGyroX);
-                SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_R, sensor_timestamp[2], &imuState[0].sAccelX);
+                for (i = 0; i < nSamples; ++i) {
+                    SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_GYRO_R, sensor_timestamp[i], &imuState[rgnSample[i]].sGyroX);
+                    SendSensorUpdate(timestamp, joystick, ctx, SDL_SENSOR_ACCEL_R, sensor_timestamp[i], &imuState[rgnSample[i]].sAccelX);
+                }
             }
 
         } else if (ctx->m_bHasSensorData) {
@@ -4130,6 +4294,8 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
                     HandleNfcSubcommandReply(ctx, joystick, now, size);
                 } else if (IsIROwningMcu(ctx)) {
                     HandleIRSubcommandReply(ctx, now, size);
+                } else if (SDL_RingCon_Engaged(&ctx->m_RingCon)) {
+                    HandleRingConReply(ctx, joystick, now, size);
                 }
                 continue;
             }
@@ -4146,6 +4312,12 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
                 UpdateEnhancedModeOnEnhancedReport(ctx);
 
                 HandleFullControllerState(joystick, ctx, (SwitchStatePacket_t *)&ctx->m_rgucReadBuffer[1]);
+
+                // The Ring-Con's strain, bytes 39-40 of report 0x30 while it polls
+                if (ctx->m_rgucReadBuffer[0] == k_eSwitchInputReportIDs_FullControllerState &&
+                    SDL_RingCon_Engaged(&ctx->m_RingCon)) {
+                    HandleRingConReport(ctx, joystick, now, size);
+                }
 
                 /* The NFC/IR report's MCU tail: byte 49 = the MCU report type
                    (0x01 status, 0x03 IR image data). The IR stats header ends
@@ -4214,6 +4386,7 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
 
         UpdateIR(ctx, joystick, now);
         UpdateNfc(ctx, joystick, now);
+        UpdateRingCon(ctx, joystick, now);
 
         if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
@@ -4255,6 +4428,20 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
             if (ctx->m_nInitialInputMode == k_eSwitchInputReportIDs_FullControllerState) {
                 SetInputMode(ctx, k_eSwitchInputReportIDs_FullControllerState);
             }
+        }
+
+        /* The Ring-Con: end polling, reset the report format and suspend the
+           MCU, each waiting for its reply, as the NFC close does below, since
+           no later update tick is guaranteed. */
+        {
+            SDL_RingConCommand rgCommands[3];
+            int nCommands = SDL_RingCon_BuildCloseCommands(&ctx->m_RingCon, rgCommands);
+            int i;
+
+            for (i = 0; i < nCommands; ++i) {
+                WriteSubcommand(ctx, (ESwitchSubcommandIDs)rgCommands[i].subcommand, rgCommands[i].args, rgCommands[i].length, NULL);
+            }
+            SDL_RingCon_Init(&ctx->m_RingCon);
         }
 
         // Restore simple input mode for other applications
