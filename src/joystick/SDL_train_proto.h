@@ -21,7 +21,8 @@
 
 /* Train controllers, hifihedgehog/SDL#33 Part 10. Pure C99: no SDL
  * runtime and no I/O, so every decision here runs in the offline tests
- * exactly as it runs in the library.
+ * exactly as it runs in the library. The HIDAPI driver and the serial
+ * module share it.
  *
  * USB: Taito's two-handle Densha de GO! controllers for the PlayStation 2
  * (Type 2, Shinkansen, Ryojohen) and the one-lever Multi Train Controller
@@ -37,8 +38,8 @@
  * follow them. No code from them is copied.
  */
 
-#ifndef SDL_hidapi_train_proto_h_
-#define SDL_hidapi_train_proto_h_
+#ifndef SDL_train_proto_h_
+#define SDL_train_proto_h_
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -159,4 +160,4 @@ extern void SDL_Train_InitLine(SDL_TrainLineParser *parser);
  * event was recognized. */
 extern bool SDL_Train_FeedLine(SDL_TrainLineParser *parser, const uint8_t *bytes, size_t length, SDL_TrainState *state);
 
-#endif /* SDL_hidapi_train_proto_h_ */
+#endif /* SDL_train_proto_h_ */
