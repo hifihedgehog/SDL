@@ -19,6 +19,11 @@ if(SDL_PROTOCOL_TEST_ASAN AND MSVC)
     elseif(NOT CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
         message(FATAL_ERROR "ASan requires Release or RelWithDebInfo.")
     endif()
+    # Without optimization every load stays where the source puts it, so a
+    # read before a length check reaches the sanitizer.
+    foreach(config RELEASE RELWITHDEBINFO)
+        string(REPLACE "/O2" "/Od" CMAKE_C_FLAGS_${config} "${CMAKE_C_FLAGS_${config}}")
+    endforeach()
 endif()
 
 get_filename_component(PROTOCOL_SDL_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
@@ -44,7 +49,7 @@ function(protocol_test part)
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
         if(SDL_PROTOCOL_TEST_ASAN)
-            target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+            target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g -O0)
             target_link_options(${target} PRIVATE -fsanitize=address)
         endif()
     endif()
@@ -87,6 +92,51 @@ protocol_test(ps3ext "${PROTOCOL_TESTS}/testps3ext.c"
 protocol_test(xid "${PROTOCOL_TESTS}/testxid.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_xid_proto.c"
     "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+# hifihedgehog/SDL#33 Part 7: HID devices the fork can already open.
+protocol_test(hidcollections "${PROTOCOL_TESTS}/testhidcollections.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_collections.c")
+
+protocol_test(speedforce "${PROTOCOL_TESTS}/testspeedforce.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_speedforce_proto.c")
+
+protocol_test(rcadapter "${PROTOCOL_TESTS}/testrcadapter.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_rcadapter_proto.c")
+
+protocol_test(gamevoice "${PROTOCOL_TESTS}/testgamevoice.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_gamevoice_proto.c")
+
+protocol_test(p5glove "${PROTOCOL_TESTS}/testp5glove.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_p5glove_proto.c")
+
+protocol_test(dreamcheeky "${PROTOCOL_TESTS}/testdreamcheeky.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_dreamcheeky_proto.c")
+
+protocol_test(nia "${PROTOCOL_TESTS}/testnia.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_nia_proto.c")
+
+protocol_test(gametrak "${PROTOCOL_TESTS}/testgametrak.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_gametrak_proto.c")
+
+protocol_test(nimbus "${PROTOCOL_TESTS}/testnimbus.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_nimbus_proto.c")
+
+protocol_test(prodikeys "${PROTOCOL_TESTS}/testprodikeys.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_prodikeys_proto.c")
+
+protocol_test(riftdk1 "${PROTOCOL_TESTS}/testriftdk1.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_riftdk1_proto.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_riftdk1_fusion.c")
+if(NOT MSVC)
+    target_link_libraries(testprotocolriftdk1 PRIVATE m)
+endif()
+
+protocol_test(wmr "${PROTOCOL_TESTS}/testwmr.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_wmr_proto.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_wmr_key.c")
+if(NOT MSVC)
+    target_link_libraries(testprotocolwmr PRIVATE m)
+endif()
 
 # hifihedgehog/SDL#33 Part 13: the Ring-Con on a right Joy-Con.
 protocol_test(ringcon "${PROTOCOL_TESTS}/testringcon.c"

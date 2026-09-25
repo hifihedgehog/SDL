@@ -46,6 +46,9 @@ typedef enum SDL_VendorUSBPlatform
 #define SDL_VENDORUSB_MATCH_CLASS 0x01
 /* Output reports carry no report ID, so a first byte of 0x00 is data. */
 #define SDL_VENDORUSB_RAW_OUTPUT  0x02
+/* The rule serves Windows only. Elsewhere the platform HID backend keeps
+ * the device, and libusb treats the interface as it treats any other. */
+#define SDL_VENDORUSB_WINDOWS_ONLY 0x04
 
 /* One vendor interface of one device. */
 typedef struct SDL_VendorUSBRule
@@ -72,6 +75,10 @@ extern const SDL_VendorUSBRule *SDL_VendorUSB_FindRule(uint16_t vendor, uint16_t
 /* Whether any rule names this vendor and product. A device with a rule
  * enumerates only the interfaces its rules match. */
 extern bool SDL_VendorUSB_IsVendorDevice(uint16_t vendor, uint16_t product);
+
+/* Whether a rule serves this platform. NULL serves none. The libusb backend
+ * applies a rule only where it serves. */
+extern bool SDL_VendorUSB_RuleApplies(const SDL_VendorUSBRule *rule, SDL_VendorUSBPlatform platform);
 
 /* The devices libusb serves on this platform. An ID on the list, an Xbox
  * interface on macOS and Windows, and any vendor interface. */
