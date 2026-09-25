@@ -24,7 +24,8 @@
  * flow control, and DTR and RTS off, as the PC readers open the port. The
  * host writes one 00 byte after opening. Each event is five ASCII
  * characters and CR, decoded by SDL_train_proto.c. The controller
- * sends only on a change, so the joystick appears with its first event.
+ * sends an event when a control moves, so the joystick appears with its
+ * first event.
  */
 
 #ifndef SDL_serial_mastercontroller_proto_h_

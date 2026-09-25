@@ -237,7 +237,7 @@ static bool HIDAPI_DriverTrain_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Joy
     return SDL_Unsupported();
 }
 
-/* The raw output: 2 bytes on the Type 2, the 8-byte display payload on the
+/* The raw output: 2 bytes on the Type 2, the 8-byte output payload on the
    Shinkansen, one lamp byte on the Multi Train Controller and the Train
    Mascon */
 static bool HIDAPI_DriverTrain_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
