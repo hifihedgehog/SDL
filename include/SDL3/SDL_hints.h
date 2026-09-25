@@ -2897,6 +2897,28 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_IFORCE "SDL_JOYSTICK_HIDAPI_IFORCE"
 
 /**
+ * A variable controlling whether the HIDAPI driver for the Namco GunCon 2
+ * light gun should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The GunCon 2, 0B9A:016A,
+ * and the EMS LCD TopGun that shares its ID are read through libusb, so
+ * WinUSB must be bound to them. The gun is a joystick whose axes carry the
+ * raw beam position, which the application calibrates to its screen.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_GUNCON "SDL_JOYSTICK_HIDAPI_GUNCON"
+
+/**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One
  * (GIP) controllers should be used.
  *
