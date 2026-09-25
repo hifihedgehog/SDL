@@ -71,6 +71,10 @@
 #ifdef SDL_JOYSTICK_SERIAL
 #define SDL_JOYSTICK_HIDAPI_DJI_REMOTE
 #endif
+// I-Force wheels and joysticks on USB, read through libusb (hifihedgehog/SDL#33 Part 8)
+#ifdef HAVE_LIBUSB
+#define SDL_JOYSTICK_HIDAPI_IFORCE
+#endif
 
 // Joystick capability definitions
 #define SDL_JOYSTICK_CAP_MONO_LED       0x00000001
@@ -209,6 +213,7 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverRiftDK1;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverWMR;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverNimbus;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverDJIRemote;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverIForce;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverProdikeys;
 
 #define LOAD16(A, B)       (Sint16)((Uint16)(A) | (((Uint16)(B)) << 8))

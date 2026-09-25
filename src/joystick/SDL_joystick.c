@@ -473,6 +473,7 @@ static Uint32 initial_flightstick_devices[] = {
     MAKE_VIDPID(0x044f, 0x0402), // HOTAS Warthog Joystick
     MAKE_VIDPID(0x044f, 0xb10a), // ThrustMaster, Inc. T.16000M Joystick
     MAKE_VIDPID(0x046d, 0xc215), // Logitech Extreme 3D
+    MAKE_VIDPID(0x046d, 0xc281), // Logitech WingMan Force (I-Force)
     MAKE_VIDPID(0x0583, 0x6258), // Padix USB joystick with viewfinder
     MAKE_VIDPID(0x0583, 0x688f), // Padix QF-688uv Windstorm Pro
     MAKE_VIDPID(0x0583, 0x7070), // Padix QF-707u Bazooka
@@ -482,6 +483,9 @@ static Uint32 initial_flightstick_devices[] = {
     MAKE_VIDPID(0x0583, 0xb010), // Padix MetalStrike Pro
     MAKE_VIDPID(0x0583, 0xb012), // Padix Wireless MetalStrike
     MAKE_VIDPID(0x0583, 0xb013), // Padix USB Wireless 2.4GHZ
+    MAKE_VIDPID(0x05ef, 0x020a), // AVB Top Shot Pegasus (I-Force)
+    MAKE_VIDPID(0x06f8, 0x0003), // Guillemot Jet Leader Force Feedback (I-Force)
+    MAKE_VIDPID(0x06f8, 0xa302), // Guillemot Jet Leader 3D (I-Force)
     MAKE_VIDPID(0x0738, 0x2221), // Saitek Pro Flight X-56 Rhino Stick
     MAKE_VIDPID(0x10f5, 0x7084), // Turtle Beach VelocityOne
     MAKE_VIDPID(0x231d, 0x0126), // Gunfighter Mk.III 'Space Combat Edition' (right)
@@ -548,6 +552,7 @@ static SDL_vidpid_list throttle_devices = {
 
 static Uint32 initial_wheel_devices[] = {
     MAKE_VIDPID(0x0079, 0x1864), // DragonRise Inc. Wired Wheel (active mode) (also known as PXN V900 (PS3), Superdrive SV-750, or a Genesis Seaborg 400)
+    MAKE_VIDPID(0x044f, 0xa01c), // Thrustmaster Motor Sport GT (I-Force)
     MAKE_VIDPID(0x044f, 0xb65d), // Thrustmaster Wheel FFB
     MAKE_VIDPID(0x044f, 0xb65e), // Thrustmaster T500RS
     MAKE_VIDPID(0x044f, 0xb664), // Thrustmaster TX (initial mode)
@@ -572,6 +577,7 @@ static Uint32 initial_wheel_devices[] = {
     MAKE_VIDPID(0x046d, 0xc26d), // Logitech G923 (Xbox)
     MAKE_VIDPID(0x046d, 0xc26e), // Logitech G923
     MAKE_VIDPID(0x046d, 0xc272), // Logitech PRO Racing Wheel for Xbox (PC mode)
+    MAKE_VIDPID(0x046d, 0xc291), // Logitech WingMan Formula Force (I-Force)
     MAKE_VIDPID(0x046d, 0xc294), // Logitech generic wheel
     MAKE_VIDPID(0x046d, 0xc295), // Logitech Momo Force
     MAKE_VIDPID(0x046d, 0xc298), // Logitech Driving Force Pro
@@ -591,6 +597,14 @@ static Uint32 initial_wheel_devices[] = {
     MAKE_VIDPID(0x0583, 0xb008), // Padix USB Wireless 2.4GHz Wheel
     MAKE_VIDPID(0x0583, 0xb009), // Padix USB Wheel
     MAKE_VIDPID(0x0583, 0xb018), // Padix TW6 Wheel
+    MAKE_VIDPID(0x05ef, 0x8884), // AVB Mag Turbo Force (I-Force)
+    MAKE_VIDPID(0x05ef, 0x8888), // AVB Top Shot Force Feedback Racing Wheel (I-Force)
+    MAKE_VIDPID(0x061c, 0xc084), // ACT LABS Force RS (I-Force)
+    MAKE_VIDPID(0x061c, 0xc094), // ACT LABS Force RS (I-Force)
+    MAKE_VIDPID(0x061c, 0xc0a4), // ACT LABS Force RS (I-Force)
+    MAKE_VIDPID(0x06a3, 0xff04), // Saitek R440 Force Wheel (I-Force)
+    MAKE_VIDPID(0x06f8, 0x0001), // Guillemot Race Leader Force Feedback (I-Force)
+    MAKE_VIDPID(0x06f8, 0x0004), // Guillemot Force Feedback Racing Wheel (I-Force)
     MAKE_VIDPID(0x0eb7, 0x0001), // Fanatec ClubSport Wheel Base V2
     MAKE_VIDPID(0x0eb7, 0x0004), // Fanatec ClubSport Wheel Base V2.5
     MAKE_VIDPID(0x0eb7, 0x0005), // Fanatec CSL Elite Wheel Base+ (PS4)
@@ -3682,7 +3696,7 @@ static bool SDL_IsJoystickArcadeStick(Uint16 vendor_id, Uint16 product_id)
     return SDL_VIDPIDInList(vendor_id, product_id, &arcadestick_devices);
 }
 
-static bool SDL_IsJoystickFlightStick(Uint16 vendor_id, Uint16 product_id)
+bool SDL_IsJoystickFlightStick(Uint16 vendor_id, Uint16 product_id)
 {
     return SDL_VIDPIDInList(vendor_id, product_id, &flightstick_devices);
 }

@@ -2236,10 +2236,11 @@ extern "C" {
  * PORT is COMn, or the start of a device instance ID as Device Manager shows
  * it, which follows an adapter to a new COM number. PROTOCOL is one of
  * spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua, ibus,
- * jvs, vrinsight, kettler, and for DJI drone remotes dji (the RC-N1 family),
- * djimavicmini, djiphantom3 and djiphantom2. Spaces around entries are
- * ignored, an entry that cannot be used is skipped with a log message, and a
- * port named twice keeps its last entry.
+ * jvs, vrinsight, kettler, iforce for I-Force wheels and joysticks, and for
+ * DJI drone remotes dji (the RC-N1 family), djimavicmini, djiphantom3 and
+ * djiphantom2. Spaces around entries are ignored, an entry that cannot be
+ * used is skipped with a log message, and a port named twice keeps its last
+ * entry.
  *
  * The default is empty, and the driver opens no port.
  *
@@ -2871,6 +2872,29 @@ extern "C" {
  * \since This hint is available since SDL 3.5.0.
  */
 #define SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS "SDL_JOYSTICK_DJI_REMOTE_TCP_HOSTS"
+
+/**
+ * A variable controlling whether the HIDAPI driver for I-Force wheels and
+ * joysticks should be used.
+ *
+ * This is a PadForge fork addition, for Windows. It reads the 14 USB models
+ * on Immersion's I-Force controller, among them the Logitech WingMan Force
+ * and Formula Force and the Thrustmaster Motor Sport GT, through libusb, so
+ * WinUSB must be bound to them. The I-Force haptic driver adds force
+ * feedback once the device reports how many effects it holds.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_IFORCE "SDL_JOYSTICK_HIDAPI_IFORCE"
 
 /**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One

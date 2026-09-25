@@ -41,6 +41,7 @@ COM port arriving.
 | `jvs` | JVS I/O boards | 115200 8N1 | Arcade stick per player, up to 4 |
 | `vrinsight` | VRinsight CDU II, MCP Combo I | 115200 8N1 | 70 or 72 buttons |
 | `kettler` | Kettler ergometers with an RS-232 port | 9600 8N1 | 5 axes |
+| `iforce` | I-Force wheels and joysticks: the Boeder Force Feedback Wheel, the Trust Force Feedback Race Master, and others by the IDs they report | 38400 8N1 | Wheel or flight stick |
 | `dji` | DJI RC-N1 family | 115200 8N1 | Gamepad |
 | `djimavicmini` | DJI Mavic Mini remote | 115200 8N1 | Gamepad |
 | `djiphantom3` | DJI Phantom 3 remote | 115200 8N1 | Gamepad |
@@ -49,7 +50,8 @@ COM port arriving.
 The Stinger, the JVS players and the DJI remotes get gamepad mappings. The
 rest stay joysticks. Every port runs with DTR and RTS on, except that a JVS
 port raises RTS only while it sends. The DJI remotes are described in
-[README-dji-remotes.md](README-dji-remotes.md).
+[README-dji-remotes.md](README-dji-remotes.md), and the I-Force devices in
+[README-iforce.md](README-iforce.md).
 
 ## Devices that need care
 
@@ -72,14 +74,18 @@ port raises RTS only while it sends. The DJI remotes are described in
 - Kettler: only RX, TX and ground are wired. The axes are the raw readings:
   cadence, power on the brake, speed in 0.1 km/h, heart rate and target
   power.
+- I-Force: the driver asks `O` once a second, 20 times at most, and with no
+  answer logs it and opens no joystick. The `M` and `P` replies name the
+  device and pick its layout.
 
 ## Output
 
 `SDL_RumbleJoystick` drives the CyberMan's tactile motor.
 `SDL_SendJoystickEffect` sends, for a JVS player, up to 8 bytes of general
 purpose outputs to that player's board, for a VRinsight panel one 8-byte
-message, such as `SPD250` and two 00 bytes for the speed display, and for a
-Kettler a 2-byte little-endian power target in watts.
+message, such as `SPD250` and two 00 bytes for the speed display, for a
+Kettler a 2-byte little-endian power target in watts, and for an I-Force
+device one whole force feedback command, which the driver frames.
 
 ## Losing and finding devices
 

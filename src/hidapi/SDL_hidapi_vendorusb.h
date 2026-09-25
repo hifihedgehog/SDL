@@ -103,11 +103,13 @@ typedef struct SDL_VendorUSBRouting
 extern bool SDL_VendorUSB_Ignore(const SDL_VendorUSBRouting *routing);
 
 /* Whether the libusb enumeration considers this interface before the ignore
- * rules: an interface a rule matches, never another interface of a device
- * that has a rule, and otherwise an Xbox or HID interface. */
-extern bool SDL_VendorUSB_IsCandidate(uint16_t vendor, uint16_t product, uint8_t interface_number,
-                                      uint8_t interface_class, uint8_t interface_subclass,
-                                      uint8_t interface_protocol, bool xbox);
+ * rules: an interface a rule serving this platform matches, never another
+ * interface of a device that has such a rule, and otherwise an Xbox or HID
+ * interface. A rule that serves another platform leaves the device as if it
+ * had none. */
+extern bool SDL_VendorUSB_IsCandidate(SDL_VendorUSBPlatform platform, uint16_t vendor, uint16_t product,
+                                      uint8_t interface_number, uint8_t interface_class,
+                                      uint8_t interface_subclass, uint8_t interface_protocol, bool xbox);
 
 typedef struct SDL_VendorUSBEndpointInfo
 {
