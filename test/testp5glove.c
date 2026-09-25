@@ -213,11 +213,33 @@ static void TestFeatures(void)
     CHECK(!SDL_P5Glove_ParseMouseMode(feature6, 6, &on));
 }
 
+/* 8: the decode keeps no state, so nothing outlives a reconnect: after a
+   report with every bit set, one with none holds no button and every
+   finger at 0. The module has no output, and the driver writes nothing on
+   open. */
+static void TestReconnect(void)
+{
+    uint8_t r[SDL_P5GLOVE_REPORT_LENGTH];
+    SDL_P5GloveState state;
+    int i;
+
+    memset(r, 0xFF, sizeof(r));
+    r[0] = SDL_P5GLOVE_REPORT_ID;
+    CHECK(SDL_P5Glove_DecodeReport(r, sizeof(r), &state) && state.buttons == 0x0F && state.fingers[0] == 63);
+    memset(r, 0x00, sizeof(r));
+    r[0] = SDL_P5GLOVE_REPORT_ID;
+    CHECK(SDL_P5Glove_DecodeReport(r, sizeof(r), &state) && state.buttons == 0);
+    for (i = 0; i < SDL_P5GLOVE_FINGERS; ++i) {
+        CHECK(state.fingers[i] == 0);
+    }
+}
+
 int main(void)
 {
     TestReport();
     TestFraming();
     TestFeatures();
+    TestReconnect();
 
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);
