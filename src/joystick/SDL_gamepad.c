@@ -1161,6 +1161,10 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         // Some versions of WINE will also not treat devices that show up as gamepads as wheels
         return NULL;
     }
+    if (SDL_IsJoystickFlightStick(vendor, product)) {
+        // A flight stick has no gamepad shape (hifihedgehog/SDL#33 Part 8)
+        return NULL;
+    }
 
 #if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XID)
     if (SDL_XID_IsKnownID(vendor, product) || HIDAPI_GetInterfaceClassFromGUID(guid) == SDL_XID_INTERFACE_CLASS) {

@@ -59,6 +59,28 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
      * or protocol: bulk IN 0x83 and bulk OUT 0x02. The DUML frames go out
      * unchanged. */
     { USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, SDL_VENDORUSB_MATCH_CLASS | SDL_VENDORUSB_ANY_PROTOCOL | SDL_VENDORUSB_RAW_OUTPUT, 0, 0xFF, 0x43, 0, 0, 0x83, 0x02, 0, 0 },
+
+    /* I-Force wheels and joysticks. Linux's iforce driver matches these IDs
+     * whatever the interface class, and requires the interface's first
+     * endpoint to be interrupt IN and its second interrupt OUT. The rule
+     * takes interface 0's first IN and first OUT endpoint, and commands go
+     * out unchanged. On Linux that driver serves them. */
+#define SDL_VENDORUSB_IFORCE(vendor, product) { vendor, product, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_THRUSTMASTER, USB_PRODUCT_THRUSTMASTER_MOTOR_SPORT_GT),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_LOGITECH, USB_PRODUCT_LOGITECH_WINGMAN_FORCE),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_LOGITECH, USB_PRODUCT_LOGITECH_WINGMAN_FORMULA_FORCE),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_AVB, USB_PRODUCT_AVB_TOP_SHOT_PEGASUS),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_AVB, USB_PRODUCT_AVB_MAG_TURBO_FORCE),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_AVB, USB_PRODUCT_AVB_TOP_SHOT_FFB_WHEEL),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_ACTLABS, USB_PRODUCT_ACTLABS_FORCE_RS_C084),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_ACTLABS, USB_PRODUCT_ACTLABS_FORCE_RS_C094),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_ACTLABS, USB_PRODUCT_ACTLABS_FORCE_RS_C0A4),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_SAITEK, USB_PRODUCT_SAITEK_R440_FORCE_WHEEL),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_GUILLEMOT, USB_PRODUCT_GUILLEMOT_RACE_LEADER_FFB),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_GUILLEMOT, USB_PRODUCT_GUILLEMOT_JET_LEADER_FFB),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_GUILLEMOT, USB_PRODUCT_GUILLEMOT_FFB_RACING_WHEEL),
+    SDL_VENDORUSB_IFORCE(USB_VENDOR_GUILLEMOT, USB_PRODUCT_GUILLEMOT_JET_LEADER_3D),
+#undef SDL_VENDORUSB_IFORCE
 };
 
 /* Devices that need libusb on every platform. The Switch 2 devices carry
@@ -175,15 +197,23 @@ bool SDL_VendorUSB_Ignore(const SDL_VendorUSBRouting *routing)
     return SDL_VendorUSB_RequiresLibUSB(routing->platform, routing->vendor, routing->product, false, false);
 }
 
-bool SDL_VendorUSB_IsCandidate(uint16_t vendor, uint16_t product, uint8_t interface_number,
-                               uint8_t interface_class, uint8_t interface_subclass, uint8_t interface_protocol,
-                               bool xbox)
+bool SDL_VendorUSB_IsCandidate(SDL_VendorUSBPlatform platform, uint16_t vendor, uint16_t product,
+                               uint8_t interface_number, uint8_t interface_class,
+                               uint8_t interface_subclass, uint8_t interface_protocol, bool xbox)
 {
-    if (SDL_VendorUSB_FindRule(vendor, product, interface_number, interface_class, interface_subclass, interface_protocol)) {
+    size_t i;
+
+    if (SDL_VendorUSB_RuleApplies(SDL_VendorUSB_FindRule(vendor, product, interface_number, interface_class,
+                                                         interface_subclass, interface_protocol),
+                                  platform)) {
         return true;
     }
-    if (SDL_VendorUSB_IsVendorDevice(vendor, product)) {
-        return false;
+    for (i = 0; i < VENDORUSB_ARRAYSIZE(SDL_vendorusb_rules); ++i) {
+        const SDL_VendorUSBRule *rule = &SDL_vendorusb_rules[i];
+
+        if (rule->vendor == vendor && rule->product == product && SDL_VendorUSB_RuleApplies(rule, platform)) {
+            return false;
+        }
     }
     return xbox || interface_class == 0x03; /* HID */
 }
