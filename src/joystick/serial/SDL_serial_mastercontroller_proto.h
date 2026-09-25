@@ -23,7 +23,7 @@
  * "mastercontroller", hifihedgehog/SDL#33 Part 10. 19200 baud 8N1 with no
  * flow control, and DTR and RTS off, as the PC readers open the port. The
  * host writes one 00 byte after opening. Each event is five ASCII
- * characters and CR, decoded by SDL_hidapi_train_proto.c. The controller
+ * characters and CR, decoded by SDL_train_proto.c. The controller
  * sends only on a change, so the joystick appears with its first event.
  */
 
@@ -31,7 +31,7 @@
 #define SDL_serial_mastercontroller_proto_h_
 
 #include "SDL_serial_proto.h"
-#include "../hidapi/SDL_hidapi_train_proto.h"
+#include "../SDL_train_proto.h"
 
 #define SDL_MASTERCONTROLLER_RATE 19200
 

@@ -152,6 +152,7 @@ protocol_test(iforce "${PROTOCOL_TESTS}/testiforce.c"
 protocol_test(guncon "${PROTOCOL_TESTS}/testguncon.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_guncon_proto.c")
 
-# hifihedgehog/SDL#33 Part 10: the train controllers.
+# hifihedgehog/SDL#33 Part 10: the train controllers. The module sits in
+# src/joystick, since the serial driver uses it too.
 protocol_test(train "${PROTOCOL_TESTS}/testtrain.c"
-    "${PROTOCOL_JOYSTICK}/SDL_hidapi_train_proto.c")
+    "${PROTOCOL_JOYSTICK_SHARED}/SDL_train_proto.c")
