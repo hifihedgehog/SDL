@@ -1102,7 +1102,7 @@ static int should_enumerate_interface(unsigned short vendor_id, unsigned short p
 #ifdef HIDAPI_VENDOR_USB
 	/* A vendor interface, never another interface of a device that has one,
 	   and otherwise Xbox 360, Xbox One, original Xbox and HID interfaces */
-	return SDL_VendorUSB_IsCandidate(vendor_id, product_id, intf_desc->bInterfaceNumber,
+	return SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_THIS_PLATFORM, vendor_id, product_id, intf_desc->bInterfaceNumber,
 	                                 intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
 	                                 intf_desc->bInterfaceProtocol, is_xbox);
 #else

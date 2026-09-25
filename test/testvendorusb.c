@@ -167,6 +167,48 @@ static void TestRules(void)
     CHECK(SDL_VendorUSB_IsVendorDevice(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330));
     /* Without the flag the protocol still counts, as for the Big Button receiver */
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER, 0, 0xFF, 0x5D, 0x05) == NULL);
+
+    /* Part 8: the I-Force devices, interface 0 whatever its class, commands
+       unchanged, on Windows only */
+    {
+        static const uint16_t iforce[][2] = {
+            { USB_VENDOR_THRUSTMASTER, 0xA01C }, { USB_VENDOR_LOGITECH, 0xC281 }, { USB_VENDOR_LOGITECH, 0xC291 },
+            { USB_VENDOR_AVB, 0x020A }, { USB_VENDOR_AVB, 0x8884 }, { USB_VENDOR_AVB, 0x8888 },
+            { USB_VENDOR_ACTLABS, 0xC084 }, { USB_VENDOR_ACTLABS, 0xC094 }, { USB_VENDOR_ACTLABS, 0xC0A4 },
+            { USB_VENDOR_SAITEK, 0xFF04 }, { USB_VENDOR_GUILLEMOT, 0x0001 }, { USB_VENDOR_GUILLEMOT, 0x0003 },
+            { USB_VENDOR_GUILLEMOT, 0x0004 }, { USB_VENDOR_GUILLEMOT, 0xA302 },
+        };
+        size_t i;
+
+        CHECK(USB_VENDOR_AVB == 0x05EF && USB_VENDOR_ACTLABS == 0x061C && USB_VENDOR_GUILLEMOT == 0x06F8);
+        for (i = 0; i < sizeof(iforce) / sizeof(iforce[0]); ++i) {
+            rule = SDL_VendorUSB_FindRule(iforce[i][0], iforce[i][1], 0, 0xFF, 0x00, 0x00);
+            CHECK(rule && rule->flags == (SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY));
+            CHECK(rule && rule->interface_number == 0 && rule->alternate == 0 && rule->in_endpoint == 0 && rule->out_endpoint == 0);
+            CHECK(rule && rule->in_size == 0 && rule->out_size == 0);
+            CHECK(SDL_VendorUSB_FindRule(iforce[i][0], iforce[i][1], 0, 0x03, 0x00, 0x00) == rule);
+            CHECK(SDL_VendorUSB_FindRule(iforce[i][0], iforce[i][1], 1, 0xFF, 0x00, 0x00) == NULL);
+            CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
+            CHECK(!SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && !SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+            CHECK(SDL_VendorUSB_IsVendorDevice(iforce[i][0], iforce[i][1]));
+        }
+        /* The same vendors' other devices, and the IDs that stay out of the part */
+        CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_LOGITECH, 0xC215, 0, 3, 0, 0) == NULL);
+        CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_LOGITECH, 0xC20E, 0, 3, 0, 0) == NULL);
+        CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_SAITEK, 0xCF17, 0, 3, 0, 0) == NULL);
+        CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_AVB, 0x8886, 0, 0xFF, 0, 0) == NULL);
+    }
+
+    /* A rule that serves another platform leaves the device as if it had
+       none. On Windows it takes interface 0 alone. */
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, USB_VENDOR_LOGITECH, 0xC291, 0, 0xFF, 0, 0, false));
+    CHECK(!SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_LOGITECH, 0xC291, 0, 0xFF, 0, 0, false));
+    CHECK(!SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_MACOS, USB_VENDOR_LOGITECH, 0xC291, 0, 0xFF, 0, 0, false));
+    CHECK(!SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, USB_VENDOR_LOGITECH, 0xC291, 1, 0x03, 0, 0, false));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_LOGITECH, 0xC291, 1, 0x03, 0, 0, false));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, 0, 0x03, 0, 0, false));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_MACOS, USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 0, 0x03, 1, 1, false));
+    CHECK(!SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 1, 0x03, 1, 2, false));
 }
 
 static void TestIntelDescriptors(void)
@@ -434,12 +476,14 @@ static const Device devices[] = {
     { "DJI RC MTP", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 0, 0x06, 0x01, 0x01, false },
     { "DJI RC bulk", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01, false },
     { "DJI RC ADB", USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 2, 0xFF, 0x42, 0x01, false },
+    { "WingMan Formula Force", USB_VENDOR_LOGITECH, 0xC291, 0, 0xFF, 0x00, 0x00, false },
+    { "Guillemot Force Feedback Racing Wheel", USB_VENDOR_GUILLEMOT, 0x0004, 0, 0x03, 0x00, 0x00, false },
 };
 
 static bool NewLibUSBEnumerates(const SDL_VendorUSBRouting *r, const Device *d, bool opened)
 {
     return !SDL_VendorUSB_Ignore(r) &&
-           SDL_VendorUSB_IsCandidate(d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol, d->xbox) &&
+           SDL_VendorUSB_IsCandidate(r->platform, d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol, d->xbox) &&
            !SDL_VendorUSB_SkipUnopened(r->platform, d->xbox, opened);
 }
 
@@ -562,6 +606,30 @@ static void TestRoutingTable(void)
     CHECK(OnLibUSB(M, "DJI RC bulk", true));
     CHECK(!OnLibUSB(L, "DJI RC ADB", true));
 
+    /* Part 8: the I-Force devices reach libusb on Windows once WinUSB is
+       bound, and the platform backend leaves them. Elsewhere nothing changes,
+       so Linux's own driver keeps them. */
+    CHECK(OnLibUSB(W, "WingMan Formula Force", true));
+    CHECK(OnLibUSB(W, "Guillemot Force Feedback Racing Wheel", true));
+    CHECK(PlatformIgnores(W, "WingMan Formula Force"));
+    CHECK(PlatformIgnores(W, "Guillemot Force Feedback Racing Wheel"));
+    CHECK(!OnLibUSB(L, "WingMan Formula Force", true));
+    CHECK(!OnLibUSB(M, "WingMan Formula Force", true));
+    CHECK(!OnLibUSB(L, "Guillemot Force Feedback Racing Wheel", true));
+    CHECK(!PlatformIgnores(L, "WingMan Formula Force"));
+    CHECK(!PlatformIgnores(M, "Guillemot Force Feedback Racing Wheel"));
+    /* Without the whitelist a vendor-class interface still stays off libusb there */
+    {
+        const Device *d = Find("WingMan Formula Force");
+        SDL_VendorUSBRouting r = Route(L, true, d);
+
+        r.whitelist = false;
+        CHECK(!NewLibUSBEnumerates(&r, d, true));
+        r = Route(M, true, d);
+        r.whitelist = false;
+        CHECK(!NewLibUSBEnumerates(&r, d, true));
+    }
+
     /* The GameCube hint still turns the adapter off. */
     {
         const Device *d = Find("GameCube adapter");
@@ -579,12 +647,14 @@ static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
     const bool bigbutton = (d->vendor == USB_VENDOR_MICROSOFT && d->product == USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER);
     const bool gametrak = (d->vendor == USB_VENDOR_IN2GAMES && d->product == USB_PRODUCT_IN2GAMES_GAMETRAK);
     const bool dji = (d->vendor == USB_VENDOR_DJI && d->product == USB_PRODUCT_DJI_RC_RM330);
+    const bool iforce = ((d->vendor == USB_VENDOR_LOGITECH && d->product == 0xC291) ||
+                         (d->vendor == USB_VENDOR_GUILLEMOT && d->product == 0x0004));
 
     if (intel || dji) {
         return true; /* A new member of the path */
     }
-    if (gametrak && r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {
-        return true; /* Part 7: on the path on Windows only */
+    if ((gametrak || iforce) && r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {
+        return true; /* Parts 7 and 8: on the path on Windows only */
     }
     if (bigbutton && d->protocol != 0x04) {
         return true; /* Only the receiver's own interface is enumerated */

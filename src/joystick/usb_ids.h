@@ -25,11 +25,13 @@
 // Definitions of useful USB VID/PID values
 
 #define USB_VENDOR_8BITDO       0x2dc8
+#define USB_VENDOR_ACTLABS      0x061c
 #define USB_VENDOR_AMAZON       0x1949
 #define USB_VENDOR_ANDGAMER     0x38d2
 #define USB_VENDOR_APPLE        0x05ac
 #define USB_VENDOR_ASTRO        0x9886
 #define USB_VENDOR_ASUS         0x0b05
+#define USB_VENDOR_AVB          0x05ef
 #define USB_VENDOR_BACKBONE     0x358a
 #define USB_VENDOR_CAPCOM       0x0a7b
 #define USB_VENDOR_CRKD         0x3651
@@ -42,6 +44,7 @@
 #define USB_VENDOR_FLYDIGI_V1   0x04b4
 #define USB_VENDOR_FLYDIGI_V2   0x37d7
 #define USB_VENDOR_GOOGLE       0x18d1
+#define USB_VENDOR_GUILLEMOT    0x06f8
 #define USB_VENDOR_HARMONIX     0x1bad
 #define USB_VENDOR_HORI         0x0f0d
 #define USB_VENDOR_HP           0x03f0
@@ -92,7 +95,13 @@
 #define USB_PRODUCT_8BITDO_ULTIMATE2_WIRELESS             0x6012    // mode switch to BT
 #define USB_PRODUCT_8BITDO_ULTIMATE3                      0x202f    // mode switch to BT
 #define USB_PRODUCT_AMAZON_LUNA_CONTROLLER                0x0419
+#define USB_PRODUCT_ACTLABS_FORCE_RS_C084                 0xc084
+#define USB_PRODUCT_ACTLABS_FORCE_RS_C094                 0xc094 // From the forcers INF package, not Linux
+#define USB_PRODUCT_ACTLABS_FORCE_RS_C0A4                 0xc0a4
 #define USB_PRODUCT_ASTRO_C40_XBOX360                     0x0024
+#define USB_PRODUCT_AVB_MAG_TURBO_FORCE                   0x8884
+#define USB_PRODUCT_AVB_TOP_SHOT_FFB_WHEEL                0x8888
+#define USB_PRODUCT_AVB_TOP_SHOT_PEGASUS                  0x020a
 #define USB_PRODUCT_BACKBONE_ONE_IOS                      0x0103
 #define USB_PRODUCT_BACKBONE_ONE_IOS_PS5                  0x0104
 #define USB_PRODUCT_BACKBONE_ONE_PS5_V2                   0x0304
@@ -105,6 +114,10 @@
 #define USB_PRODUCT_DREAMCHEEKY_DRUM_KIT                  0x8021 // Shared with a weather station and a missile launcher
 #define USB_PRODUCT_CAPCOM_STEEL_BATTALION                0xd000
 #define USB_PRODUCT_GOOGLE_STADIA_CONTROLLER              0x9400
+#define USB_PRODUCT_GUILLEMOT_FFB_RACING_WHEEL            0x0004
+#define USB_PRODUCT_GUILLEMOT_JET_LEADER_3D               0xa302
+#define USB_PRODUCT_GUILLEMOT_JET_LEADER_FFB              0x0003
+#define USB_PRODUCT_GUILLEMOT_RACE_LEADER_FFB             0x0001
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER1            0x1843
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER2            0x1844
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER3            0x1846
@@ -135,6 +148,8 @@
 #define USB_PRODUCT_LOGITECH_F310                         0xc216
 #define USB_PRODUCT_LOGITECH_CHILLSTREAM                  0xcad1
 #define USB_PRODUCT_LOGITECH_SPEED_FORCE_WIRELESS         0xc29c
+#define USB_PRODUCT_LOGITECH_WINGMAN_FORCE                0xc281
+#define USB_PRODUCT_LOGITECH_WINGMAN_FORMULA_FORCE        0xc291
 #define USB_PRODUCT_MADCATZ_SAITEK_SIDE_PANEL_CONTROL_DECK 0x2218
 #define USB_PRODUCT_MADCATZ_XB1_STRATOCASTER_GUITAR       0x4161
 #define USB_PRODUCT_MADCATZ_XB1_DRUM_KIT                  0x4262
@@ -196,6 +211,7 @@
 #define USB_PRODUCT_RED_OCTANE_XB1_STAGE_TOUR_GUITAR      0x4161
 #define USB_PRODUCT_RED_OCTANE_XB1_STAGE_TOUR_DRUMS       0xD300
 #define USB_PRODUCT_SAITEK_CYBORG_V3                      0xf622
+#define USB_PRODUCT_SAITEK_R440_FORCE_WHEEL               0xff04
 #define USB_PRODUCT_SCEA_PS3_GH_GUITAR                    0x0100
 #define USB_PRODUCT_SCEA_PS3_GH_DRUMS                     0x0120
 #define USB_PRODUCT_SCEA_PS3_RB_GUITAR                    0x0200
@@ -223,6 +239,7 @@
 #define USB_PRODUCT_SWITCH_RETRO_CONTROLLER               0x0575
 #define USB_PRODUCT_THQ_PS3_UDRAW                         0xcb17 // Vendor USB_VENDOR_POWERA_ALT
 #define USB_PRODUCT_THRUSTMASTER_ESWAPX_PRO_PS4           0xd00e
+#define USB_PRODUCT_THRUSTMASTER_MOTOR_SPORT_GT           0xa01c
 #define USB_PRODUCT_THRUSTMASTER_T_FLIGHT_HOTAS_ONE       0xb68c
 #define USB_PRODUCT_VALVE_STEAM_CONTROLLER_DONGLE         0x1142
 #define USB_PRODUCT_VALVE_STEAM_PROTEUS_DONGLE            0x1304

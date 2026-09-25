@@ -40,6 +40,9 @@ static SDL_HIDAPI_HapticDriver *drivers[] = {
     #ifdef SDL_HAPTIC_HIDAPI_LG4FF
     &SDL_HIDAPI_HapticDriverLg4ff,
     #endif
+    #ifdef SDL_HAPTIC_HIDAPI_IFORCE
+    &SDL_HIDAPI_HapticDriverIForce,
+    #endif
     NULL
 };
 

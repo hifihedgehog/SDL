@@ -441,7 +441,7 @@ static void TestEnumeration(void)
     routing.xbox = true;
     routing.vendor_interface = (rule != NULL);
     CHECK(!SDL_VendorUSB_Ignore(&routing));
-    CHECK(SDL_VendorUSB_IsCandidate(USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER, 0, 0xFF, 0x5D, 0x04, true));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER, 0, 0xFF, 0x5D, 0x04, true));
     CHECK(!SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_PLATFORM_WINDOWS, true, true));
     CHECK(SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_PLATFORM_WINDOWS, true, false));
 }

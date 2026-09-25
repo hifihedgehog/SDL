@@ -113,6 +113,10 @@ serial_test(vrinsight "${SERIAL_SOURCE}/SDL_serial_vrinsight_proto.c")
 
 serial_test(kettler "${SERIAL_SOURCE}/SDL_serial_kettler_proto.c")
 
+# hifihedgehog/SDL#33 Part 8: I-Force wheels and joysticks on RS-232.
+serial_test(iforce "${SERIAL_SOURCE}/SDL_serial_iforce_proto.c"
+    "${SERIAL_SDL_ROOT}/src/joystick/SDL_iforce_proto.c")
+
 # hifihedgehog/SDL#33 Part 6: DJI remotes on the serial port, the USB bulk
 # interface and TCP.
 dji_test(duml)

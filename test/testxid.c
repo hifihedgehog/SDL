@@ -269,10 +269,10 @@ static void TestRouting(void)
     SDL_VendorUSBRouting routing;
 
     // A class 0x58 interface on FFFF:FFFF is a candidate, and so is a HID interface
-    CHECK(SDL_VendorUSB_IsCandidate(0xFFFF, 0xFFFF, 0, 0x58, 0x42, 0x00, true));
-    CHECK(SDL_VendorUSB_IsCandidate(0x0738, 0x4540, 0, 0x58, 0x42, 0x00, true));
-    CHECK(SDL_VendorUSB_IsCandidate(0x0F30, 0x010B, 0, 0x03, 0x00, 0x00, false));
-    CHECK(!SDL_VendorUSB_IsCandidate(0x0F30, 0x010B, 0, 0x58, 0x42, 0x00, false));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, 0xFFFF, 0xFFFF, 0, 0x58, 0x42, 0x00, true));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, 0x0738, 0x4540, 0, 0x58, 0x42, 0x00, true));
+    CHECK(SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, 0x0F30, 0x010B, 0, 0x03, 0x00, 0x00, false));
+    CHECK(!SDL_VendorUSB_IsCandidate(SDL_VENDORUSB_PLATFORM_WINDOWS, 0x0F30, 0x010B, 0, 0x58, 0x42, 0x00, false));
 
     // On Windows and macOS libusb keeps it, whitelist or not. Elsewhere Linux xpad keeps it.
     memset(&routing, 0, sizeof(routing));

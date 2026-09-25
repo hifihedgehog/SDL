@@ -162,6 +162,9 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #ifdef SDL_JOYSTICK_HIDAPI_DJI_REMOTE
     &SDL_HIDAPI_DriverDJIRemote,
 #endif
+#ifdef SDL_JOYSTICK_HIDAPI_IFORCE
+    &SDL_HIDAPI_DriverIForce,
+#endif
 };
 static int SDL_HIDAPI_numdrivers = 0;
 static SDL_AtomicInt SDL_HIDAPI_updating_devices;

@@ -141,3 +141,8 @@ endif()
 # hifihedgehog/SDL#33 Part 13: the Ring-Con on a right Joy-Con.
 protocol_test(ringcon "${PROTOCOL_TESTS}/testringcon.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_switch_ringcon_proto.c")
+
+# hifihedgehog/SDL#33 Part 8: I-Force wheels and joysticks. The module sits
+# in src/joystick, since the serial driver uses it too.
+protocol_test(iforce "${PROTOCOL_TESTS}/testiforce.c"
+    "${PROTOCOL_JOYSTICK_SHARED}/SDL_iforce_proto.c")
