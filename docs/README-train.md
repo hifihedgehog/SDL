@@ -26,7 +26,7 @@ report descriptor, which they lack.
 
 Every controller is a gamepad. Each handle gets one axis with its notches
 spread evenly, so an application gets the notch back from the axis and the
-notch count from the name.
+notch layout from the name.
 
 ### Two handles
 
@@ -55,7 +55,7 @@ hard press of A to Misc2. The D-pad is hat 0.
 - `SDL_RumbleJoystick` turns the Type 2's and the Shinkansen's motors on and
   off, the low frequency the left one and the high frequency the right one.
 - `SDL_SendJoystickEffect` sends a raw payload: status and function on the
-  Type 2 (function 1 and 2 the motors, 3 the door lamp), the 8 display bytes
+  Type 2 (function 1 and 2 the motors, 3 the door lamp), the 8 output bytes
   on the Shinkansen, and one lamp byte on the Multi Train Controller and the
   Train Mascon (bit 4 the door lamp, the low nibble the signal lamp).
 - Closing the joystick turns the motors off and blanks the displays and
@@ -67,8 +67,7 @@ Name the port with `mastercontroller` in `SDL_HINT_JOYSTICK_SERIAL`, for
 example `COM3=mastercontroller`. The line is 19200 baud, 8N1, with no flow
 control and DTR and RTS off, as the PC readers open it. SDL writes one 00
 byte after opening, as BVE Trainsim's interface does. The controller sends
-an event only when something changes, so the joystick appears with the first
-event.
+an event when a control moves, so the joystick appears with the first event.
 
 The controller's notch settings stay inside it, so the lever uses the fixed
 scale of its codes: 9 brake steps with emergency and 8 power steps, on the
@@ -89,7 +88,8 @@ share the name "Pony Canyon Master Controller".
 - The Train Mascon's brake notches: 5 in OpenBVE and on a modification page,
   8 on its database page. SDL uses 5.
 - Whether a hard press of A also sets the soft bit is not documented.
-- What the Master Controller does with the 00 byte is not documented.
+- What the Master Controller does with the 00 byte is not documented, nor
+  what it sends at power-on or whether it ever repeats its state.
 
 ## Tests
 

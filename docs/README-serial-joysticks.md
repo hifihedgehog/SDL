@@ -81,8 +81,8 @@ Controller port runs with both off. The DJI remotes are described in
   answer logs it and opens no joystick. The `M` and `P` replies name the
   device and pick its layout.
 - Master Controller: the driver writes one 00 byte after opening. The
-  controller sends only on a change, so its joystick appears with the first
-  event.
+  controller sends an event when a control moves, so its joystick appears
+  with the first event.
 
 ## Output
 
