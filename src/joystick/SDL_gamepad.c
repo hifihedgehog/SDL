@@ -1165,6 +1165,10 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         // A flight stick has no gamepad shape (hifihedgehog/SDL#33 Part 8)
         return NULL;
     }
+    if (vendor == USB_VENDOR_NAMCO && (product == USB_PRODUCT_NAMCO_GUNCON2 || product == USB_PRODUCT_NAMCO_GUNCON3)) {
+        // Nor does a light gun (hifihedgehog/SDL#33 Part 9)
+        return NULL;
+    }
 
 #if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XID)
     if (SDL_XID_IsKnownID(vendor, product) || HIDAPI_GetInterfaceClassFromGUID(guid) == SDL_XID_INTERFACE_CLASS) {

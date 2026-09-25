@@ -75,6 +75,8 @@
 #ifdef HAVE_LIBUSB
 #define SDL_JOYSTICK_HIDAPI_IFORCE
 #endif
+// The Namco GunCon 2 on its vendor interface (hifihedgehog/SDL#33 Part 9)
+#define SDL_JOYSTICK_HIDAPI_GUNCON
 
 // Joystick capability definitions
 #define SDL_JOYSTICK_CAP_MONO_LED       0x00000001
@@ -214,6 +216,7 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverWMR;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverNimbus;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverDJIRemote;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverIForce;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverGunCon;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverProdikeys;
 
 #define LOAD16(A, B)       (Sint16)((Uint16)(A) | (((Uint16)(B)) << 8))

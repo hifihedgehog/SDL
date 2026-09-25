@@ -81,6 +81,12 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
     SDL_VENDORUSB_IFORCE(USB_VENDOR_GUILLEMOT, USB_PRODUCT_GUILLEMOT_FFB_RACING_WHEEL),
     SDL_VENDORUSB_IFORCE(USB_VENDOR_GUILLEMOT, USB_PRODUCT_GUILLEMOT_JET_LEADER_3D),
 #undef SDL_VENDORUSB_IFORCE
+
+    /* The Namco GunCon 2, and the EMS LCD TopGun that shares its ID: interface
+     * 0, class FF, with one interrupt IN endpoint and no OUT endpoint, so the
+     * mode request goes out as SET_REPORT on the control pipe. No platform
+     * has a driver for it, so libusb serves it everywhere. */
+    { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
 /* Devices that need libusb on every platform. The Switch 2 devices carry
@@ -98,6 +104,7 @@ static const struct
     { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_PRO },
     { USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER },
     { USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES },
+    { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2 },
 };
 
 const SDL_VendorUSBRule *SDL_VendorUSB_FindRule(uint16_t vendor, uint16_t product,
