@@ -82,6 +82,12 @@ protocol_test(rb3pro "${PROTOCOL_TESTS}/testrb3pro.c"
 protocol_test(ps3ext "${PROTOCOL_TESTS}/testps3ext.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_ps3ext_proto.c")
 
+# hifihedgehog/SDL#33 Part 4: original Xbox XID devices and the Steel
+# Battalion controller.
+protocol_test(xid "${PROTOCOL_TESTS}/testxid.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_xid_proto.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
 # hifihedgehog/SDL#33 Part 13: the Ring-Con on a right Joy-Con.
 protocol_test(ringcon "${PROTOCOL_TESTS}/testringcon.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_switch_ringcon_proto.c")

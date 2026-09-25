@@ -1044,10 +1044,39 @@ static int is_xboxone(unsigned short vendor_id, const struct libusb_interface_de
 	return 0;
 }
 
+/* An original Xbox XID interface: class 0x58, subclass 0x42, protocol 0 and
+   one interrupt endpoint each way, whatever the vendor. Windows has no driver
+   for it, so it is treated as an Xbox interface. */
+static int is_xid(const struct libusb_interface_descriptor *intf_desc)
+{
+#ifdef HIDAPI_VENDOR_USB
+	SDL_VendorUSBEndpointInfo endpoints[2];
+	int i;
+
+	if (intf_desc->bNumEndpoints != 2)
+		return 0;
+	for (i = 0; i < 2; i++) {
+		endpoints[i].address = intf_desc->endpoint[i].bEndpointAddress;
+		endpoints[i].attributes = intf_desc->endpoint[i].bmAttributes;
+	}
+	return SDL_VendorUSB_IsXIDInterface(intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
+	                                    intf_desc->bInterfaceProtocol, endpoints, 2) ? 1 : 0;
+#else
+	(void)intf_desc;
+	return 0;
+#endif
+}
+
+static int is_xbox_interface(unsigned short vendor_id, const struct libusb_interface_descriptor *intf_desc)
+{
+	return is_xbox360(vendor_id, intf_desc) ||
+	       is_xboxone(vendor_id, intf_desc) ||
+	       is_xid(intf_desc);
+}
+
 static int should_enumerate_interface(unsigned short vendor_id, unsigned short product_id, const struct libusb_interface_descriptor *intf_desc)
 {
-	int is_xbox = (is_xbox360(vendor_id, intf_desc) ||
-	               is_xboxone(vendor_id, intf_desc));
+	int is_xbox = is_xbox_interface(vendor_id, intf_desc);
 	int is_vendor = 0;
 
 #if 0
@@ -1071,7 +1100,7 @@ static int should_enumerate_interface(unsigned short vendor_id, unsigned short p
 
 #ifdef HIDAPI_VENDOR_USB
 	/* A vendor interface, never another interface of a device that has one,
-	   and otherwise Xbox 360, Xbox One and HID interfaces */
+	   and otherwise Xbox 360, Xbox One, original Xbox and HID interfaces */
 	return SDL_VendorUSB_IsCandidate(vendor_id, product_id, intf_desc->bInterfaceNumber,
 	                                 intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
 	                                 intf_desc->bInterfaceProtocol, is_xbox);
@@ -1155,8 +1184,10 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 						{
 							/* On Windows an Xbox interface that xusb22 or the GIP driver
 							   holds cannot be opened. Skipping it keeps a pad Windows
-							   serves from also appearing here. One bound to WinUSB opens. */
-							int is_xbox = is_xbox360(dev_vid, intf_desc) || is_xboxone(dev_vid, intf_desc);
+							   serves from also appearing here. One bound to WinUSB opens.
+							   An XID interface has no Windows driver and opens only with
+							   WinUSB bound. */
+							int is_xbox = is_xbox_interface(dev_vid, intf_desc);
 							if (SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_THIS_PLATFORM, is_xbox, res >= 0)) {
 								break;
 							}
@@ -1165,7 +1196,7 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 #ifdef SDL_PLATFORM_MACOS
 						if (res == 0) {
 							/* Do not enumerate XInput devices already owned by a kernel driver and not opened by us */
-							int is_xbox = is_xbox360(dev_vid, intf_desc) || is_xboxone(dev_vid, intf_desc);
+							int is_xbox = is_xbox_interface(dev_vid, intf_desc);
 							if (is_xbox && libusb_kernel_driver_active(handle, intf_desc->bInterfaceNumber) == 1) {
 								char dev_path[64];
 								get_path(&dev_path, dev, conf_desc->bConfigurationValue, intf_desc->bInterfaceNumber);
@@ -1684,6 +1715,12 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 	/* Initialize XBox One controllers */
 	if (is_xboxone(desc.idVendor, intf_desc)) {
 		init_xboxone(dev->device_handle, desc.idVendor, desc.idProduct, conf_desc);
+	}
+
+	/* Original Xbox XID output reports start with 0x00, which is data and
+	   not a report ID */
+	if (is_xid(intf_desc)) {
+		dev->no_skip_output_report_id = 1;
 	}
 
 	/* Store off the string descriptor indexes */

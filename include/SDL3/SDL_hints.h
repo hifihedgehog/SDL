@@ -2502,6 +2502,54 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE_HOME_LED "SDL_JOYSTICK_HIDAPI_XBOX_ONE_HOME_LED"
 
 /**
+ * A variable controlling whether the HIDAPI driver for original Xbox
+ * controllers should be used.
+ *
+ * This is a PadForge fork addition. It covers the devices that speak the
+ * original Xbox XID protocol through a passive Xbox-to-USB cable: the Duke
+ * and Controller S pads and the pads, wheels, dance pads, arcade sticks and
+ * light guns that share their report. The driver reads them through libusb,
+ * so on Windows WinUSB must be bound to the XID interface, class 0x58. It
+ * serves every XID interface except the Steel Battalion controller's
+ * 0A7B:D000, which SDL_HINT_JOYSTICK_HIDAPI_STEEL_BATTALION governs.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_XBOX_ORIGINAL "SDL_JOYSTICK_HIDAPI_XBOX_ORIGINAL"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Steel Battalion
+ * controller should be used.
+ *
+ * This is a PadForge fork addition. The controller, 0A7B:D000, is an
+ * original Xbox XID device with 9 axes and 46 buttons, the last 7 its gear
+ * lever positions. The driver reads it through libusb, so on Windows WinUSB
+ * must be bound to its XID interface. SDL_SendJoystickEffect with 22 bytes,
+ * one brightness nibble per lamp, sets its 37 lamps.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX_ORIGINAL
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_STEEL_BATTALION "SDL_JOYSTICK_HIDAPI_STEEL_BATTALION"
+
+/**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One
  * (GIP) controllers should be used.
  *

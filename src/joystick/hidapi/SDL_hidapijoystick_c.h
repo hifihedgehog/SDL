@@ -39,6 +39,7 @@
 #define SDL_JOYSTICK_HIDAPI_SWITCH
 #ifdef HAVE_LIBUSB
 #define SDL_JOYSTICK_HIDAPI_SWITCH2
+#define SDL_JOYSTICK_HIDAPI_XID
 #endif
 #define SDL_JOYSTICK_HIDAPI_WII
 #define SDL_JOYSTICK_HIDAPI_XBOX360
@@ -170,6 +171,8 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXbox360;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXbox360W;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXbox360BB;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXboxOne;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXboxOriginal;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverSteelBattalion;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverSteamHori;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverSteamTriton;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverLg4ff;
@@ -203,6 +206,9 @@ extern SDL_JoystickType HIDAPI_GetJoystickTypeFromGUID(SDL_GUID guid);
 
 // Return the type of a game controller if it's present and supported
 extern SDL_GamepadType HIDAPI_GetGamepadTypeFromGUID(SDL_GUID guid);
+
+// Return the USB interface class of a connected device, or -1 if it's not present
+extern int HIDAPI_GetInterfaceClassFromGUID(SDL_GUID guid);
 
 extern void HIDAPI_UpdateDevices(void);
 extern void HIDAPI_SetDeviceName(SDL_HIDAPI_Device *device, const char *name);
