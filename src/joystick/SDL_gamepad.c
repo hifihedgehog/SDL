@@ -1160,8 +1160,11 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
     }
 
 #if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XID)
-    if (HIDAPI_GetInterfaceClassFromGUID(guid) == SDL_XID_INTERFACE_CLASS) {
-        // An original Xbox XID device: GUID byte 15 is its subtype, the dance-pad byte or the Steel Battalion byte
+    if (SDL_XID_IsKnownID(vendor, product) || HIDAPI_GetInterfaceClassFromGUID(guid) == SDL_XID_INTERFACE_CLASS) {
+        /* An original Xbox XID device: GUID byte 15 is its subtype, the
+           dance-pad byte or the Steel Battalion byte. A known ID decides
+           without the device. Any other XID device is known by its interface
+           class while it is connected. */
         const char *xid_mapping = SDL_XID_GetMapping(guid.data[15]);
         if (!xid_mapping) {
             // The Steel Battalion has no gamepad shape, so it stays a joystick

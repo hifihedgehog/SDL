@@ -77,7 +77,9 @@ Silence is not a disconnect. A read error is.
   else "Xbox Controller" for bSubType 0x01, "Xbox Controller S" for 0x02 and
   "Xbox Input Device" for the rest.
 - The gamepad mapping is the standard layout without Guide. A dance pad maps
-  buttons 11 to 14 to the D-pad.
+  buttons 11 to 14 to the D-pad. For an ID in the identity table the GUID
+  alone decides the mapping. Any other XID device gets its mapping only while
+  it is connected, since only its interface class marks it.
 - `SDL_RumbleJoystick` writes `00 06 LL LH RL RH` to the OUT endpoint, low
   frequency on the left motor.
 
