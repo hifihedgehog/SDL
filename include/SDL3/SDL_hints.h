@@ -2236,9 +2236,10 @@ extern "C" {
  * PORT is COMn, or the start of a device instance ID as Device Manager shows
  * it, which follows an adapter to a new COM number. PROTOCOL is one of
  * spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua, ibus,
- * jvs, vrinsight and kettler. Spaces around entries are ignored, an entry
- * that cannot be used is skipped with a log message, and a port named twice
- * keeps its last entry.
+ * jvs, vrinsight, kettler, and for DJI drone remotes dji (the RC-N1 family),
+ * djimavicmini, djiphantom3 and djiphantom2. Spaces around entries are
+ * ignored, an entry that cannot be used is skipped with a log message, and a
+ * port named twice keeps its last entry.
  *
  * The default is empty, and the driver opens no port.
  *
@@ -2255,8 +2256,10 @@ extern "C" {
  * This is a PadForge fork addition, for Windows. Some devices carry their COM
  * port as one of their own USB interfaces, so the port's device instance ID
  * names the device, and the driver opens those ports without
- * SDL_HINT_JOYSTICK_SERIAL naming them. A port the hint names keeps the
- * hint's protocol.
+ * SDL_HINT_JOYSTICK_SERIAL naming them: the protocol port of DJI's RC-N1
+ * remotes, interface 2 of vendor 2CA3. A port the hint names keeps the
+ * hint's protocol. The driver holds a port it opens, so DJI Assistant 2
+ * cannot use the remote while SDL does.
  *
  * The variable can be set to the following values:
  *
@@ -2825,6 +2828,49 @@ extern "C" {
  * \since This hint is available since SDL 3.5.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_PRODIKEYS "SDL_JOYSTICK_HIDAPI_PRODIKEYS"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the DJI RC should be
+ * used.
+ *
+ * This is a PadForge fork addition, for Windows. The DJI RC (RM330),
+ * 2CA3:1023, answers its sticks on its DUML bulk interface, which is read
+ * through libusb, so WinUSB must be bound to that interface. The remote
+ * becomes a gamepad once it answers.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_DJI_REMOTE "SDL_JOYSTICK_HIDAPI_DJI_REMOTE"
+
+/**
+ * A variable naming the DJI screen remotes to read over the network.
+ *
+ * This is a PadForge fork addition, for Windows. The format is a comma
+ * separated list of IPv4 addresses, each with an optional port, e.g.
+ *
+ * 192.168.7.251,127.0.0.1:40007
+ *
+ * The port defaults to 40007, where the DJI RC and DJI RC 2 serve their
+ * sticks on firmware that still opens it. Spaces around entries are ignored,
+ * an entry that cannot be used is skipped with a log message, and an address
+ * named twice keeps one entry.
+ *
+ * The default is empty, and the driver opens no connection.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS "SDL_JOYSTICK_DJI_REMOTE_TCP_HOSTS"
 
 /**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One

@@ -41,10 +41,15 @@ COM port arriving.
 | `jvs` | JVS I/O boards | 115200 8N1 | Arcade stick per player, up to 4 |
 | `vrinsight` | VRinsight CDU II, MCP Combo I | 115200 8N1 | 70 or 72 buttons |
 | `kettler` | Kettler ergometers with an RS-232 port | 9600 8N1 | 5 axes |
+| `dji` | DJI RC-N1 family | 115200 8N1 | Gamepad |
+| `djimavicmini` | DJI Mavic Mini remote | 115200 8N1 | Gamepad |
+| `djiphantom3` | DJI Phantom 3 remote | 115200 8N1 | Gamepad |
+| `djiphantom2` | DJI Phantom 2 remote | 115200 8N1 | Gamepad |
 
-The Stinger and the JVS players get gamepad mappings. The rest stay
-joysticks. Every port runs with DTR and RTS on, except that a JVS port raises
-RTS only while it sends.
+The Stinger, the JVS players and the DJI remotes get gamepad mappings. The
+rest stay joysticks. Every port runs with DTR and RTS on, except that a JVS
+port raises RTS only while it sends. The DJI remotes are described in
+[README-dji-remotes.md](README-dji-remotes.md).
 
 ## Devices that need care
 
@@ -88,10 +93,17 @@ adapter that stays connected goes unnoticed.
 
 ## Self-identifying ports
 
-A device whose COM port is one of its own USB interfaces could be opened
-without the hint, by matching its device instance ID against a table in the
-driver. `SDL_HINT_JOYSTICK_SERIAL_AUTO` turns that matching off. The table is
-empty in this version.
+A device whose COM port is one of its own USB interfaces is opened without
+the hint, by matching its device instance ID against a table in the driver.
+In a table row, `?` matches any one character. `SDL_HINT_JOYSTICK_SERIAL_AUTO`
+turns that matching off, and a port the hint names keeps the hint's protocol.
+
+| Instance ID | Token | Device |
+|---|---|---|
+| `USB\VID_2CA3&PID_????&MI_02\` | `dji` | The protocol port of a DJI RC-N1 family remote |
+
+Such a port's joystick GUID carries the USB vendor and product IDs of its
+device, the product ID taken from the instance ID.
 
 ## Tests
 

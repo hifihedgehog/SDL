@@ -52,6 +52,13 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
      * wValue, as Linux sends it. Linux and macOS send those writes through
      * their HID backends. */
     { USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+
+    /* The DJI RC (RM330). Its configuration is MTP, a DUML bulk interface
+     * and ADB. The bulk interface is class 0xFF, subclass 0x43, the way
+     * dji-firmware-tools and DJI-RC-Emulator find it, whatever its number
+     * or protocol: bulk IN 0x83 and bulk OUT 0x02. The DUML frames go out
+     * unchanged. */
+    { USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, SDL_VENDORUSB_MATCH_CLASS | SDL_VENDORUSB_ANY_PROTOCOL | SDL_VENDORUSB_RAW_OUTPUT, 0, 0xFF, 0x43, 0, 0, 0x83, 0x02, 0, 0 },
 };
 
 /* Devices that need libusb on every platform. The Switch 2 devices carry
@@ -85,7 +92,7 @@ const SDL_VendorUSBRule *SDL_VendorUSB_FindRule(uint16_t vendor, uint16_t produc
         if (rule->flags & SDL_VENDORUSB_MATCH_CLASS) {
             if (rule->interface_class == interface_class &&
                 rule->interface_subclass == interface_subclass &&
-                rule->interface_protocol == interface_protocol) {
+                ((rule->flags & SDL_VENDORUSB_ANY_PROTOCOL) || rule->interface_protocol == interface_protocol)) {
                 return rule;
             }
         } else if (rule->interface_number == interface_number) {

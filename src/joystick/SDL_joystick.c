@@ -73,6 +73,9 @@ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
 #ifdef SDL_JOYSTICK_SERIAL // PadForge fork: joysticks on COM ports (issue #33)
     &SDL_SERIAL_JoystickDriver,
 #endif
+#ifdef SDL_JOYSTICK_DJI_TCP // PadForge fork: DJI screen remotes over TCP (issue #33)
+    &SDL_DJITCP_JoystickDriver,
+#endif
 #ifdef SDL_JOYSTICK_WINMM
     &SDL_WINMM_JoystickDriver,
 #endif

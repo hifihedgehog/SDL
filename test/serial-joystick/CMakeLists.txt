@@ -29,15 +29,16 @@ endif()
 get_filename_component(SERIAL_SDL_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(SERIAL_TESTS "${SERIAL_SDL_ROOT}/test")
 set(SERIAL_SOURCE "${SERIAL_SDL_ROOT}/src/joystick/serial")
+set(SERIAL_DJI "${SERIAL_SDL_ROOT}/src/joystick/dji")
+
+# The DJI capture test reads captures from the reference clones at run time.
+# They are not copied into this tree.
+get_filename_component(SERIAL_DJI_DEFAULT_REFERENCES "${SERIAL_SDL_ROOT}/../.." ABSOLUTE)
+set(DJI_REFERENCE_ROOT "${SERIAL_DJI_DEFAULT_REFERENCES}" CACHE PATH "Folder that holds the DJI reference clones")
 
 enable_testing()
 
-function(serial_test name)
-    set(target "testserial${name}")
-    add_executable(${target} "${SERIAL_TESTS}/testserial${name}.c"
-        "${SERIAL_SOURCE}/SDL_serial_engine.c"
-        "${SERIAL_SOURCE}/SDL_serial_proto.c"
-        ${ARGN})
+function(serial_configure target)
     set_target_properties(${target} PROPERTIES
         C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     if(MSVC)
@@ -54,9 +55,36 @@ function(serial_test name)
             target_link_options(${target} PRIVATE -fsanitize=address)
         endif()
     endif()
+endfunction()
+
+function(serial_test name)
+    set(target "testserial${name}")
+    add_executable(${target} "${SERIAL_TESTS}/testserial${name}.c"
+        "${SERIAL_SOURCE}/SDL_serial_engine.c"
+        "${SERIAL_SOURCE}/SDL_serial_proto.c"
+        ${ARGN})
+    serial_configure(${target})
     add_test(NAME "serial-joystick.${name}" COMMAND ${target})
     set_tests_properties("serial-joystick.${name}" PROPERTIES
         TIMEOUT 120 LABELS "serial-joystick;offline"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endfunction()
+
+# A DJI test: test/testdji<name>.c with the engine, the contract and the DJI
+# modules. Arguments after the name reach the test. A test that returns 77
+# is reported as skipped.
+function(dji_test name)
+    set(target "testdji${name}")
+    add_executable(${target} "${SERIAL_TESTS}/testdji${name}.c"
+        "${SERIAL_SOURCE}/SDL_serial_engine.c"
+        "${SERIAL_SOURCE}/SDL_serial_proto.c"
+        "${SERIAL_DJI}/SDL_dji_duml.c"
+        "${SERIAL_DJI}/SDL_dji_remote_proto.c"
+        "${SERIAL_DJI}/SDL_dji_tcp_proto.c")
+    serial_configure(${target})
+    add_test(NAME "serial-joystick.dji${name}" COMMAND ${target} ${ARGN})
+    set_tests_properties("serial-joystick.dji${name}" PROPERTIES
+        TIMEOUT 120 LABELS "serial-joystick;offline" SKIP_RETURN_CODE 77
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endfunction()
 
@@ -84,3 +112,16 @@ serial_test(jvs "${SERIAL_SOURCE}/SDL_serial_jvs_proto.c")
 serial_test(vrinsight "${SERIAL_SOURCE}/SDL_serial_vrinsight_proto.c")
 
 serial_test(kettler "${SERIAL_SOURCE}/SDL_serial_kettler_proto.c")
+
+# hifihedgehog/SDL#33 Part 6: DJI remotes on the serial port, the USB bulk
+# interface and TCP.
+dji_test(duml)
+
+dji_test(remote)
+
+dji_test(tcp)
+
+dji_test(capture
+    "${DJI_REFERENCE_ROOT}/DJI_RC_Motion_Bridge-v1kr4m/brute_log.txt"
+    "${DJI_REFERENCE_ROOT}/dji-rc-joystick-gregszero/capture.bin"
+    "${DJI_REFERENCE_ROOT}/dji-rc-joystick-gregszero/capture_f5.bin")

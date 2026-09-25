@@ -2766,6 +2766,13 @@ elseif(WINDOWS OR CYGWIN)
       "${SDL3_SOURCE_DIR}/src/joystick/serial/*.h"
     )
     set(SDL_JOYSTICK_SERIAL 1)
+    # PadForge fork: DJI remotes, the DUML codec and remote modules shared by
+    # the serial, HIDAPI and TCP drivers (hifihedgehog/SDL#33 Part 6)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/joystick/dji/*.c"
+      "${SDL3_SOURCE_DIR}/src/joystick/dji/*.h"
+    )
+    set(SDL_JOYSTICK_DJI_TCP 1)
     if(HAVE_GAMEINPUT_H)
       sdl_glob_sources("${SDL3_SOURCE_DIR}/src/joystick/gdk/*.cpp")
       set(SDL_JOYSTICK_GAMEINPUT 1)
