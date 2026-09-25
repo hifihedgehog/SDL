@@ -2759,6 +2759,13 @@ elseif(WINDOWS OR CYGWIN)
     endif()
     # PadForge fork: WinRT BLE-GATT driver for the Switch 2 controllers (issue #5)
     set(SDL_JOYSTICK_BLE 1)
+    # PadForge fork: joysticks on COM ports, the pure engine and protocol
+    # modules beside the Windows driver (hifihedgehog/SDL#33 Part 5)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/joystick/serial/*.c"
+      "${SDL3_SOURCE_DIR}/src/joystick/serial/*.h"
+    )
+    set(SDL_JOYSTICK_SERIAL 1)
     if(HAVE_GAMEINPUT_H)
       sdl_glob_sources("${SDL3_SOURCE_DIR}/src/joystick/gdk/*.cpp")
       set(SDL_JOYSTICK_GAMEINPUT 1)

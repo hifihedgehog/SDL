@@ -2225,6 +2225,52 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2 "SDL_JOYSTICK_BLE_SWITCH2"
 
 /**
+ * A variable naming the COM ports that carry serial joysticks, and the
+ * protocol each one speaks.
+ *
+ * This is a PadForge fork addition, for Windows. The format is a comma
+ * separated list of PORT=PROTOCOL entries, e.g.
+ *
+ * COM3=spaceball,COM4=magellan
+ *
+ * PORT is COMn, or the start of a device instance ID as Device Manager shows
+ * it, which follows an adapter to a new COM number. PROTOCOL is one of
+ * spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua, ibus,
+ * jvs, vrinsight and kettler. Spaces around entries are ignored, an entry
+ * that cannot be used is skipped with a log message, and a port named twice
+ * keeps its last entry.
+ *
+ * The default is empty, and the driver opens no port.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_SERIAL "SDL_JOYSTICK_SERIAL"
+
+/**
+ * A variable controlling whether the serial joystick driver opens the COM
+ * ports of devices that identify themselves.
+ *
+ * This is a PadForge fork addition, for Windows. Some devices carry their COM
+ * port as one of their own USB interfaces, so the port's device instance ID
+ * names the device, and the driver opens those ports without
+ * SDL_HINT_JOYSTICK_SERIAL naming them. A port the hint names keeps the
+ * hint's protocol.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": Only the ports SDL_HINT_JOYSTICK_SERIAL names are opened.
+ * - "1": The ports of devices that identify themselves are opened too.
+ *   (default)
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_SERIAL_AUTO "SDL_JOYSTICK_SERIAL_AUTO"
+
+/**
  * A variable controlling whether the Joy-Con 2's optical mouse sensor is
  * enabled by the BLE driver, exposing its absolute X/Y counters as two extra
  * joystick axes.
