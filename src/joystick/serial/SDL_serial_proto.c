@@ -238,6 +238,11 @@ static void Serial_Emit(SDL_SerialBase *base, int sub)
 
 void SDL_Serial_Present(SDL_SerialBase *base, int sub, const SDL_SerialIdentity *identity)
 {
+    SDL_Serial_PresentWith(base, sub, identity, NULL);
+}
+
+void SDL_Serial_PresentWith(SDL_SerialBase *base, int sub, const SDL_SerialIdentity *identity, const SDL_SerialControls *controls)
+{
     SDL_SerialSnapshot *snapshot;
 
     if (sub < 0 || sub >= SDL_SERIAL_MAX_SUBDEVICES || !identity) {
@@ -250,7 +255,11 @@ void SDL_Serial_Present(SDL_SerialBase *base, int sub, const SDL_SerialIdentity 
     snapshot->present = true;
     snapshot->identity = *identity;
     snapshot->identity.name[SDL_SERIAL_NAME_LENGTH - 1] = '\0';
-    memset(&snapshot->controls, 0, sizeof(snapshot->controls));
+    if (controls) {
+        snapshot->controls = *controls;
+    } else {
+        memset(&snapshot->controls, 0, sizeof(snapshot->controls));
+    }
     memset(base->pulse_end[sub], 0, sizeof(base->pulse_end[sub]));
     Serial_Emit(base, sub);
 }
