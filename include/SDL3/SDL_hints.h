@@ -2302,6 +2302,34 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC "SDL_JOYSTICK_HIDAPI_SWITCH_NFC"
 
 /**
+ * A variable controlling whether a right Joy-Con reads the Ring Fit
+ * Adventure Ring-Con on its rail, exposing the Ring-Con's strain as an extra
+ * joystick axis.
+ *
+ * This is a PadForge fork addition. The Ring-Con is read through the
+ * Joy-Con's NFC/IR MCU, which costs battery, and a check for a Ring-Con that
+ * is not attached keeps the MCU up for several seconds, so it is opt-in. The
+ * NIR camera and NFC take the MCU first when their hints are on.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": the Ring-Con is not read. (default)
+ * - "1": a right Joy-Con on Bluetooth looks for a Ring-Con when it opens and
+ *   when this hint turns on. The strain is joystick axis
+ *   SDL_GAMEPAD_AXIS_COUNT + 1, a signed 16-bit value that rises as the ring
+ *   is pressed. The joystick property "SDL.joystick.switch.ringcon" is true
+ *   while the strain flows, and "SDL.joystick.switch.ringcon_rest" holds the
+ *   first strain read after it starts, the resting value unless the ring was
+ *   held at that moment.
+ *
+ * The hint can be toggled at runtime: turning it off powers the MCU back
+ * down.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_JOYCON_RINGCON "SDL_JOYSTICK_HIDAPI_JOYCON_RINGCON"
+
+/**
  * A variable controlling whether Nintendo Switch Joy-Con controllers will be
  * in vertical mode when using the HIDAPI driver.
  *
