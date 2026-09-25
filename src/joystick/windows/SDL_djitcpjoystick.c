@@ -105,6 +105,9 @@ struct joystick_hwdata
     uint32_t generation;
     uint64_t sequence; /* The last snapshot sent */
     int battery;       /* The last battery level sent, -1 for none */
+    bool send_initial; /* The state Open took is not sent yet */
+    Uint64 initial_stamp;
+    SDL_SerialControls initial;
 };
 
 static SDL_Mutex *djitcp_lock;
@@ -771,8 +774,6 @@ static bool DJITCP_JoystickOpen(SDL_Joystick *joystick, int device_index)
 {
     DJITCP_Host *host = DJITCP_GetDevice(device_index);
     struct joystick_hwdata *hwdata;
-    SDL_SerialControls latest;
-    int battery;
 
     if (!host) {
         return SDL_SetError("DJI remote index out of range");
@@ -789,14 +790,15 @@ static bool DJITCP_JoystickOpen(SDL_Joystick *joystick, int device_index)
     joystick->nbuttons = host->joystick_identity.nbuttons;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
-    /* The state so far. Queued snapshots up to it are skipped. */
+    /* The state so far, sent by the first update, as SDL allocates the
+       joystick's axes and buttons only after Open returns. Queued snapshots
+       up to it are skipped. */
     SDL_LockMutex(host->mutex);
-    latest = host->latest;
+    hwdata->initial = host->latest;
     hwdata->sequence = host->latest_sequence;
-    battery = host->battery;
     SDL_UnlockMutex(host->mutex);
-    DJITCP_SendControls(joystick, &latest, SDL_GetTicksNS());
-    DJITCP_SendBattery(joystick, battery);
+    hwdata->initial_stamp = SDL_GetTicksNS();
+    hwdata->send_initial = true;
     return true;
 }
 
@@ -850,6 +852,10 @@ static void DJITCP_JoystickUpdate(SDL_Joystick *joystick)
 
     if (!hwdata || !hwdata->host) {
         return;
+    }
+    if (hwdata->send_initial) {
+        hwdata->send_initial = false;
+        DJITCP_SendControls(joystick, &hwdata->initial, hwdata->initial_stamp);
     }
     host = hwdata->host;
     SDL_LockMutex(host->mutex);
