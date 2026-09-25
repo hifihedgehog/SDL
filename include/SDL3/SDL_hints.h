@@ -2236,8 +2236,9 @@ extern "C" {
  * PORT is COMn, or the start of a device instance ID as Device Manager shows
  * it, which follows an adapter to a new COM number. PROTOCOL is one of
  * spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua, ibus,
- * jvs, vrinsight, kettler, iforce for I-Force wheels and joysticks, and for
- * DJI drone remotes dji (the RC-N1 family), djimavicmini, djiphantom3 and
+ * jvs, vrinsight, kettler, iforce for I-Force wheels and joysticks,
+ * mastercontroller for Pony Canyon's train Master Controllers, and for DJI
+ * drone remotes dji (the RC-N1 family), djimavicmini, djiphantom3 and
  * djiphantom2. Spaces around entries are ignored, an entry that cannot be
  * used is skipped with a log message, and a port named twice keeps its last
  * entry.
@@ -2917,6 +2918,29 @@ extern "C" {
  * \since This hint is available since SDL 3.5.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_GUNCON "SDL_JOYSTICK_HIDAPI_GUNCON"
+
+/**
+ * A variable controlling whether the HIDAPI driver for USB train controllers
+ * should be used.
+ *
+ * This is a PadForge fork addition, for Windows. Taito's Densha de GO! Type
+ * 2, Shinkansen and Ryojohen controllers for the PlayStation 2, the Multi
+ * Train Controller and the Train Mascon are read through libusb, so WinUSB
+ * must be bound to them. A handle becomes one axis with its notches spread
+ * evenly.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_TRAIN "SDL_JOYSTICK_HIDAPI_TRAIN"
 
 /**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One

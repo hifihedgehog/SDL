@@ -37,6 +37,7 @@
 #include "hidapi/SDL_hidapi_nintendo.h"
 #include "hidapi/SDL_hidapi_ps3ext_proto.h"
 #include "hidapi/SDL_hidapi_sinput.h"
+#include "hidapi/SDL_hidapi_train_proto.h"
 #include "hidapi/SDL_hidapi_xid_proto.h"
 #include "hidapi/SDL_hidapijoystick_c.h"
 #include "../hidapi/SDL_hidapi_collections.h"
@@ -1201,6 +1202,17 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
     if (vendor == USB_VENDOR_DJI && product == USB_PRODUCT_DJI_RC_RM330) {
         SDL_strlcat(mapping_string, SDL_DJI_BULK_MAPPING, sizeof(mapping_string));
         return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
+    }
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_TRAIN
+    // One axis per handle, with the notches spread evenly (hifihedgehog/SDL#33 Part 10)
+    {
+        const char *train_mapping = SDL_Train_GetMapping(SDL_Train_Identify(vendor, product, version));
+
+        if (train_mapping) {
+            SDL_strlcat(mapping_string, train_mapping, sizeof(mapping_string));
+            return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
+        }
     }
 #endif
 

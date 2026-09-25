@@ -87,6 +87,16 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
      * mode request goes out as SET_REPORT on the control pipe. No platform
      * has a driver for it, so libusb serves it everywhere. */
     { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+
+    /* Train controllers: interface 0 with one interrupt IN endpoint and no
+     * HID class descriptor, class 03 on the Taito units and 00 on the
+     * others. Every output is a vendor control transfer. No platform has a
+     * driver for them, so libusb serves them everywhere. */
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_TYPE2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_SHINKANSEN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_RYOJOHEN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_MULTI_TRAIN_CONTROLLER, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { USB_VENDOR_TRAIN_MASCON, USB_PRODUCT_TRAIN_MASCON, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
 /* Devices that need libusb on every platform. The Switch 2 devices carry
@@ -105,6 +115,11 @@ static const struct
     { USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER },
     { USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES },
     { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_GUNCON2 },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_TYPE2 },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_SHINKANSEN },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_RYOJOHEN },
+    { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_MULTI_TRAIN_CONTROLLER },
+    { USB_VENDOR_TRAIN_MASCON, USB_PRODUCT_TRAIN_MASCON },
 };
 
 const SDL_VendorUSBRule *SDL_VendorUSB_FindRule(uint16_t vendor, uint16_t product,

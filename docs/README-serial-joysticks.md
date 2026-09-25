@@ -42,16 +42,19 @@ COM port arriving.
 | `vrinsight` | VRinsight CDU II, MCP Combo I | 115200 8N1 | 70 or 72 buttons |
 | `kettler` | Kettler ergometers with an RS-232 port | 9600 8N1 | 5 axes |
 | `iforce` | I-Force wheels and joysticks: the Boeder Force Feedback Wheel, the Trust Force Feedback Race Master, and others by the IDs they report | 38400 8N1 | Wheel or flight stick |
+| `mastercontroller` | Pony Canyon Master Controller and Master Controller II | 19200 8N1 | Gamepad: the lever and the reverser |
 | `dji` | DJI RC-N1 family | 115200 8N1 | Gamepad |
 | `djimavicmini` | DJI Mavic Mini remote | 115200 8N1 | Gamepad |
 | `djiphantom3` | DJI Phantom 3 remote | 115200 8N1 | Gamepad |
 | `djiphantom2` | DJI Phantom 2 remote | 115200 8N1 | Gamepad |
 
-The Stinger, the JVS players and the DJI remotes get gamepad mappings. The
-rest stay joysticks. Every port runs with DTR and RTS on, except that a JVS
-port raises RTS only while it sends. The DJI remotes are described in
-[README-dji-remotes.md](README-dji-remotes.md), and the I-Force devices in
-[README-iforce.md](README-iforce.md).
+The Stinger, the JVS players, the DJI remotes and the Master Controllers get
+gamepad mappings. The rest stay joysticks. Every port runs with DTR and RTS
+on, except that a JVS port raises RTS only while it sends and a Master
+Controller port runs with both off. The DJI remotes are described in
+[README-dji-remotes.md](README-dji-remotes.md), the I-Force devices in
+[README-iforce.md](README-iforce.md), and the Master Controllers in
+[README-train.md](README-train.md).
 
 ## Devices that need care
 
@@ -77,6 +80,9 @@ port raises RTS only while it sends. The DJI remotes are described in
 - I-Force: the driver asks `O` once a second, 20 times at most, and with no
   answer logs it and opens no joystick. The `M` and `P` replies name the
   device and pick its layout.
+- Master Controller: the driver writes one 00 byte after opening. The
+  controller sends only on a change, so its joystick appears with the first
+  event.
 
 ## Output
 
