@@ -81,6 +81,14 @@ int main(void)
     CHECK(!SDL_GameVoice_DecodeReport(NULL, 1, &buttons));
     CHECK(!SDL_GameVoice_DecodeReport(r, 1, NULL));
 
+    /* 5: the decode keeps no state, so nothing outlives a reconnect: after
+       every button, a report with none releases every button. The module
+       has no output, and the driver sends nothing on open. */
+    r[0] = 0xFF;
+    CHECK(Decode(r, 1, &buttons) && buttons == 0xFF);
+    r[0] = 0x00;
+    CHECK(Decode(r, 1, &buttons) && buttons == 0x00);
+
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);
         return 1;

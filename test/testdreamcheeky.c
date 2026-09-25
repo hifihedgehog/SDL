@@ -90,6 +90,13 @@ int main(void)
     CHECK(!SDL_DreamCheeky_DecodeReport(NULL, 8, &pads));
     CHECK(!SDL_DreamCheeky_DecodeReport(held4, 8, NULL));
 
+    /* 6: the decode keeps no state, so nothing outlives a reconnect: after
+       all six pads, a report with none releases every pad */
+    memset(r, 0x3F, 8);
+    CHECK(Decode(r, 8, &pads) && pads == 0x3F);
+    memset(r, 0x00, 8);
+    CHECK(Decode(r, 8, &pads) && pads == 0x00);
+
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);
         return 1;
