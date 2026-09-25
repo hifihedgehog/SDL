@@ -194,6 +194,12 @@ extern bool SDL_XID_ParseDescriptor(const uint8_t *data, size_t length, SDL_XIDD
 // The identity table: pads, wheels, dance pads and light guns by ID
 extern const SDL_XIDKnownDevice *SDL_XID_FindKnownDevice(uint16_t vendor, uint16_t product);
 
+/* Whether a HIDAPI GUID with this ID can only come from the XID drivers: an
+ * ID in the identity table or the Steel Battalion's. No other driver serves
+ * these IDs, so the mapping follows from the GUID whether or not the device
+ * is connected. */
+extern bool SDL_XID_IsKnownID(uint16_t vendor, uint16_t product);
+
 /* What the device is, from its descriptor when one was read, otherwise from
  * the identity table. Returns false for a device that is not served. */
 extern bool SDL_XID_Identify(uint16_t vendor, uint16_t product, const SDL_XIDDescriptor *descriptor,

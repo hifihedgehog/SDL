@@ -137,6 +137,11 @@ const SDL_XIDKnownDevice *SDL_XID_FindKnownDevice(uint16_t vendor, uint16_t prod
     return NULL;
 }
 
+bool SDL_XID_IsKnownID(uint16_t vendor, uint16_t product)
+{
+    return SDL_XID_FindKnownDevice(vendor, product) != NULL || SDL_XID_IsSteelBattalionID(vendor, product);
+}
+
 // The joystick type a gamepad-family subtype gives, or -1 when the subtype is not known
 static int XID_TypeForSubtype(uint8_t subtype)
 {
