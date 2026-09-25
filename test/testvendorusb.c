@@ -134,6 +134,22 @@ static void TestRules(void)
     CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_PRO));
     CHECK(!SDL_VendorUSB_IsVendorDevice(0x054C, 0x09CC));
     CHECK(!SDL_VendorUSB_IsVendorDevice(USB_VENDOR_INTEL, 0xC014));
+
+    /* The Gametrak's rule serves Windows only: its one HID interface, the
+       first IN endpoint, and no OUT endpoint required */
+    rule = SDL_VendorUSB_FindRule(USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, 0, 3, 0, 0);
+    CHECK(rule && (rule->flags & SDL_VENDORUSB_WINDOWS_ONLY) && !(rule->flags & SDL_VENDORUSB_RAW_OUTPUT));
+    CHECK(rule && rule->in_endpoint == 0 && rule->out_endpoint == 0 && rule->alternate == 0);
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
+    CHECK(!SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER));
+    CHECK(!SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+    CHECK(SDL_VendorUSB_IsVendorDevice(USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK));
+    CHECK(!SDL_VendorUSB_RuleApplies(NULL, SDL_VENDORUSB_PLATFORM_WINDOWS));
+    /* Every other rule serves every platform */
+    rule = SDL_VendorUSB_FindRule(USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, 0, 3, 0, 0);
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+    rule = SDL_VendorUSB_FindRule(USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 0, 3, 1, 1);
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
 }
 
 static void TestIntelDescriptors(void)
@@ -379,6 +395,7 @@ static const Device devices[] = {
     { "Xbox One pad", USB_VENDOR_MICROSOFT, 0x02EA, 0, 0xFF, 0x47, 0xD0, true },
     { "Vendor interface, no rule", 0x1234, 0x5678, 0, 0xFF, 0, 0, false },
     { "HID keyboard", 0x046D, 0xC31C, 0, 3, 1, 1, false },
+    { "Gametrak", USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, 0, 3, 0, 0, false },
 };
 
 static bool NewLibUSBEnumerates(const SDL_VendorUSBRouting *r, const Device *d, bool opened)
@@ -416,7 +433,8 @@ static SDL_VendorUSBRouting Route(SDL_VendorUSBPlatform platform, bool libusb, c
     r.vendor = d->vendor;
     r.product = d->product;
     r.xbox = libusb ? d->xbox : false;
-    r.vendor_interface = libusb ? (SDL_VendorUSB_FindRule(d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol) != NULL) : false;
+    /* As should_enumerate_interface in hid.c computes it */
+    r.vendor_interface = libusb ? SDL_VendorUSB_RuleApplies(SDL_VendorUSB_FindRule(d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol), platform) : false;
     return r;
 }
 
@@ -487,6 +505,15 @@ static void TestRoutingTable(void)
     CHECK(!OnLibUSB(L, "DualShock 4", true));
     CHECK(!PlatformIgnores(L, "DualShock 4"));
 
+    /* The Gametrak's writes need libusb on Windows only. Elsewhere the
+     * platform backend keeps it and libusb leaves it. */
+    CHECK(OnLibUSB(W, "Gametrak", true));
+    CHECK(PlatformIgnores(W, "Gametrak"));
+    CHECK(!OnLibUSB(L, "Gametrak", true));
+    CHECK(!PlatformIgnores(L, "Gametrak"));
+    CHECK(!OnLibUSB(M, "Gametrak", true));
+    CHECK(!PlatformIgnores(M, "Gametrak"));
+
     /* The GameCube hint still turns the adapter off. */
     {
         const Device *d = Find("GameCube adapter");
@@ -502,9 +529,13 @@ static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
 {
     const bool intel = (d->vendor == USB_VENDOR_INTEL && d->product == USB_PRODUCT_INTEL_WIRELESS_SERIES);
     const bool bigbutton = (d->vendor == USB_VENDOR_MICROSOFT && d->product == USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER);
+    const bool gametrak = (d->vendor == USB_VENDOR_IN2GAMES && d->product == USB_PRODUCT_IN2GAMES_GAMETRAK);
 
     if (intel) {
         return true; /* A new member of the path */
+    }
+    if (gametrak && r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {
+        return true; /* Part 7: on the path on Windows only */
     }
     if (bigbutton && d->protocol != 0x04) {
         return true; /* Only the receiver's own interface is enumerated */

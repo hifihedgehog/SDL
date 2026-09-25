@@ -26,6 +26,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
 #include "../../SDL_hints_c.h"
+#include "../../hidapi/SDL_hidapi_collections.h"
 
 #if defined(SDL_PLATFORM_WIN32) || defined(SDL_PLATFORM_WINGDK)
 #include "../windows/SDL_rawinputjoystick_c.h"
@@ -124,6 +125,39 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #endif
 #ifdef SDL_JOYSTICK_HIDAPI_ZUIKI
     &SDL_HIDAPI_DriverZUIKI,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_SPEEDFORCE
+    &SDL_HIDAPI_DriverSpeedForce,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_RC_ADAPTER
+    &SDL_HIDAPI_DriverRCAdapter,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_GAMEVOICE
+    &SDL_HIDAPI_DriverGameVoice,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_P5GLOVE
+    &SDL_HIDAPI_DriverP5Glove,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_DREAMCHEEKY
+    &SDL_HIDAPI_DriverDreamCheeky,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_NIA
+    &SDL_HIDAPI_DriverNIA,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_GAMETRAK
+    &SDL_HIDAPI_DriverGametrak,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_RIFT_DK1
+    &SDL_HIDAPI_DriverRiftDK1,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_WMR
+    &SDL_HIDAPI_DriverWMR,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_NIMBUS
+    &SDL_HIDAPI_DriverNimbus,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_PRODIKEYS
+    &SDL_HIDAPI_DriverProdikeys,
 #endif
 };
 static int SDL_HIDAPI_numdrivers = 0;
@@ -450,7 +484,9 @@ static SDL_HIDAPI_DeviceDriver *HIDAPI_GetDeviceDriver(SDL_HIDAPI_Device *device
         return NULL;
     }
 
-    if (device->vendor_id != USB_VENDOR_VALVE && device->vendor_id != USB_VENDOR_FLYDIGI_V1 && device->vendor_id != USB_VENDOR_FLYDIGI_V2) {
+    // A collection the admitted-collection table lists passes whatever its usage
+    if (device->vendor_id != USB_VENDOR_VALVE && device->vendor_id != USB_VENDOR_FLYDIGI_V1 && device->vendor_id != USB_VENDOR_FLYDIGI_V2 &&
+        !SDL_HIDAPI_IsAdmittedCollection(device->vendor_id, device->product_id, device->usage_page, device->usage)) {
         if (device->usage_page && device->usage_page != USAGE_PAGE_GENERIC_DESKTOP) {
             return NULL;
         }

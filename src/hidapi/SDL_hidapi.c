@@ -32,6 +32,7 @@
 
 #include "SDL_hidapi_c.h"
 #include "SDL_hidapi_vendorusb.h"
+#include "SDL_hidapi_collections.h"
 #include "../joystick/usb_ids.h"
 #include "../joystick/SDL_joystick_c.h"
 #include "../SDL_hints_c.h"
@@ -1186,6 +1187,8 @@ static bool HIDAPI_ShouldIgnoreDevice(int bus, Uint16 vendor_id, Uint16 product_
         } else if (usage_page == USB_USAGEPAGE_GENERIC_DESKTOP &&
                    (usage == USB_USAGE_GENERIC_JOYSTICK || usage == USB_USAGE_GENERIC_GAMEPAD || usage == USB_USAGE_GENERIC_MULTIAXISCONTROLLER)) {
             // This is a controller
+        } else if (SDL_HIDAPI_IsAdmittedCollection(vendor_id, product_id, usage_page, usage)) {
+            // A controller whose collection declares no controller usage
         } else {
             return true;
         }
