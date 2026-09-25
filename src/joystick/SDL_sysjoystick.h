@@ -164,6 +164,7 @@ struct SDL_Joystick
 #define SDL_HARDWARE_BUS_UNKNOWN   0x00
 #define SDL_HARDWARE_BUS_USB       0x03
 #define SDL_HARDWARE_BUS_BLUETOOTH 0x05
+#define SDL_HARDWARE_BUS_SERIAL    0x13 // Linux's BUS_RS232
 #define SDL_HARDWARE_BUS_VIRTUAL   0xFF
 
 // Macro to combine a USB vendor ID and product ID into a single Uint32 value
@@ -269,6 +270,7 @@ extern SDL_JoystickDriver SDL_LINUX_JoystickDriver;
 extern SDL_JoystickDriver SDL_VIRTUAL_JoystickDriver;
 extern SDL_JoystickDriver SDL_WGI_JoystickDriver;
 extern SDL_JoystickDriver SDL_BLE_JoystickDriver;
+extern SDL_JoystickDriver SDL_SERIAL_JoystickDriver;
 extern SDL_JoystickDriver SDL_WINDOWS_JoystickDriver;
 extern SDL_JoystickDriver SDL_WINMM_JoystickDriver;
 extern SDL_JoystickDriver SDL_PS2_JoystickDriver;
