@@ -32,11 +32,13 @@
 #include "usb_ids.h"
 #include "hidapi/SDL_hidapi_flydigi.h"
 #include "hidapi/SDL_hidapi_intelwireless_proto.h"
+#include "hidapi/SDL_hidapi_nimbus_proto.h"
 #include "hidapi/SDL_hidapi_nintendo.h"
 #include "hidapi/SDL_hidapi_ps3ext_proto.h"
 #include "hidapi/SDL_hidapi_sinput.h"
 #include "hidapi/SDL_hidapi_xid_proto.h"
 #include "hidapi/SDL_hidapijoystick_c.h"
+#include "../hidapi/SDL_hidapi_collections.h"
 #include "../events/SDL_events_c.h"
 #include "../SDL_hints_c.h"
 
@@ -1171,6 +1173,17 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
             return NULL;
         }
         SDL_strlcat(mapping_string, xid_mapping, sizeof(mapping_string));
+        return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
+    }
+#endif
+
+    if (SDL_HIDAPI_IsJoystickOnlyDevice(vendor, product)) {
+        // A glove, a drum mat, a tracker or a keyboard has no gamepad shape, so it stays a joystick
+        return NULL;
+    }
+#ifdef SDL_JOYSTICK_HIDAPI_NIMBUS
+    if (vendor == USB_VENDOR_STEELSERIES_BT && product == USB_PRODUCT_STEELSERIES_NIMBUS) {
+        SDL_strlcat(mapping_string, SDL_NIMBUS_MAPPING, sizeof(mapping_string));
         return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
     }
 #endif

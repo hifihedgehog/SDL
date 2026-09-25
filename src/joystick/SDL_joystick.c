@@ -572,6 +572,7 @@ static Uint32 initial_wheel_devices[] = {
     MAKE_VIDPID(0x046d, 0xc299), // Logitech G25
     MAKE_VIDPID(0x046d, 0xc29a), // Logitech Driving Force GT
     MAKE_VIDPID(0x046d, 0xc29b), // Logitech G27
+    MAKE_VIDPID(0x046d, 0xc29c), // Logitech Speed Force Wireless
     MAKE_VIDPID(0x046d, 0xca03), // Logitech Momo Racing
     MAKE_VIDPID(0x045e, 0x02a2), // Xbox 360 Wireless Racing Wheel
     MAKE_VIDPID(0x0483, 0x0522), // Simagic Wheelbase (including M10, Alpha Mini, Alpha, Alpha U)

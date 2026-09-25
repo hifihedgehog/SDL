@@ -34,8 +34,10 @@
 #define USB_VENDOR_CAPCOM       0x0a7b
 #define USB_VENDOR_CRKD         0x3651
 #define USB_VENDOR_CORSAIR      0x1b1c
+#define USB_VENDOR_CREATIVE     0x041e
 #define USB_VENDOR_GAMESIR      0x3537
 #define USB_VENDOR_DRAGONRISE   0x0079
+#define USB_VENDOR_DREAMCHEEKY  0x1941
 #define USB_VENDOR_FLYDIGI_V1   0x04b4
 #define USB_VENDOR_FLYDIGI_V2   0x37d7
 #define USB_VENDOR_GOOGLE       0x18d1
@@ -43,15 +45,20 @@
 #define USB_VENDOR_HORI         0x0f0d
 #define USB_VENDOR_HP           0x03f0
 #define USB_VENDOR_HYPERKIN     0x2e24
+#define USB_VENDOR_IN2GAMES     0x14b7
 #define USB_VENDOR_INTEL        0x8086
 #define USB_VENDOR_LOGITECH     0x046d
 #define USB_VENDOR_MADCATZ      0x0738
 #define USB_VENDOR_MAYFLASH     0x33df
 #define USB_VENDOR_MICROSOFT    0x045e
+#define USB_VENDOR_MULTIPLE_1781 0x1781
 #define USB_VENDOR_NACON        0x146b
 #define USB_VENDOR_NACON_ALT    0x3285
+#define USB_VENDOR_NIA          0x1234 // The OCZ NIA's placeholder ID
 #define USB_VENDOR_NINTENDO     0x057e
 #define USB_VENDOR_NVIDIA       0x0955
+#define USB_VENDOR_OCULUS       0x2833
+#define USB_VENDOR_P5           0x0d7f
 #define USB_VENDOR_PDP          0x0e6f
 #define USB_VENDOR_POWERA       0x24c6
 #define USB_VENDOR_POWERA_ALT   0x20d6
@@ -64,6 +71,8 @@
 #define USB_VENDOR_SHANWAN      0x2563
 #define USB_VENDOR_SHANWAN_ALT  0x20bc
 #define USB_VENDOR_SONY         0x054c
+#define USB_VENDOR_STEELSERIES  0x1038
+#define USB_VENDOR_STEELSERIES_BT 0x0111 // Bluetooth SIG company ID
 #define USB_VENDOR_THRUSTMASTER 0x044f
 #define USB_VENDOR_TURTLE_BEACH 0x10f5
 #define USB_VENDOR_SWITCH       0x2563
@@ -89,6 +98,8 @@
 #define USB_PRODUCT_BDA_XB1_CLASSIC                       0x581a
 #define USB_PRODUCT_BDA_XB1_FIGHTPAD                      0x791a
 #define USB_PRODUCT_BDA_XB1_SPECTRA_PRO                   0x592a
+#define USB_PRODUCT_CREATIVE_PRODIKEYS                    0x2801
+#define USB_PRODUCT_DREAMCHEEKY_DRUM_KIT                  0x8021 // Shared with a weather station and a missile launcher
 #define USB_PRODUCT_CAPCOM_STEEL_BATTALION                0xd000
 #define USB_PRODUCT_GOOGLE_STADIA_CONTROLLER              0x9400
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER1            0x1843
@@ -117,8 +128,10 @@
 #define USB_PRODUCT_HORI_STEAM_CONTROLLER                 0x01AB
 #define USB_PRODUCT_HORI_STEAM_CONTROLLER_BT              0x0196
 #define USB_PRODUCT_INTEL_WIRELESS_SERIES                 0xc013
+#define USB_PRODUCT_IN2GAMES_GAMETRAK                     0x0982
 #define USB_PRODUCT_LOGITECH_F310                         0xc216
 #define USB_PRODUCT_LOGITECH_CHILLSTREAM                  0xcad1
+#define USB_PRODUCT_LOGITECH_SPEED_FORCE_WIRELESS         0xc29c
 #define USB_PRODUCT_MADCATZ_SAITEK_SIDE_PANEL_CONTROL_DECK 0x2218
 #define USB_PRODUCT_MADCATZ_XB1_STRATOCASTER_GUITAR       0x4161
 #define USB_PRODUCT_MADCATZ_XB1_DRUM_KIT                  0x4262
@@ -144,6 +157,10 @@
 #define USB_PRODUCT_NINTENDO_SWITCH2_PRO                  0x2069
 #define USB_PRODUCT_NINTENDO_WII_REMOTE                   0x0306
 #define USB_PRODUCT_NINTENDO_WII_REMOTE2                  0x0330
+#define USB_PRODUCT_NIA                                   0x0000
+#define USB_PRODUCT_OCULUS_RIFT_DK1                       0x0001
+#define USB_PRODUCT_P5_GLOVE                              0x0100
+#define USB_PRODUCT_PHOENIXRC_ADAPTER                     0x0898
 #define USB_PRODUCT_NVIDIA_SHIELD_CONTROLLER_V103         0x7210
 #define USB_PRODUCT_NVIDIA_SHIELD_CONTROLLER_V104         0x7214
 #define USB_PRODUCT_PDP_ROCK_CANDY                        0x0246
@@ -220,6 +237,10 @@
 #define USB_PRODUCT_XBOX_ORIGINAL_CONTROLLER_S            0x0287
 #define USB_PRODUCT_XBOX_ORIGINAL_CONTROLLER_S_V2         0x0288
 #define USB_PRODUCT_XBOX_ORIGINAL_PAD_V2                  0x0289
+#define USB_PRODUCT_MICROSOFT_SIDEWINDER_GAME_VOICE       0x003b
+#define USB_PRODUCT_MICROSOFT_WMR_CONTROLLER              0x065b
+#define USB_PRODUCT_MICROSOFT_WMR_CONTROLLER_ODYSSEY      0x065d
+#define USB_PRODUCT_MICROSOFT_WMR_CONTROLLER_REVERB_G2    0x066a
 #define USB_PRODUCT_XBOX_ONE_ADAPTIVE                     0x0b0a
 #define USB_PRODUCT_XBOX_ONE_ADAPTIVE_BLUETOOTH           0x0b0c
 #define USB_PRODUCT_XBOX_ONE_ADAPTIVE_BLE                 0x0b21
@@ -234,6 +255,7 @@
 #define USB_PRODUCT_XBOX_SERIES_X                         0x0b12
 #define USB_PRODUCT_XBOX_SERIES_X_BLE                     0x0b13
 #define USB_PRODUCT_XBOX_ONE_XBOXGIP_CONTROLLER           0x02ff // XBOXGIP driver software PID
+#define USB_PRODUCT_STEELSERIES_NIMBUS                    0x1420
 #define USB_PRODUCT_STEAM_VIRTUAL_GAMEPAD                 0x11ff
 #define USB_PRODUCT_HANDHELDLEGEND_SINPUT_GENERIC         0x10c6
 #define USB_PRODUCT_HANDHELDLEGEND_PROGCC                 0x10df

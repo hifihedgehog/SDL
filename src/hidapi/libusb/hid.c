@@ -1085,9 +1085,10 @@ static int should_enumerate_interface(unsigned short vendor_id, unsigned short p
 
 #ifdef HIDAPI_VENDOR_USB
 	/* A vendor interface: a device whose input has no usable HID interface on Windows */
-	is_vendor = (SDL_VendorUSB_FindRule(vendor_id, product_id, intf_desc->bInterfaceNumber,
-	                                    intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
-	                                    intf_desc->bInterfaceProtocol) != NULL);
+	is_vendor = SDL_VendorUSB_RuleApplies(SDL_VendorUSB_FindRule(vendor_id, product_id, intf_desc->bInterfaceNumber,
+	                                                             intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
+	                                                             intf_desc->bInterfaceProtocol),
+	                                      SDL_VENDORUSB_THIS_PLATFORM);
 #endif
 	(void)is_vendor;
 
@@ -1651,6 +1652,9 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 	vendor_rule = SDL_VendorUSB_FindRule(desc.idVendor, desc.idProduct, intf_desc->bInterfaceNumber,
 	                                     intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
 	                                     intf_desc->bInterfaceProtocol);
+	if (!SDL_VendorUSB_RuleApplies(vendor_rule, SDL_VENDORUSB_THIS_PLATFORM)) {
+		vendor_rule = NULL;
+	}
 	if (vendor_rule && !select_vendor_endpoints(conf_desc, intf_desc->bInterfaceNumber, vendor_rule, &vendor_selection)) {
 		LOG("no usable endpoints on vendor interface %d\n", intf_desc->bInterfaceNumber);
 		return 0;

@@ -43,6 +43,15 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
      * 25 bytes. Endpoint 0x02 of that alternate is a control endpoint and is
      * never opened. Interface 1, the boot mouse, is not enumerated. */
     { USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, SDL_VENDORUSB_RAW_OUTPUT, 0, 0, 0, 0, 1, 0x81, 0x01, 27, 25 },
+
+    /* The Gametrak for PlayStation. It stays silent until the host writes
+     * "Gametrak" and then key bytes as output reports whose first byte is a
+     * report ID its collection does not declare, which hid.dll refuses. On
+     * Windows libusb reads it once WinUSB is bound: interrupt IN 0x81, no OUT
+     * endpoint, so each write goes out as SET_REPORT with the first byte in
+     * wValue, as Linux sends it. Linux and macOS send those writes through
+     * their HID backends. */
+    { USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
 /* Devices that need libusb on every platform. The Switch 2 devices carry
@@ -96,6 +105,11 @@ bool SDL_VendorUSB_IsVendorDevice(uint16_t vendor, uint16_t product)
         }
     }
     return false;
+}
+
+bool SDL_VendorUSB_RuleApplies(const SDL_VendorUSBRule *rule, SDL_VendorUSBPlatform platform)
+{
+    return rule && (!(rule->flags & SDL_VENDORUSB_WINDOWS_ONLY) || platform == SDL_VENDORUSB_PLATFORM_WINDOWS);
 }
 
 bool SDL_VendorUSB_RequiresLibUSB(SDL_VendorUSBPlatform platform, uint16_t vendor, uint16_t product,

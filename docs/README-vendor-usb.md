@@ -13,6 +13,7 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
 | Wii U GameCube adapter | 057E:0337 | 0 | the device | `SDL_HINT_HIDAPI_LIBUSB_GAMECUBE`, `SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE` |
 | Intel Wireless Series base station | 8086:C013 | 0, alternate setting 1 | `USB\VID_8086&PID_C013&MI_00` if Windows lists the device as composite, otherwise the device | `SDL_HINT_JOYSTICK_HIDAPI_INTEL_WIRELESS` |
 | Xbox 360 Big Button receiver | 045E:02A0 | class 0xFF, subclass 0x5D, protocol 4 | the device or the interface child that carries that interface | `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` |
+| Gametrak, Windows only | 14B7:0982 | 0 | the device | `SDL_HINT_JOYSTICK_HIDAPI_GAMETRAK` |
 
 ## How the path works
 
@@ -32,6 +33,11 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   [README-xid.md](README-xid.md).
 - The Switch 2 controllers keep their input on the platform HID backend. Their
   drivers open WinUSB separately for bulk I/O.
+- A rule can serve Windows only. The Gametrak's HID interface needs libusb
+  on Windows alone, where hid.dll refuses its unlock writes. It has no OUT
+  endpoint, so each write goes out as SET_REPORT with its first byte in
+  wValue. On Linux and macOS the platform backend keeps it. See
+  [README-hid-devices.md](README-hid-devices.md).
 
 ## Known limits
 

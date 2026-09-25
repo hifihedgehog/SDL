@@ -54,6 +54,18 @@
 #define SDL_JOYSTICK_HIDAPI_GIP
 #define SDL_JOYSTICK_HIDAPI_SINPUT
 #define SDL_JOYSTICK_HIDAPI_ZUIKI
+// HID devices that Windows opens but leaves without a usable controller
+#define SDL_JOYSTICK_HIDAPI_SPEEDFORCE
+#define SDL_JOYSTICK_HIDAPI_RC_ADAPTER
+#define SDL_JOYSTICK_HIDAPI_GAMEVOICE
+#define SDL_JOYSTICK_HIDAPI_P5GLOVE
+#define SDL_JOYSTICK_HIDAPI_DREAMCHEEKY
+#define SDL_JOYSTICK_HIDAPI_NIA
+#define SDL_JOYSTICK_HIDAPI_GAMETRAK
+#define SDL_JOYSTICK_HIDAPI_RIFT_DK1
+#define SDL_JOYSTICK_HIDAPI_WMR
+#define SDL_JOYSTICK_HIDAPI_NIMBUS
+#define SDL_JOYSTICK_HIDAPI_PRODIKEYS
 
 // Joystick capability definitions
 #define SDL_JOYSTICK_CAP_MONO_LED       0x00000001
@@ -181,6 +193,17 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverFlydigi;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverGameSir;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverSInput;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverZUIKI;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverSpeedForce;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverRCAdapter;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverGameVoice;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverP5Glove;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverDreamCheeky;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverNIA;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverGametrak;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverRiftDK1;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverWMR;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverNimbus;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverProdikeys;
 
 #define LOAD16(A, B)       (Sint16)((Uint16)(A) | (((Uint16)(B)) << 8))
 #define LOAD32(A, B, C, D) ((((Uint32)(A)) << 0) |  \
