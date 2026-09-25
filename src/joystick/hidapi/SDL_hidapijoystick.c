@@ -168,6 +168,9 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #ifdef SDL_JOYSTICK_HIDAPI_GUNCON
     &SDL_HIDAPI_DriverGunCon,
 #endif
+#ifdef SDL_JOYSTICK_HIDAPI_TRAIN
+    &SDL_HIDAPI_DriverTrain,
+#endif
 };
 static int SDL_HIDAPI_numdrivers = 0;
 static SDL_AtomicInt SDL_HIDAPI_updating_devices;
