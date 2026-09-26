@@ -28,6 +28,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
 #include "SDL_hidapi_xbox360.h"
+#include "SDL_hidapi_xbox360acc_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_XBOX360
 
@@ -36,6 +37,33 @@
 
 #ifdef SDL_PLATFORM_MACOS
 #include <IOKit/IOKitLib.h>
+#endif
+
+#ifdef HAVE_LIBUSB
+/* The chatpad in the pad's expansion port (hifihedgehog/SDL#33 Part 15). It
+ * reports on interface 2, which the driver claims on the handle the libusb
+ * backend holds for interface 0, since WinUSB reaches a device's other
+ * interfaces only through that handle. The start-up and keep-alives are
+ * control transfers. The reports come from an interrupt transfer that
+ * completes on the backend's event thread, where its callback submits it
+ * again. The protocol lives in SDL_hidapi_xbox360acc_proto.c, where the
+ * offline tests run it. */
+
+#define SDL_XBOX360_CHATPAD_REPORTS 8
+
+typedef struct SDL_Xbox360ChatpadReader
+{
+    SDL_Mutex *lock;
+    SDL_LibUSBContext *libusb;
+    struct libusb_transfer *transfer;
+    SDL_AtomicInt finished; // 1 once the transfer is idle for good, set last
+    bool stopping;          // Under the lock: the transfer is not submitted again
+    int first;              // Under the lock: the oldest queued report
+    int count;              // Under the lock
+    int sizes[SDL_XBOX360_CHATPAD_REPORTS];
+    Uint8 reports[SDL_XBOX360_CHATPAD_REPORTS][SDL_XBOX360ACC_CHATPAD_READ_MAX];
+    Uint8 buffer[SDL_XBOX360ACC_CHATPAD_READ_MAX];
+} SDL_Xbox360ChatpadReader;
 #endif
 
 typedef struct
@@ -50,7 +78,32 @@ typedef struct
     bool controlled_by_360controller;
     bool is_steam_virtual_gamepad;
 #endif
+    SDL_JoystickID pad_id;
+#ifdef HAVE_LIBUSB
+    bool chatpad_active; // Interface 2 is claimed and the start-up runs
+    SDL_LibUSBContext *libusb;
+    libusb_device_handle *handle;
+    Uint8 chatpad_endpoint;
+    Uint16 chatpad_packet_size;
+    SDL_Xbox360ChatpadReader *reader;
+    bool reads_started;
+    SDL_Xbox360AccWired wired;
+    SDL_JoystickID chatpad_id;
+    bool chatpad_post_pending; // The joystick opened and has not had the state yet
+    Uint64 chatpad_sent;       // The buttons the joystick has
+#endif
 } SDL_DriverXbox360_Context;
+
+static bool IsChatpadJoystick(SDL_DriverXbox360_Context *ctx, SDL_Joystick *joystick)
+{
+#ifdef HAVE_LIBUSB
+    return ctx->chatpad_id && joystick && joystick->instance_id == ctx->chatpad_id;
+#else
+    (void)ctx;
+    (void)joystick;
+    return false;
+#endif
+}
 
 static void HIDAPI_DriverXbox360_RegisterHints(SDL_HintCallback callback, void *userdata)
 {
@@ -181,6 +234,294 @@ static void FetchXInputCapabilities(SDL_HIDAPI_Device *device)
         SDL_QuitLibUSB();
     }
 }
+
+// Runs on the libusb backend's event thread
+static void LIBUSB_CALL HIDAPI_DriverXbox360_ChatpadRead(struct libusb_transfer *transfer)
+{
+    SDL_Xbox360ChatpadReader *reader = (SDL_Xbox360ChatpadReader *)transfer->user_data;
+    bool finished;
+
+    SDL_LockMutex(reader->lock);
+    if (transfer->status == LIBUSB_TRANSFER_COMPLETED && transfer->actual_length > 0) {
+        int slot;
+
+        if (reader->count == SDL_XBOX360_CHATPAD_REPORTS) {
+            // A full queue drops its oldest report
+            reader->first = (reader->first + 1) % SDL_XBOX360_CHATPAD_REPORTS;
+            --reader->count;
+        }
+        slot = (reader->first + reader->count) % SDL_XBOX360_CHATPAD_REPORTS;
+        reader->sizes[slot] = SDL_min(transfer->actual_length, (int)sizeof(reader->reports[slot]));
+        SDL_memcpy(reader->reports[slot], transfer->buffer, reader->sizes[slot]);
+        ++reader->count;
+    }
+    // Only a completed read goes out again, as in xboxdrv. A cancel, a stall
+    // or a lost device ends the reads.
+    finished = (reader->stopping || transfer->status != LIBUSB_TRANSFER_COMPLETED ||
+                reader->libusb->submit_transfer(transfer) < 0);
+    SDL_UnlockMutex(reader->lock);
+
+    // The last access to the reader, which may be freed once this is set
+    if (finished) {
+        SDL_SetAtomicInt(&reader->finished, 1);
+    }
+}
+
+static void HIDAPI_DriverXbox360_StartChatpadReads(SDL_DriverXbox360_Context *ctx)
+{
+    SDL_Xbox360ChatpadReader *reader = ctx->reader;
+
+    reader->transfer = ctx->libusb->alloc_transfer(0);
+    if (!reader->transfer) {
+        return;
+    }
+    // No timeout: the chatpad reports only when a key or its status changes
+    libusb_fill_interrupt_transfer(reader->transfer, ctx->handle, ctx->chatpad_endpoint, reader->buffer,
+                                   ctx->chatpad_packet_size, HIDAPI_DriverXbox360_ChatpadRead, reader, 0);
+    SDL_SetAtomicInt(&reader->finished, 0);
+    if (ctx->libusb->submit_transfer(reader->transfer) < 0) {
+        SDL_SetAtomicInt(&reader->finished, 1);
+    }
+}
+
+static bool HIDAPI_DriverXbox360_TakeChatpadReport(SDL_Xbox360ChatpadReader *reader, Uint8 *report, int *size)
+{
+    bool taken = false;
+
+    SDL_LockMutex(reader->lock);
+    if (reader->count > 0) {
+        *size = reader->sizes[reader->first];
+        SDL_memcpy(report, reader->reports[reader->first], *size);
+        reader->first = (reader->first + 1) % SDL_XBOX360_CHATPAD_REPORTS;
+        --reader->count;
+        taken = true;
+    }
+    SDL_UnlockMutex(reader->lock);
+    return taken;
+}
+
+static void HIDAPI_DriverXbox360_PostChatpad(SDL_Joystick *joystick, Uint64 buttons)
+{
+    Uint64 timestamp = SDL_GetTicksNS();
+    int i;
+
+    for (i = 0; i < SDL_XBOX360ACC_CHATPAD_BUTTONS; ++i) {
+        SDL_SendJoystickButton(timestamp, joystick, (Uint8)i, ((buttons >> i) & 1) != 0);
+    }
+}
+
+// The chatpad joystick's own name, which the core asks for by instance
+static const char *HIDAPI_DriverXbox360_GetJoystickName(SDL_HIDAPI_Device *device, SDL_JoystickID instance_id)
+{
+    const SDL_DriverXbox360_Context *ctx = (const SDL_DriverXbox360_Context *)device->context;
+
+    if (ctx && ctx->chatpad_id && instance_id == ctx->chatpad_id) {
+        return SDL_XBOX360ACC_CHATPAD_NAME;
+    }
+    return NULL;
+}
+
+// The chatpad joystick's GUID: the pad's, with the CRC of the chatpad's name
+// and the byte 15 that keeps it off the gamepad mappings
+static bool HIDAPI_DriverXbox360_GetJoystickGUID(SDL_HIDAPI_Device *device, SDL_JoystickID instance_id, SDL_GUID *guid)
+{
+    const SDL_DriverXbox360_Context *ctx = (const SDL_DriverXbox360_Context *)device->context;
+
+    if (!ctx || !ctx->chatpad_id || instance_id != ctx->chatpad_id) {
+        return false;
+    }
+    *guid = device->guid;
+    SDL_SetJoystickGUIDCRC(guid, SDL_crc16(0, SDL_XBOX360ACC_CHATPAD_NAME, SDL_strlen(SDL_XBOX360ACC_CHATPAD_NAME)));
+    guid->data[15] = SDL_XBOX360ACC_GUID_CHATPAD;
+    return true;
+}
+
+// Connects and disconnects the chatpad joystick and sends it what changed
+static void HIDAPI_DriverXbox360_SyncChatpad(SDL_HIDAPI_Device *device, SDL_DriverXbox360_Context *ctx)
+{
+    const SDL_Xbox360AccChatpad *chatpad = &ctx->wired.chatpad;
+
+    if (chatpad->present && !ctx->chatpad_id) {
+        ctx->chatpad_sent = 0;
+        // The ID is stored before the joystick is announced, so the name and
+        // GUID callbacks know it from the first event
+        HIDAPI_JoystickConnected(device, &ctx->chatpad_id);
+    } else if (!chatpad->present && ctx->chatpad_id) {
+        HIDAPI_JoystickDisconnected(device, ctx->chatpad_id);
+        ctx->chatpad_id = 0;
+    }
+
+    if (ctx->chatpad_id && (ctx->chatpad_post_pending || chatpad->buttons != ctx->chatpad_sent)) {
+        SDL_Joystick *joystick = SDL_GetJoystickFromID(ctx->chatpad_id);
+
+        if (joystick) {
+            HIDAPI_DriverXbox360_PostChatpad(joystick, chatpad->buttons);
+            ctx->chatpad_sent = chatpad->buttons;
+            ctx->chatpad_post_pending = false;
+        }
+    }
+}
+
+static void HIDAPI_DriverXbox360_UpdateChatpad(SDL_HIDAPI_Device *device, SDL_DriverXbox360_Context *ctx)
+{
+    SDL_Xbox360AccControl control;
+    Uint8 report[SDL_XBOX360ACC_CHATPAD_READ_MAX];
+    int size = 0;
+    int sent = 0;
+
+    while (HIDAPI_DriverXbox360_TakeChatpadReport(ctx->reader, report, &size)) {
+        SDL_Xbox360Acc_WiredChatpadReport(&ctx->wired, report, (size_t)size);
+    }
+
+    // The transfers that are due, each after the one before completes. A
+    // stall does not stop the start-up, and the next SETUP clears it.
+    while (sent < 16 && SDL_Xbox360Acc_WiredNext(&ctx->wired, SDL_GetTicks(), &control)) {
+        Uint8 data[sizeof(control.data)];
+        int result;
+
+        SDL_memcpy(data, control.data, sizeof(data));
+        result = ctx->libusb->control_transfer(ctx->handle, control.request_type, control.request, control.value, control.index,
+                                               control.length ? data : NULL, control.length, 100);
+        SDL_Xbox360Acc_WiredDone(&ctx->wired, SDL_GetTicks(), result >= 0);
+        ++sent;
+    }
+
+    // The reports start once step 9, the 1B, has completed
+    if (!ctx->reads_started && SDL_Xbox360Acc_WiredReading(&ctx->wired)) {
+        ctx->reads_started = true;
+        HIDAPI_DriverXbox360_StartChatpadReads(ctx);
+    }
+
+    HIDAPI_DriverXbox360_SyncChatpad(device, ctx);
+}
+
+// Claims the chatpad interface and starts the start-up, when the pad is one
+// whose chatpad the sources serve and libusb holds it
+static void HIDAPI_DriverXbox360_InitChatpad(SDL_HIDAPI_Device *device)
+{
+    SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
+    SDL_Xbox360AccEndpoint endpoints[4];
+    struct libusb_config_descriptor *config = NULL;
+    libusb_device_handle *handle;
+    Uint8 address = 0;
+    Uint16 packet_size = 0;
+    int i, j, count = 0;
+
+    if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_CHATPAD, HIDAPI_DriverXbox360_IsEnabled())) {
+        return;
+    }
+    if (!SDL_Xbox360Acc_WiredSupported(device->vendor_id, device->product_id, device->version)) {
+        return;
+    }
+    handle = (libusb_device_handle *)SDL_GetPointerProperty(SDL_hid_get_properties(device->dev), SDL_PROP_HIDAPI_LIBUSB_DEVICE_HANDLE_POINTER, NULL);
+    if (!handle || !SDL_InitLibUSB(&ctx->libusb)) {
+        return;
+    }
+
+    // The endpoint comes from the interface 2 descriptor, whatever its address
+    if (ctx->libusb->get_active_config_descriptor(ctx->libusb->get_device(handle), &config) == 0 && config) {
+        for (i = 0; i < config->bNumInterfaces && !address; ++i) {
+            const struct libusb_interface *intf = &config->interface[i];
+
+            for (j = 0; j < intf->num_altsetting; ++j) {
+                const struct libusb_interface_descriptor *alt = &intf->altsetting[j];
+
+                if (alt->bAlternateSetting != 0 ||
+                    !SDL_Xbox360Acc_IsChatpadInterface(alt->bInterfaceNumber, alt->bInterfaceClass, alt->bInterfaceSubClass, alt->bInterfaceProtocol)) {
+                    continue;
+                }
+                for (count = 0; count < alt->bNumEndpoints && count < (int)SDL_arraysize(endpoints); ++count) {
+                    endpoints[count].address = alt->endpoint[count].bEndpointAddress;
+                    endpoints[count].attributes = alt->endpoint[count].bmAttributes;
+                    endpoints[count].max_packet_size = alt->endpoint[count].wMaxPacketSize;
+                }
+                address = SDL_Xbox360Acc_ChatpadEndpoint(endpoints, count, &packet_size);
+                break;
+            }
+        }
+        ctx->libusb->free_config_descriptor(config);
+    }
+    if (!address) {
+        SDL_QuitLibUSB();
+        ctx->libusb = NULL;
+        return;
+    }
+
+    ctx->reader = (SDL_Xbox360ChatpadReader *)SDL_calloc(1, sizeof(*ctx->reader));
+    if (ctx->reader) {
+        ctx->reader->lock = SDL_CreateMutex();
+    }
+    if (!ctx->reader || !ctx->reader->lock) {
+        SDL_free(ctx->reader);
+        ctx->reader = NULL;
+        SDL_QuitLibUSB();
+        ctx->libusb = NULL;
+        return;
+    }
+    ctx->reader->libusb = ctx->libusb;
+    SDL_SetAtomicInt(&ctx->reader->finished, 1);
+
+    ctx->libusb->set_auto_detach_kernel_driver(handle, true);
+    if (ctx->libusb->claim_interface(handle, 2) < 0) {
+        SDL_DestroyMutex(ctx->reader->lock);
+        SDL_free(ctx->reader);
+        ctx->reader = NULL;
+        SDL_QuitLibUSB();
+        ctx->libusb = NULL;
+        return;
+    }
+    ctx->handle = handle;
+    ctx->chatpad_endpoint = address;
+    ctx->chatpad_packet_size = packet_size;
+    SDL_Xbox360Acc_WiredStart(&ctx->wired, device->version, SDL_GetTicks());
+    ctx->chatpad_active = true;
+    device->GetJoystickName = HIDAPI_DriverXbox360_GetJoystickName;
+    device->GetJoystickGUID = HIDAPI_DriverXbox360_GetJoystickGUID;
+}
+
+static void HIDAPI_DriverXbox360_FreeChatpad(SDL_DriverXbox360_Context *ctx)
+{
+    SDL_Xbox360ChatpadReader *reader = ctx->reader;
+    Uint64 deadline;
+    bool finished;
+
+    if (!ctx->chatpad_active) {
+        return;
+    }
+    ctx->chatpad_active = false;
+
+    // The event thread completes the canceled transfer
+    SDL_LockMutex(reader->lock);
+    reader->stopping = true;
+    if (!SDL_GetAtomicInt(&reader->finished)) {
+        ctx->libusb->cancel_transfer(reader->transfer);
+    }
+    SDL_UnlockMutex(reader->lock);
+    deadline = SDL_GetTicks() + 1000;
+    for (;;) {
+        finished = (SDL_GetAtomicInt(&reader->finished) != 0);
+        if (finished || SDL_GetTicks() >= deadline) {
+            break;
+        }
+        SDL_Delay(1);
+    }
+
+    ctx->libusb->release_interface(ctx->handle, 2);
+    if (finished) {
+        if (reader->transfer) {
+            ctx->libusb->free_transfer(reader->transfer);
+        }
+        SDL_DestroyMutex(reader->lock);
+        SDL_free(reader);
+    } else {
+        // A transfer still in flight keeps its reader, which it may yet complete into
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Xbox 360 chatpad: read still pending after cancel");
+    }
+    ctx->reader = NULL;
+    ctx->handle = NULL;
+    SDL_QuitLibUSB();
+    ctx->libusb = NULL;
+}
 #endif
 
 static bool HIDAPI_DriverXbox360_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
@@ -293,7 +634,11 @@ static bool HIDAPI_DriverXbox360_InitDevice(SDL_HIDAPI_Device *device)
         device->steam_virtual_gamepad_slot = (slot - 1);
     }
 
-    return HIDAPI_JoystickConnected(device, NULL);
+#ifdef HAVE_LIBUSB
+    HIDAPI_DriverXbox360_InitChatpad(device);
+#endif
+
+    return HIDAPI_JoystickConnected(device, &ctx->pad_id);
 }
 
 static int HIDAPI_DriverXbox360_GetDevicePlayerIndex(SDL_HIDAPI_Device *device, SDL_JoystickID instance_id)
@@ -305,7 +650,7 @@ static void HIDAPI_DriverXbox360_SetDevicePlayerIndex(SDL_HIDAPI_Device *device,
 {
     SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
 
-    if (!ctx->joystick) {
+    if (!ctx->joystick || instance_id != ctx->pad_id) {
         return;
     }
 
@@ -319,6 +664,21 @@ static bool HIDAPI_DriverXbox360_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joy
     SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
 
     SDL_AssertJoysticksLocked();
+
+    if (IsChatpadJoystick(ctx, joystick)) {
+        joystick->nbuttons = SDL_XBOX360ACC_CHATPAD_BUTTONS;
+        joystick->naxes = 0;
+        joystick->nhats = 0;
+#ifdef HAVE_LIBUSB
+        // The buttons are allocated after this returns, so the next update sends them
+        ctx->chatpad_post_pending = true;
+#endif
+        return true;
+    }
+    if (joystick->instance_id != ctx->pad_id) {
+        // A chatpad that the update before this open removed
+        return false;
+    }
 
     ctx->joystick = joystick;
     SDL_zeroa(ctx->last_state);
@@ -343,6 +703,9 @@ static bool HIDAPI_DriverXbox360_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joy
 
 static bool HIDAPI_DriverXbox360_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
+    if (IsChatpadJoystick((SDL_DriverXbox360_Context *)device->context, joystick)) {
+        return SDL_Unsupported();
+    }
 #ifdef SDL_PLATFORM_MACOS
     if (((SDL_DriverXbox360_Context *)device->context)->controlled_by_360controller) {
         // On macOS the 360Controller driver uses this short report,
@@ -377,6 +740,9 @@ static Uint32 HIDAPI_DriverXbox360_GetJoystickCapabilities(SDL_HIDAPI_Device *de
     SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
     Uint32 result = SDL_JOYSTICK_CAP_RUMBLE;
 
+    if (IsChatpadJoystick(ctx, joystick)) {
+        return 0;
+    }
     if (ctx->player_lights) {
         result |= SDL_JOYSTICK_CAP_PLAYER_LED;
     }
@@ -388,8 +754,25 @@ static bool HIDAPI_DriverXbox360_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_J
     return SDL_Unsupported();
 }
 
+/* The chatpad's lamps: one byte, 00 to 03 to put out Shift, Green, Orange
+   and People, 08 to 0B to light them, 04 to put out the backlight and 0C to
+   light it */
 static bool HIDAPI_DriverXbox360_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
 {
+#ifdef HAVE_LIBUSB
+    SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
+    SDL_Xbox360AccControl control;
+
+    if (IsChatpadJoystick(ctx, joystick)) {
+        if (size <= 0 || !SDL_Xbox360Acc_WiredLamp((const Uint8 *)data, (size_t)size, &control)) {
+            return SDL_SetError("The Xbox 360 chatpad takes one lamp byte, 00 to 04 or 08 to 0C");
+        }
+        if (ctx->libusb->control_transfer(ctx->handle, control.request_type, control.request, control.value, control.index, NULL, 0, 100) < 0) {
+            return SDL_SetError("Couldn't set the Xbox 360 chatpad lamp");
+        }
+        return true;
+    }
+#endif
     return SDL_Unsupported();
 }
 
@@ -473,15 +856,20 @@ static bool HIDAPI_DriverXbox360_UpdateDevice(SDL_HIDAPI_Device *device)
     Uint8 data[USB_PACKET_LENGTH];
     int size = 0;
 
-    if (device->num_joysticks > 0) {
-        joystick = SDL_GetJoystickFromID(device->joysticks[0]);
-    } else {
+    if (!ctx->pad_id) {
         return false;
     }
+    joystick = SDL_GetJoystickFromID(ctx->pad_id);
 
     while ((size = SDL_hid_read_timeout(device->dev, data, sizeof(data), 0)) > 0) {
 #ifdef DEBUG_XBOX_PROTOCOL
         HIDAPI_DumpPacket("Xbox 360 packet: size = %d", data, size);
+#endif
+#ifdef HAVE_LIBUSB
+        if (ctx->chatpad_active) {
+            // 08 03 with bit 0 of byte 2 clear: the chatpad was taken out
+            SDL_Xbox360Acc_WiredPadReport(&ctx->wired, data, (size_t)size);
+        }
 #endif
         if (!joystick) {
             continue;
@@ -494,14 +882,30 @@ static bool HIDAPI_DriverXbox360_UpdateDevice(SDL_HIDAPI_Device *device)
 
     if (size < 0) {
         // Read error, device is disconnected
-        HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+#ifdef HAVE_LIBUSB
+        if (ctx->chatpad_active) {
+            SDL_Xbox360Acc_WiredStop(&ctx->wired);
+            HIDAPI_DriverXbox360_SyncChatpad(device, ctx);
+        }
+#endif
+        HIDAPI_JoystickDisconnected(device, ctx->pad_id);
+        ctx->pad_id = 0;
     }
+#ifdef HAVE_LIBUSB
+    else if (ctx->chatpad_active) {
+        HIDAPI_DriverXbox360_UpdateChatpad(device, ctx);
+    }
+#endif
     return (size >= 0);
 }
 
 static void HIDAPI_DriverXbox360_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
 {
     SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
+
+    if (IsChatpadJoystick(ctx, joystick)) {
+        return;
+    }
 
     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_PLAYER_LED,
                         SDL_PlayerLEDHintChanged, ctx);
@@ -511,6 +915,13 @@ static void HIDAPI_DriverXbox360_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Jo
 
 static void HIDAPI_DriverXbox360_FreeDevice(SDL_HIDAPI_Device *device)
 {
+#ifdef HAVE_LIBUSB
+    SDL_DriverXbox360_Context *ctx = (SDL_DriverXbox360_Context *)device->context;
+
+    if (ctx) {
+        HIDAPI_DriverXbox360_FreeChatpad(ctx);
+    }
+#endif
 }
 
 SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXbox360 = {

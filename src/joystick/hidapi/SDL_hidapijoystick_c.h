@@ -161,6 +161,10 @@ typedef struct SDL_HIDAPI_Device
     // One joystick's name, or NULL to use name. A driver with several
     // joysticks sets it, and the device clears it when its driver is released.
     const char *(*GetJoystickName)(struct SDL_HIDAPI_Device *device, SDL_JoystickID instance_id);
+    // One joystick's GUID, or false to use guid. A driver whose joysticks are
+    // different kinds of device sets it, and the device clears it with
+    // GetJoystickName.
+    bool (*GetJoystickGUID)(struct SDL_HIDAPI_Device *device, SDL_JoystickID instance_id, SDL_GUID *guid);
 
     // Used during scanning for device changes
     bool seen;

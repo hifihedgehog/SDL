@@ -148,7 +148,7 @@ struct hid_device_ {
 #ifdef DETACH_KERNEL_DRIVER
 	int is_driver_detached;
 #endif
-#ifdef SDL_PLATFORM_MACOS
+#if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_WIN32)
 	char *dev_path;
 	hid_device *next;
 #endif
@@ -162,8 +162,11 @@ static struct hid_api_version api_version = {
 
 static libusb_context *usb_context = NULL;
 
-#ifdef SDL_PLATFORM_MACOS
+#if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_WIN32)
 
+/* The devices this process holds open. hid_open_path, hid_close and
+   hid_enumerate read and change the list without a lock, so their callers
+   serialize them, as SDL's joystick layer does under the joystick lock. */
 static hid_device *open_devices;
 
 static void add_open_device(hid_device *dev)
@@ -199,7 +202,45 @@ static bool has_open_path(const char *path)
 	return false;
 }
 
-#endif /* SDL_PLATFORM_MACOS */
+#ifdef SDL_PLATFORM_WIN32
+/* WinUSB lets one handle open a device, so every interface this process
+   opens on a device goes through the handle of the first one it opened */
+static libusb_device_handle *get_open_handle(libusb_device *usb_dev)
+{
+	for (hid_device *curr = open_devices; curr; curr = curr->next) {
+		if (libusb_get_device(curr->device_handle) == usb_dev) {
+			return curr->device_handle;
+		}
+	}
+	return NULL;
+}
+
+/* Whether an open device other than dev uses dev's handle */
+static bool is_handle_shared(const hid_device *dev)
+{
+	for (hid_device *curr = open_devices; curr; curr = curr->next) {
+		if (curr != dev && curr->device_handle == dev->device_handle) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Whether this process holds an interface of the device open on a handle
+   that still reads. A holder whose reads failed, as when Windows moved the
+   device back to its own driver, does not count. */
+static bool is_device_held(libusb_device *usb_dev)
+{
+	for (hid_device *curr = open_devices; curr; curr = curr->next) {
+		if (libusb_get_device(curr->device_handle) == usb_dev && !curr->shutdown_thread) {
+			return true;
+		}
+	}
+	return false;
+}
+#endif /* SDL_PLATFORM_WIN32 */
+
+#endif /* SDL_PLATFORM_MACOS || SDL_PLATFORM_WIN32 */
 
 uint16_t get_usb_code_for_current_locale(void);
 static int return_data(hid_device *dev, unsigned char *data, size_t length);
@@ -1187,9 +1228,18 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 							   holds cannot be opened. Skipping it keeps a pad Windows
 							   serves from also appearing here. One bound to WinUSB opens.
 							   An XID interface has no Windows driver and opens only with
-							   WinUSB bound. */
+							   WinUSB bound. WinUSB lets one handle open a device, so the
+							   open fails on every interface of a device this process
+							   holds, and those interfaces stay listed while the holder
+							   still reads. */
 							int is_xbox = is_xbox_interface(dev_vid, intf_desc);
-							if (SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_THIS_PLATFORM, is_xbox, res >= 0)) {
+							bool held = false;
+#ifdef SDL_PLATFORM_WIN32
+							if (res < 0) {
+								held = is_device_held(dev);
+							}
+#endif
+							if (SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_THIS_PLATFORM, is_xbox, res >= 0 || held)) {
 								break;
 							}
 						}
@@ -1821,6 +1871,13 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 	if(hid_init() < 0)
 		return NULL;
 
+#ifdef SDL_PLATFORM_WIN32
+	/* A second open would share the handle and read the same pipe, and its
+	   close would release the interface under the first */
+	if (has_open_path(path))
+		return NULL;
+#endif
+
 	dev = new_hid_device();
 
 	libusb_get_device_list(usb_context, &devs);
@@ -1850,14 +1907,25 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 						/* Matched Paths. Open this device */
 
 						/* OPEN HERE */
+#ifdef SDL_PLATFORM_WIN32
+						dev->device_handle = get_open_handle(usb_dev);
+						if (dev->device_handle)
+							res = 0;
+						else
+#endif
 						res = libusb_open(usb_dev, &dev->device_handle);
 						if (res < 0) {
 							LOG("can't open device\n");
 							break;
 						}
 						good_open = hidapi_initialize_device(dev, intf_desc, conf_desc);
-						if (!good_open)
+						if (!good_open) {
+#ifdef SDL_PLATFORM_WIN32
+							/* A shared handle stays with the interfaces open on it */
+							if (!is_handle_shared(dev))
+#endif
 							libusb_close(dev->device_handle);
+						}
 					}
 				}
 			}
@@ -1869,7 +1937,7 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 
 	/* If we have a good handle, return it. */
 	if (good_open) {
-#ifdef SDL_PLATFORM_MACOS
+#if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_WIN32)
 		dev->dev_path = strdup(path);
 		add_open_device(dev);
 #endif
@@ -2292,6 +2360,11 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 		libusb_set_interface_alt_setting(dev->device_handle, dev->interface, 0);
 
 	/* release the interface */
+#ifdef SDL_PLATFORM_WIN32
+	/* The other interfaces of a WinUSB device go through interface 0's claim,
+	   so it stays claimed until the last of them closes the handle */
+	if (dev->interface != 0 || !is_handle_shared(dev))
+#endif
 	libusb_release_interface(dev->device_handle, dev->interface);
 
 	/* reattach the kernel driver if it was detached */
@@ -2304,6 +2377,9 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 #endif
 
 	/* Close the handle */
+#ifdef SDL_PLATFORM_WIN32
+	if (!is_handle_shared(dev))
+#endif
 	libusb_close(dev->device_handle);
 
 	/* Clear out the queue of received reports. */
@@ -2313,7 +2389,7 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 	}
 	hidapi_thread_mutex_unlock(&dev->thread_state);
 
-#ifdef SDL_PLATFORM_MACOS
+#if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_WIN32)
 	remove_open_device(dev);
 	free(dev->dev_path);
 #endif

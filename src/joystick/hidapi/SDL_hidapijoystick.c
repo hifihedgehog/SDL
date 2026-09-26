@@ -590,6 +590,7 @@ static void HIDAPI_CleanupDeviceDriver(SDL_HIDAPI_Device *device)
     device->driver = NULL;
     // The joystick names come from the driver's context, freed below
     device->GetJoystickName = NULL;
+    device->GetJoystickGUID = NULL;
 
     if (device->dev) {
         SDL_hid_close(device->dev);
@@ -1690,11 +1691,20 @@ static void HIDAPI_JoystickSetDevicePlayerIndex(int device_index, int player_ind
 static SDL_GUID HIDAPI_JoystickGetDeviceGUID(int device_index)
 {
     SDL_HIDAPI_Device *device;
+    SDL_JoystickID instance_id = 0;
     SDL_GUID guid;
 
-    device = HIDAPI_GetDeviceByIndex(device_index, NULL);
+    device = HIDAPI_GetDeviceByIndex(device_index, &instance_id);
     if (device) {
         SDL_memcpy(&guid, &device->guid, sizeof(guid));
+        if (device->GetJoystickGUID) {
+            // A device's joysticks can be different kinds, each with its own GUID (hifihedgehog/SDL#33 Part 15)
+            SDL_GUID joystick_guid;
+
+            if (device->GetJoystickGUID(device, instance_id, &joystick_guid)) {
+                guid = joystick_guid;
+            }
+        }
     } else {
         SDL_zero(guid);
     }

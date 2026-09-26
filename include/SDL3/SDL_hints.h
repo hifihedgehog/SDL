@@ -2746,6 +2746,32 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_HIDAPI_XBOX_360 "SDL_JOYSTICK_HIDAPI_XBOX_360"
 
 /**
+ * A variable controlling whether the HIDAPI Xbox 360 drivers read the Xbox
+ * 360 chatpad.
+ *
+ * This is a PadForge fork addition. A chatpad appears as a joystick named
+ * "Xbox 360 Chatpad" beside the pad it plugs into, with 47 buttons: Shift,
+ * Green, Orange and People, then the keys row by row. On a wired pad
+ * (045E:028E at bcdDevice 1.10 or 1.14) the driver claims the pad's
+ * interface 2 and sends the chatpad's start-up and keep-alive control
+ * transfers. On an Xbox 360 wireless receiver (045E:0719, 045E:0291 or
+ * 045E:02A9) it sends the chatpad commands to every slot that shows a
+ * device.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The chatpad is not read and no chatpad command is sent.
+ * - "1": The chatpad is read.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX_360.
+ *
+ * The drivers read this hint when they open a pad or a receiver.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_CHATPAD "SDL_JOYSTICK_HIDAPI_XBOX_360_CHATPAD"
+
+/**
  * A variable controlling whether the player LEDs should be lit to indicate
  * which player is associated with an Xbox 360 controller.
  *
@@ -2759,6 +2785,31 @@ extern "C" {
  * \since This hint is available since SDL 3.2.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_PLAYER_LED "SDL_JOYSTICK_HIDAPI_XBOX_360_PLAYER_LED"
+
+/**
+ * A variable controlling whether the HIDAPI Xbox 360 wireless driver reports
+ * an Xbox 360 uDraw GameTablet as a tablet.
+ *
+ * This is a PadForge fork addition. A receiver slot whose link control packet
+ * names subtype 0x23 becomes a joystick named "Xbox 360 uDraw GameTablet"
+ * with 7 axes (pen X and Y, pressure, finger spread, tilt X, Y and Z), 10
+ * buttons and a hat, and no gamepad mapping. While the hint is on, a slot's
+ * joystick connects when the receiver reports the slot's subtype or sends
+ * its first state packet, not on the connection status alone.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": A tablet is reported as a gamepad, and a slot's joystick connects
+ *   on the connection status.
+ * - "1": A tablet is reported as a tablet.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_WIRELESS.
+ *
+ * The driver reads this hint when it opens a receiver.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_UDRAW "SDL_JOYSTICK_HIDAPI_XBOX_360_UDRAW"
 
 /**
  * A variable controlling whether the HIDAPI driver for XBox 360 wireless
