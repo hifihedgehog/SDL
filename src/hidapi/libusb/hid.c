@@ -164,10 +164,17 @@ static libusb_context *usb_context = NULL;
 
 #if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_WIN32)
 
-/* The devices this process holds open. hid_open_path, hid_close and
-   hid_enumerate read and change the list without a lock, so their callers
-   serialize them, as SDL's joystick layer does under the joystick lock. */
+/* The devices this process holds open */
 static hid_device *open_devices;
+
+#ifdef SDL_PLATFORM_WIN32
+/* On Windows the list decides which handle an open shares, and whether a
+   close releases interface 0 and closes the handle. An application can
+   enumerate, open and close on different threads, so hid_open_path,
+   hid_close and hid_enumerate hold this lock while they use the list.
+   hid_init creates it and hid_exit destroys it. */
+static SDL_Mutex *open_devices_lock;
+#endif
 
 static void add_open_device(hid_device *dev)
 {
@@ -756,6 +763,14 @@ static void stop_event_thread(void)
 
 int HID_API_EXPORT hid_init(void)
 {
+#ifdef SDL_PLATFORM_WIN32
+	if (!open_devices_lock) {
+		open_devices_lock = SDL_CreateMutex();
+		if (!open_devices_lock)
+			return -1;
+	}
+#endif
+
 	if (!usb_context) {
 		const char *locale;
 
@@ -788,6 +803,11 @@ int HID_API_EXPORT hid_exit(void)
 		libusb_exit(usb_context);
 		usb_context = NULL;
 	}
+
+#ifdef SDL_PLATFORM_WIN32
+	SDL_DestroyMutex(open_devices_lock);
+	open_devices_lock = NULL;
+#endif
 
 	return 0;
 }
@@ -1236,7 +1256,9 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 							bool held = false;
 #ifdef SDL_PLATFORM_WIN32
 							if (res < 0) {
+								SDL_LockMutex(open_devices_lock);
 								held = is_device_held(dev);
+								SDL_UnlockMutex(open_devices_lock);
 							}
 #endif
 							if (SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_THIS_PLATFORM, is_xbox, res >= 0 || held)) {
@@ -1872,10 +1894,16 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 		return NULL;
 
 #ifdef SDL_PLATFORM_WIN32
+	/* Held until the open is on the list or has failed, so no close can take
+	   the handle this open shares */
+	SDL_LockMutex(open_devices_lock);
+
 	/* A second open would share the handle and read the same pipe, and its
 	   close would release the interface under the first */
-	if (has_open_path(path))
+	if (has_open_path(path)) {
+		SDL_UnlockMutex(open_devices_lock);
 		return NULL;
+	}
 #endif
 
 	dev = new_hid_device();
@@ -1941,11 +1969,17 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 		dev->dev_path = strdup(path);
 		add_open_device(dev);
 #endif
+#ifdef SDL_PLATFORM_WIN32
+		SDL_UnlockMutex(open_devices_lock);
+#endif
 		return dev;
 	}
 	else {
 		/* Unable to open any devices. */
 		free_hid_device(dev);
+#ifdef SDL_PLATFORM_WIN32
+		SDL_UnlockMutex(open_devices_lock);
+#endif
 		return NULL;
 	}
 }
@@ -2355,6 +2389,11 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 	dev->transfer->buffer = NULL;
 	libusb_free_transfer(dev->transfer);
 
+#ifdef SDL_PLATFORM_WIN32
+	/* The release, the close and the removal below decide from the list */
+	SDL_LockMutex(open_devices_lock);
+#endif
+
 	/* Restore the default alternate setting a vendor rule changed */
 	if (dev->selected_alternate)
 		libusb_set_interface_alt_setting(dev->device_handle, dev->interface, 0);
@@ -2392,6 +2431,9 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 #if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_WIN32)
 	remove_open_device(dev);
 	free(dev->dev_path);
+#endif
+#ifdef SDL_PLATFORM_WIN32
+	SDL_UnlockMutex(open_devices_lock);
 #endif
 
 	free_hid_device(dev);
