@@ -201,3 +201,8 @@ protocol_test(tacx "${PROTOCOL_TESTS}/testtacx.c"
 # hifihedgehog/SDL#33 Part 15: the Xbox 360 chatpads and the Xbox 360 uDraw.
 protocol_test(xbox360acc "${PROTOCOL_TESTS}/testxbox360acc.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_xbox360acc_proto.c")
+
+# hifihedgehog/SDL#33 Part 16: the iCade letter protocol. The module sits in
+# src/joystick/windows beside its driver.
+protocol_test(icade "${PROTOCOL_TESTS}/testicadeproto.c"
+    "${PROTOCOL_JOYSTICK_SHARED}/windows/SDL_icade_proto.c")

@@ -3571,6 +3571,84 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_RFCOMM_PHONEJOY "SDL_JOYSTICK_RFCOMM_PHONEJOY"
 
 /**
+ * A variable controlling whether the driver for the ION iCade arcade cabinet
+ * and pads in iCade mode should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The iCade pairs as a
+ * Bluetooth HID keyboard and types one letter when a control is pressed and
+ * another when it is released. The driver decodes the keyboards with the
+ * cabinet's IDs, 15E4:0132, or a pair listed in
+ * SDL_HINT_JOYSTICK_ICADE_DEVICES, into a joystick with one hat and eight
+ * buttons. The letters still reach the window with the keyboard focus.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver is not used.
+ * - "1": The driver is used. (default)
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_ICADE "SDL_JOYSTICK_ICADE"
+
+/**
+ * A variable controlling whether the iCade driver registers for keyboard
+ * Raw Input itself.
+ *
+ * This is a PadForge fork addition, for Windows. In a process, only the
+ * window registered last for a device class receives its Raw Input. SDL
+ * registers only while a keyboard it decodes as an iCade is connected and
+ * no window of the process holds the keyboard class, as Microsoft asks of a
+ * library. It removes the registration when the last iCade leaves, when this
+ * hint or SDL_HINT_JOYSTICK_ICADE turns off, and at quit, each time only if
+ * its own window still holds it. A window that registers keyboards while
+ * SDL holds the class takes it, and SDL then reads the iCade only through
+ * SDL_ICadeProcessRawKeyboard(). SDL's own raw keyboard input,
+ * SDL_HINT_WINDOWS_RAW_KEYBOARD, passes each keyboard record it receives
+ * there. A host that registers keyboards itself turns this hint off and
+ * passes each keyboard record its window receives to
+ * SDL_ICadeProcessRawKeyboard(). The driver still lists and identifies the
+ * keyboards itself.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": SDL registers nothing, and the host passes the keyboard records.
+ * - "1": SDL registers for keyboard Raw Input on a window of its own while an
+ *   iCade is connected and no other window holds the keyboard class.
+ *   (default)
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_ICADE_RAWINPUT "SDL_JOYSTICK_ICADE_RAWINPUT"
+
+/**
+ * A variable listing more keyboards to decode as iCade controllers.
+ *
+ * This is a PadForge fork addition, for Windows. Many pads have an iCade
+ * mode in which they pair as a keyboard under their own IDs. The format is a
+ * comma-separated list of USB VID/PID pairs in hexadecimal form, e.g.
+ *
+ * 0xAAAA/0xBBBB,0xCCCC/0xDDDD
+ *
+ * Each number is "0x" and one to four hex digits. Spaces and tabs around the
+ * numbers are ignored, a malformed entry is skipped with a warning, and a
+ * vendor of 0x0000 is refused. Up to 32 different pairs count, and each pair
+ * past them is skipped with a warning. A listed pad becomes a gamepad with
+ * the layout of iCade-iOS's table: A back, B left shoulder, C start, D right
+ * shoulder, E north, F south, G east and H west. Listing the cabinet's own
+ * IDs, 0x15E4/0x0132, keeps the cabinet layout. The driver decodes at most
+ * eight iCade devices at once, cabinets and pads together.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_ICADE_DEVICES "SDL_JOYSTICK_ICADE_DEVICES"
+
+/**
  * A variable controlling whether the new HIDAPI driver for wired Xbox One
  * (GIP) controllers should be used.
  *

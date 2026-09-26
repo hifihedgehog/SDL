@@ -69,7 +69,8 @@ set(PADDLE_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_BLE_SWITCH2=0"
     "SDL_JOYSTICK_THREAD=0"
     "SDL_JOYSTICK_WINMM=0"
-    "SDL_JOYSTICK_ROG_CHAKRAM=0")
+    "SDL_JOYSTICK_ROG_CHAKRAM=0"
+    "SDL_JOYSTICK_ICADE=0")
 
 function(paddle_test part)
     set(target "testxinputpaddle${part}")

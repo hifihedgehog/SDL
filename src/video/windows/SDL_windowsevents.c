@@ -740,6 +740,14 @@ static void WIN_HandleRawKeyboardInput(Uint64 timestamp, SDL_VideoData *data, HA
         return;
     }
 
+#ifdef SDL_JOYSTICK_ICADE
+    /* PadForge fork: while this registration holds the keyboard class, the
+       iCade driver's window receives no keyboard records, so they reach the
+       driver here, before anything below changes them (hifihedgehog/SDL#33
+       Part 16) */
+    (void)SDL_ICadeProcessRawKeyboard(hDevice, rawkeyboard->MakeCode, rawkeyboard->Flags);
+#endif
+
     if (rawkeyboard->Flags & RI_KEY_E1) {
         // First key in a Ctrl+{key} sequence
         data->pending_E1_key_sequence = true;
