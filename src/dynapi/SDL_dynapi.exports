@@ -1322,3 +1322,4 @@ _SDL_SetRenderHDRHeadroom
 _SDL_GetRenderHDRHeadroom
 _SDL_GetCurrentThreadName
 _SDL_GetGamepadNfcTagUid
+_SDL_ICadeProcessRawKeyboard

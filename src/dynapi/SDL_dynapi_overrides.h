@@ -1349,3 +1349,4 @@
 #define SDL_GetRenderHDRHeadroom SDL_GetRenderHDRHeadroom_REAL
 #define SDL_GetCurrentThreadName SDL_GetCurrentThreadName_REAL
 #define SDL_GetGamepadNfcTagUid SDL_GetGamepadNfcTagUid_REAL
+#define SDL_ICadeProcessRawKeyboard SDL_ICadeProcessRawKeyboard_REAL

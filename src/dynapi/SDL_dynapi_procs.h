@@ -1357,3 +1357,4 @@ SDL_DYNAPI_PROC(bool,SDL_SetRenderHDRHeadroom,(SDL_Renderer *a,float b),(a,b),re
 SDL_DYNAPI_PROC(bool,SDL_GetRenderHDRHeadroom,(SDL_Renderer *a,float *b),(a,b),return)
 SDL_DYNAPI_PROC(const char*,SDL_GetCurrentThreadName,(void),(),return)
 SDL_DYNAPI_PROC(bool,SDL_GetGamepadNfcTagUid,(SDL_Gamepad *a,char *b,int c),(a,b,c),return)
+SDL_DYNAPI_PROC(bool,SDL_ICadeProcessRawKeyboard,(void *a,Uint16 b,Uint16 c),(a,b,c),return)
