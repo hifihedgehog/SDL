@@ -2237,11 +2237,14 @@ extern "C" {
  * it, which follows an adapter to a new COM number. PROTOCOL is one of
  * spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua, ibus,
  * jvs, vrinsight, kettler, iforce for I-Force wheels and joysticks,
- * mastercontroller for Pony Canyon's train Master Controllers, and for DJI
- * drone remotes dji (the RC-N1 family), djimavicmini, djiphantom3 and
- * djiphantom2. Spaces around entries are ignored, an entry that cannot be
- * used is skipped with a log message, and a port named twice keeps its last
- * entry.
+ * mastercontroller for Pony Canyon's train Master Controllers, for DJI drone
+ * remotes dji (the RC-N1 family), djimavicmini, djiphantom3 and djiphantom2,
+ * for Konami's BIO2 board bio2, which runs the cabinet
+ * SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE names, bio2iidx and bio2sdvx, and for
+ * Konami's ACIO boards on RS-232 kfca (SOUND VOLTEX), panb (Nostalgia), rvol
+ * (MUSECA) and mdxf (the DDR A stage). Spaces around entries are ignored, an
+ * entry that cannot be used is skipped with a log message, and a port named
+ * twice keeps its last entry.
  *
  * The default is empty, and the driver opens no port.
  *
@@ -2259,9 +2262,10 @@ extern "C" {
  * port as one of their own USB interfaces, so the port's device instance ID
  * names the device, and the driver opens those ports without
  * SDL_HINT_JOYSTICK_SERIAL naming them: the protocol port of DJI's RC-N1
- * remotes, interface 2 of vendor 2CA3. A port the hint names keeps the
- * hint's protocol. The driver holds a port it opens, so DJI Assistant 2
- * cannot use the remote while SDL does.
+ * remotes, interface 2 of vendor 2CA3, and Konami's BIO2 board, 1CCF:804C
+ * and 1CCF:8040. A port the hint names keeps the hint's protocol. The driver
+ * holds a port it opens, so DJI Assistant 2 cannot use the remote, nor a game
+ * the BIO2, while SDL does.
  *
  * The variable can be set to the following values:
  *
@@ -2274,6 +2278,54 @@ extern "C" {
  * \since This hint is available since SDL 3.5.0.
  */
 #define SDL_HINT_JOYSTICK_SERIAL_AUTO "SDL_JOYSTICK_SERIAL_AUTO"
+
+/**
+ * A variable controlling whether the serial joystick driver runs Konami's
+ * ACIO boards.
+ *
+ * This is a PadForge fork addition, for Windows. ACIO is the node bus of
+ * Konami's arcade I/O boards. The BIO2, 1CCF:804C and 1CCF:8040, is a COM
+ * port on Windows' own USB serial driver and is opened by its IDs, and boards
+ * on RS-232 are opened through SDL_HINT_JOYSTICK_SERIAL. The driver resets
+ * the bus with a line break, so a board answers about 3 seconds after its
+ * port opens. A Nostalgia panel is reset again before its port closes, which
+ * holds the close for about 1.5 seconds.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": No ACIO protocol runs, on any port.
+ * - "1": ACIO boards run. (default)
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_KONAMI_ACIO "SDL_JOYSTICK_KONAMI_ACIO"
+
+/**
+ * A variable naming the cabinet a Konami BIO2 board serves.
+ *
+ * This is a PadForge fork addition, for Windows. The board's BI2A node does
+ * not report which game it serves, and its inputs differ by game. The
+ * variable picks what the protocol token bio2 runs, on the board's own port
+ * and on any port SDL_HINT_JOYSTICK_SERIAL names with bio2. A change
+ * restarts those ports.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "iidx": beatmania IIDX, a joystick with the turntables and five sliders
+ *   as axes and 21 buttons.
+ * - "sdvx": SOUND VOLTEX, a joystick with the two knobs as axes and 14
+ *   buttons.
+ *
+ * The default is empty: the driver brings the board up, logs its node and
+ * opens no joystick.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE "SDL_JOYSTICK_KONAMI_BIO2_MODE"
 
 /**
  * A variable controlling whether the Joy-Con 2's optical mouse sensor is
@@ -3150,6 +3202,217 @@ extern "C" {
  * \since This hint is available since SDL 3.5.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_TRAIN "SDL_JOYSTICK_HIDAPI_TRAIN"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Namco USIO should
+ * be used.
+ *
+ * This is a PadForge fork addition, for Windows. The USIO, 0B9A:0910, is the
+ * I/O board of Namco's System 357 and 369 arcade cabinets. It is read through
+ * libusb, so WinUSB must be bound to it. A board with the ID 0B9A:0900 is
+ * used when it identifies itself as a USIO. The joysticks it becomes follow
+ * SDL_HINT_JOYSTICK_HIDAPI_USIO_LAYOUT.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_USIO "SDL_JOYSTICK_HIDAPI_USIO"
+
+/**
+ * A variable naming the game layout the Namco USIO is read in.
+ *
+ * This is a PadForge fork addition, for Windows. The board's inputs are
+ * registers whose meaning depends on the game, and the two layouts are the
+ * ones emulators serve to these games.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "taiko": Taiko no Tatsujin. Two drum joysticks, each pad an axis and a
+ *   button, and the cabinet's buttons on player 1. (default)
+ * - "tekken": Tekken. Four arcade stick joysticks, each a gamepad.
+ *
+ * The layout is read when the board is opened.
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_USIO_LAYOUT "SDL_JOYSTICK_HIDAPI_USIO_LAYOUT"
+
+/**
+ * A variable controlling whether the HIDAPI driver for Konami's P3IO board
+ * should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The P3IO of the DDR
+ * SuperNova 2 and DDR X cabinets, 1CCF:8008, is read through libusb, so
+ * WinUSB must be bound to it. Each side of the cabinet becomes a dance pad,
+ * "Konami P3IO DDR P1" at player index 0 and "Konami P3IO DDR P2" at
+ * player index 1, and player 1 also has the Test, Service and Coin buttons.
+ * The two appear once the board answers its start-up commands, and leave if
+ * it stops answering.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P3IO "SDL_JOYSTICK_HIDAPI_KONAMI_P3IO"
+
+/**
+ * A variable controlling whether the HIDAPI driver for Konami's P4IO board
+ * should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The P4IO of jubeat and of
+ * the DDR White cabinet, 1CCF:8010, is read through libusb, so WinUSB must
+ * be bound to it. The board becomes one joystick of buttons as soon as it
+ * connects, laid out as SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P4IO_LAYOUT says.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P4IO "SDL_JOYSTICK_HIDAPI_KONAMI_P4IO"
+
+/**
+ * A variable naming the layout of the Konami P4IO's input bits.
+ *
+ * This is a PadForge fork addition, for Windows. The board sends 32 input
+ * bits, and only the cabinet it is wired into gives them a meaning. The
+ * layout is read when the board connects.
+ *
+ * The variable can be set to the following values, in any case:
+ *
+ * - "raw": One joystick named "Konami P4IO" with 32 buttons, button N for
+ *   bit N as the board sends it. (default)
+ * - "jubeat": One joystick named "Konami jubeat" with 18 buttons: the 16
+ *   panels, panel 1 at the top left and panel 16 at the bottom right, then
+ *   Test and Service.
+ * - "ddr": One joystick named "Konami P4IO DDR" with 13 buttons: player 1's
+ *   menu OK, up, down, left and right, the same five for player 2, then
+ *   Coin, Service and Test. The stage arrows are on another board.
+ *
+ * Any other value selects "raw".
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P4IO_LAYOUT "SDL_JOYSTICK_HIDAPI_KONAMI_P4IO_LAYOUT"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the CH Products
+ * Multi-Function Panel should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The panel, 068E:00F0, is
+ * read through libusb, so WinUSB must be bound to it. Its 50 keys become
+ * joystick buttons, a second bank of 50 while the panel's LED is red, and
+ * its green and red buttons two more.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_CHMFP "SDL_JOYSTICK_HIDAPI_CHMFP"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the Ergodex DX1
+ * should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The pad, 1603:0002, is read
+ * through libusb on its vendor interface, so WinUSB must be bound to
+ * interface 1. Interface 0, the pad's keyboard, stays with Windows. The
+ * driver programs the pad's keys each time it connects, since the pad
+ * forgets them at power-off, and each key ID becomes a joystick button.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_ERGODEX "SDL_JOYSTICK_HIDAPI_ERGODEX"
+
+/**
+ * A variable controlling whether the HIDAPI driver for the NaturalPoint
+ * TrackIR 2 and TrackIR 3 head trackers should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The TrackIR 2, 131D:0150,
+ * and the TrackIR 3, 131D:0155, are read through libusb, so WinUSB must be
+ * bound to them. SDL starts the camera, and the joystick follows the largest
+ * bright dot it sees: axes 0 and 1 are the dot's offset from the center of
+ * the image, axis 2 its size in pixels, and button 0 is held while a dot is
+ * in view.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_TRACKIR "SDL_JOYSTICK_HIDAPI_TRACKIR"
+
+/**
+ * A variable controlling whether the HIDAPI driver for Tacx trainer head
+ * units should be used.
+ *
+ * This is a PadForge fork addition, for Windows. The T1904 and T1932 head
+ * units of the Tacx i-Magic, Flow, Fortius and VR trainers are read through
+ * libusb, so WinUSB must be bound to them. The T1902 and the T1942, which
+ * need a Tacx firmware image from the host, are not read. A head unit
+ * becomes a joystick with its four buttons and five axes: the steering, the
+ * wheel speed, the cadence, the heart rate and the current resistance. The
+ * driver sends only stop frames, so it never sets a resistance.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": HIDAPI driver is not used.
+ * - "1": HIDAPI driver is used.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI
+ *
+ * This hint should be set before initializing joysticks and gamepads.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_HIDAPI_TACX "SDL_JOYSTICK_HIDAPI_TACX"
 
 /**
  * A variable controlling whether the driver for controllers that send their

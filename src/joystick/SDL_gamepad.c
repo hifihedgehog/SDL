@@ -33,11 +33,13 @@
 #include "usb_ids.h"
 #include "hidapi/SDL_hidapi_flydigi.h"
 #include "hidapi/SDL_hidapi_intelwireless_proto.h"
+#include "hidapi/SDL_hidapi_konami_p3io_proto.h"
 #include "hidapi/SDL_hidapi_nimbus_proto.h"
 #include "dji/SDL_dji_remote_proto.h"
 #include "hidapi/SDL_hidapi_nintendo.h"
 #include "hidapi/SDL_hidapi_ps3ext_proto.h"
 #include "hidapi/SDL_hidapi_sinput.h"
+#include "hidapi/SDL_hidapi_usio_proto.h"
 #include "hidapi/SDL_hidapi_xid_proto.h"
 #include "hidapi/SDL_hidapijoystick_c.h"
 #include "../hidapi/SDL_hidapi_collections.h"
@@ -1170,6 +1172,20 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         // Nor does a light gun (hifihedgehog/SDL#33 Part 9)
         return NULL;
     }
+    if (vendor == USB_VENDOR_KONAMI && product == USB_PRODUCT_KONAMI_P4IO) {
+        // Nor does the P4IO, whose buttons only the cabinet's wiring names (hifihedgehog/SDL#33 Part 14)
+        return NULL;
+    }
+    if ((vendor == USB_VENDOR_CH_PRODUCTS && product == USB_PRODUCT_CH_PRODUCTS_MFP) ||
+        (vendor == USB_VENDOR_ERGODEX && product == USB_PRODUCT_ERGODEX_DX1)) {
+        // Nor does a keypad of movable keys (hifihedgehog/SDL#33 Part 14)
+        return NULL;
+    }
+    if (vendor == USB_VENDOR_TACX &&
+        (product == USB_PRODUCT_TACX_T1904 || product == USB_PRODUCT_TACX_T1932)) {
+        // Nor does a trainer head unit (hifihedgehog/SDL#33 Part 14)
+        return NULL;
+    }
 
 #if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XID)
     if (SDL_XID_IsKnownID(vendor, product) || HIDAPI_GetInterfaceClassFromGUID(guid) == SDL_XID_INTERFACE_CLASS) {
@@ -1213,6 +1229,27 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
             SDL_strlcat(mapping_string, train_mapping, sizeof(mapping_string));
             return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
         }
+    }
+#endif
+#if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_USIO)
+    if (vendor == USB_VENDOR_NAMCO && (product == USB_PRODUCT_NAMCO_USIO || product == USB_PRODUCT_NAMCO_H050_USJC)) {
+        /* The Namco USIO (hifihedgehog/SDL#33 Part 14). GUID byte 15 is its
+           layout. The Tekken sticks take RPCS3's default pad, and a drum has
+           no gamepad shape, so it stays a joystick. */
+        const char *usio_mapping = SDL_USIO_GetMapping(guid.data[15]);
+
+        if (!usio_mapping) {
+            return NULL;
+        }
+        SDL_strlcat(mapping_string, usio_mapping, sizeof(mapping_string));
+        return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
+    }
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_KONAMI_P3IO
+    // A cabinet side of a DDR machine, its arrows as buttons (hifihedgehog/SDL#33 Part 14)
+    if (vendor == USB_VENDOR_KONAMI && product == USB_PRODUCT_KONAMI_P3IO) {
+        SDL_strlcat(mapping_string, SDL_P3IO_MAPPING, sizeof(mapping_string));
+        return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
     }
 #endif
 

@@ -153,7 +153,7 @@ static void TestJoystickOnly(void)
     static const uint16_t only[][2] = {
         { 0x1781, 0x0898 }, { 0x045E, 0x003B }, { 0x0D7F, 0x0100 }, { 0x1941, 0x8021 }, { 0x1234, 0x0000 },
         { 0x14B7, 0x0982 }, { 0x2833, 0x0001 }, { 0x045E, 0x065B }, { 0x045E, 0x065D }, { 0x045E, 0x066A },
-        { 0x041E, 0x2801 },
+        { 0x041E, 0x2801 }, { 0x131D, 0x0150 }, { 0x131D, 0x0155 },
     };
     size_t i;
 
@@ -164,6 +164,8 @@ static void TestJoystickOnly(void)
     CHECK(!SDL_HIDAPI_IsJoystickOnlyDevice(0x0111, 0x1420));
     CHECK(!SDL_HIDAPI_IsJoystickOnlyDevice(0x046D, 0xC29C));
     CHECK(!SDL_HIDAPI_IsJoystickOnlyDevice(0x045E, 0x028E));
+    /* The TrackIR 4 and 5 are not read, so they are not listed */
+    CHECK(!SDL_HIDAPI_IsJoystickOnlyDevice(0x131D, 0x0156));
 }
 
 static void CheckTruncations(const uint8_t *descriptor, size_t length)

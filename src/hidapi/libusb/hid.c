@@ -1750,6 +1750,7 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 #ifdef HIDAPI_VENDOR_USB
 	if (vendor_rule) {
 		dev->input_endpoint = vendor_selection.in.address;
+		/* The read length: wMaxPacketSize, or the rule's read size on a bulk IN endpoint */
 		dev->input_ep_max_packet_size = vendor_selection.in.read_size;
 		dev->input_ep_bulk = (vendor_selection.in.transfer == SDL_VENDORUSB_TRANSFER_BULK);
 		dev->output_endpoint = vendor_selection.out.address;

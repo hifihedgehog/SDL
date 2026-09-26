@@ -140,6 +140,25 @@ serial_test(iforce "${SERIAL_SOURCE}/SDL_serial_iforce_proto.c"
 serial_test(mastercontroller "${SERIAL_SOURCE}/SDL_serial_mastercontroller_proto.c"
     "${SERIAL_SDL_ROOT}/src/joystick/SDL_train_proto.c")
 
+# hifihedgehog/SDL#33 Part 14: Konami's ACIO bus and the BIO2 board.
+serial_test(acio "${SERIAL_SOURCE}/SDL_konami_acio_proto.c")
+
+serial_test(bio2 "${SERIAL_SOURCE}/SDL_serial_bio2_proto.c"
+    "${SERIAL_SOURCE}/SDL_konami_acio_proto.c")
+
+# hifihedgehog/SDL#33 Part 14: Konami's ACIO boards on RS-232.
+serial_test(kfca "${SERIAL_SOURCE}/SDL_serial_kfca_proto.c"
+    "${SERIAL_SOURCE}/SDL_konami_acio_proto.c")
+
+serial_test(panb "${SERIAL_SOURCE}/SDL_serial_panb_proto.c"
+    "${SERIAL_SOURCE}/SDL_konami_acio_proto.c")
+
+serial_test(rvol "${SERIAL_SOURCE}/SDL_serial_rvol_proto.c"
+    "${SERIAL_SOURCE}/SDL_konami_acio_proto.c")
+
+serial_test(mdxf "${SERIAL_SOURCE}/SDL_serial_mdxf_proto.c"
+    "${SERIAL_SOURCE}/SDL_konami_acio_proto.c")
+
 # hifihedgehog/SDL#33 Part 11: Bluetooth RFCOMM controllers, the MOGA, the
 # Zeemote JS1, the Chainpus BGP100 and the Phonejoy.
 rfcomm_test(link)

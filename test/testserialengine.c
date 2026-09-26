@@ -23,7 +23,11 @@
    command: P and Q present sub-devices 0 and 1, A takes 0 away, a digit sets
    axis 0 of sub-device 0, M lowers RTS, D drains, T and R set RTS toggle and
    RTS/CTS lines, N a plain line again, W writes "W", X pulses button 0, B
-   moves the ball by 5, S arms a 50 ms deadline. */
+   moves the ball by 5, S arms a 50 ms deadline, K starts a line break and k
+   ends it. C asks for a close sequence, which writes "BYE" and ends 100 ms
+   later, H asks for one that never ends, L for one that queues "LATE" as it
+   ends, U for one of writes that each queue the next and that ends on the
+   256th, and c asks for none. z says closed with no sequence running. */
 typedef struct ProbeState
 {
     SDL_SerialBase base;
@@ -35,6 +39,13 @@ typedef struct ProbeState
     int ticks;
     int outputs;
     SDL_SerialOutput last_output;
+    bool close_hangs;
+    bool close_late;
+    bool close_runaway;
+    int runaway_dones;
+    bool close_started;
+    bool close_timer;
+    uint64_t close_at;
 } ProbeState;
 
 static void Probe_Reset(void *state, const SDL_SerialSink *sink, uint64_t now)
@@ -50,6 +61,12 @@ static void Probe_Reset(void *state, const SDL_SerialSink *sink, uint64_t now)
     s->timer = false;
     s->ticks = 0;
     s->outputs = 0;
+    s->close_hangs = false;
+    s->close_late = false;
+    s->close_runaway = false;
+    s->runaway_dones = 0;
+    s->close_started = false;
+    s->close_timer = false;
     SDL_Serial_QueueLine(&s->base, 1, &line);
     SDL_Serial_QueueWrite(&s->base, 2, (const uint8_t *)"HI", 2);
 }
@@ -117,6 +134,34 @@ static void Probe_Feed(void *state, const uint8_t *data, size_t length, uint64_t
             memset(&controls, 0, sizeof(controls));
             SDL_Serial_Commit(&s->base, 0, &controls);
             break;
+        case 'K':
+            SDL_Serial_QueueBreak(&s->base, 9, true);
+            break;
+        case 'k':
+            SDL_Serial_QueueBreak(&s->base, 10, false);
+            break;
+        case 'C':
+            s->base.close_sequence = true;
+            break;
+        case 'H':
+            s->base.close_sequence = true;
+            s->close_hangs = true;
+            break;
+        case 'c':
+            s->base.close_sequence = false;
+            break;
+        case 'L':
+            s->base.close_sequence = true;
+            s->close_late = true;
+            break;
+        case 'U':
+            s->base.close_sequence = true;
+            s->close_runaway = true;
+            s->close_hangs = true;
+            break;
+        case 'z':
+            s->base.closed = true;
+            break;
         default:
             if (c >= '0' && c <= '9') {
                 controls = s->base.snapshots[0].controls;
@@ -132,6 +177,22 @@ static void Probe_Tick(void *state, uint64_t now)
 {
     ProbeState *s = (ProbeState *)state;
 
+    if (s->base.closing && !s->close_started) {
+        s->close_started = true;
+        SDL_Serial_ClearActions(&s->base);
+        SDL_Serial_QueueWrite(&s->base, 11, (const uint8_t *)"BYE", 3);
+        if (!s->close_hangs) {
+            s->close_timer = true;
+            s->close_at = now + 100;
+        }
+    }
+    if (s->close_timer && now >= s->close_at) {
+        s->close_timer = false;
+        if (s->close_late) {
+            SDL_Serial_QueueWrite(&s->base, 12, (const uint8_t *)"LATE", 4);
+        }
+        s->base.closed = true;
+    }
     if (s->timer && now >= s->timer_at) {
         s->timer = false;
         ++s->ticks;
@@ -151,6 +212,13 @@ static void Probe_ActionDone(void *state, bool success, uint64_t now)
             ++s->failed_dones;
         }
         s->last_tag = tag;
+        if (s->close_runaway && s->base.closing) {
+            if (++s->runaway_dones == 256) {
+                s->base.closed = true;
+            } else {
+                SDL_Serial_QueueWrite(&s->base, 13, (const uint8_t *)"U", 1);
+            }
+        }
     }
 }
 
@@ -170,6 +238,9 @@ static bool Probe_GetDeadline(void *state, uint64_t *deadline)
 
     if (s->timer) {
         SDL_Serial_EarlierDeadline(&have, deadline, s->timer_at);
+    }
+    if (s->close_timer) {
+        SDL_Serial_EarlierDeadline(&have, deadline, s->close_at);
     }
     SDL_Serial_PulseDeadline(&s->base, &have, deadline);
     return have;
@@ -699,6 +770,309 @@ static void TestScaling(void)
     CHECK(SDL_Serial_ScaleUnsigned(4095, 1000, 2000) == 32767);
 }
 
+/* Part 14: a line break, as the ACIO reset holds one */
+static bool escape_fails;
+
+static bool Failing_Escape(void *userdata, uint32_t function)
+{
+    (void)H_Escape(userdata, function);
+    return !escape_fails;
+}
+
+static const SDL_SerialPortOps failing_escape_ops = {
+    H_Open, H_SetLine, H_SetTimeouts, H_Purge, Failing_Escape, H_Write, H_Drain, H_Close, H_PresenceChanged, H_Publish, H_Log
+};
+
+static void TestBreak(void)
+{
+    Harness *h = H_Create(&probe_module);
+    ProbeState *s;
+    SDL_SerialAction action;
+    uint8_t tag = 0;
+    int i;
+
+    CHECK(SDL_SERIAL_SETBREAK == 8 && SDL_SERIAL_CLRBREAK == 9);
+    CHECK(SDL_SERIAL_TYPE_DANCE_PAD == 5 && SDL_SERIAL_TYPE_DRUM_KIT == 7);
+    H_Start(h);
+    H_SkipCalls(h);
+    H_Advance(h, 10);
+    FeedText(h, "K");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 10) && H_NextCall(h) == NULL);
+    CHECK(Probe(h)->dones == 3 && Probe(h)->failed_dones == 0 && Probe(h)->last_tag == 9 && h->engine.breaking);
+    FeedText(h, "k");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 10) && !h->engine.breaking);
+    CHECK(Probe(h)->dones == 4 && Probe(h)->last_tag == 10);
+    /* A loss during a break ends the break, then closes */
+    FeedText(h, "K");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 10));
+    H_Advance(h, 20);
+    H_LosePort(h);
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 20) && H_IsCall(H_NextCall(h), 'C', 20));
+    CHECK(H_NextCall(h) == NULL && !h->engine.breaking);
+    /* The port returns out of the break, and a loss then closes only */
+    H_Advance(h, 1020);
+    CHECK(H_ExpectOpened(h, 9600, 8, SDL_SERIAL_NOPARITY, 1, 1020));
+    CHECK(H_IsWriteText(H_NextCall(h), "HI", 1020));
+    H_LosePort(h);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 1020) && H_NextCall(h) == NULL);
+    /* Stop after a break has ended closes only */
+    H_Advance(h, 2020);
+    H_SkipCalls(h);
+    FeedText(h, "Kk");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 2020) && H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 2020));
+    SDL_SerialEngine_Stop(&h->engine);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 2020) && H_NextCall(h) == NULL);
+    H_Destroy(h);
+
+    /* Stop during a break ends it first */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    H_SkipCalls(h);
+    FeedText(h, "K");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 0));
+    SDL_SerialEngine_Stop(&h->engine);
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 0) && H_IsCall(H_NextCall(h), 'C', 0));
+    H_Destroy(h);
+
+    /* Flow control does not hold a break back, and a break waits for a
+       pending write */
+    h = H_Create(&probe_module);
+    h->pend_writes = true;
+    H_Start(h);
+    CHECK(H_ExpectOpened(h, 9600, 8, SDL_SERIAL_NOPARITY, 1, 0) && H_IsWriteText(H_NextCall(h), "HI", 0));
+    FeedText(h, "K");
+    CHECK(H_NextCall(h) == NULL);
+    H_CompleteWrite(h, true);
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 0) && Probe(h)->last_tag == 9);
+    FeedText(h, "Rk");
+    CHECK(H_IsLine(H_NextCall(h), 9600, 8, SDL_SERIAL_NOPARITY, 2, SDL_SERIAL_RTS_CONTROL_HANDSHAKE, true, SDL_SERIAL_DTR_CONTROL_ENABLE, 0));
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 0) && Probe(h)->failed_dones == 0 && Probe(h)->last_tag == 10);
+    H_Destroy(h);
+
+    /* A break that fails is port loss */
+    h = H_Create(&probe_module);
+    SDL_SerialEngine_Init(&h->engine, &failing_escape_ops, h, h->module, h->state, 0);
+    H_Start(h);
+    H_SkipCalls(h);
+    escape_fails = true;
+    FeedText(h, "K");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 0) && H_IsCall(H_NextCall(h), 'C', 0) && H_NextCall(h) == NULL);
+    CHECK(h->engine.losses == 1 && !h->engine.breaking && Probe(h)->dones == 2);
+    /* An end of break that fails is port loss, and the close tries once more */
+    escape_fails = false;
+    H_Advance(h, 1000);
+    H_SkipCalls(h);
+    FeedText(h, "K");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 1000) && h->engine.breaking);
+    escape_fails = true;
+    FeedText(h, "k");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1000) && H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1000));
+    CHECK(H_IsCall(H_NextCall(h), 'C', 1000) && h->engine.losses == 2 && !h->engine.breaking);
+    escape_fails = false;
+    H_Destroy(h);
+
+    /* The queue helper */
+    s = (ProbeState *)calloc(1, sizeof(ProbeState));
+    SDL_Serial_ResetBase(&s->base, NULL);
+    CHECK(SDL_Serial_QueueBreak(&s->base, 3, true) && SDL_Serial_QueueBreak(&s->base, 4, false));
+    CHECK(SDL_Serial_NextAction(s, &action) && action.kind == SDL_SERIAL_ACTION_BREAK && action.on && action.tag == 3);
+    CHECK(SDL_Serial_FinishAction(&s->base, &tag) && tag == 3);
+    CHECK(SDL_Serial_NextAction(s, &action) && action.kind == SDL_SERIAL_ACTION_BREAK && !action.on && action.tag == 4);
+    for (i = 0; i < SDL_SERIAL_MAX_ACTIONS; ++i) {
+        CHECK(SDL_Serial_QueueBreak(&s->base, 5, true));
+    }
+    CHECK(!SDL_Serial_QueueBreak(&s->base, 6, true));
+    free(s);
+}
+
+/* Part 14: a close sequence keeps the port open until the module ends it,
+   as the PANB's reset before close does */
+static void TestCloseSequence(void)
+{
+    Harness *h;
+    uint64_t deadline;
+    int dones;
+
+    /* No sequence: the port closes at once and never opens again */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "P");
+    H_SkipCalls(h);
+    H_Advance(h, 10);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(10)));
+    CHECK(H_IsCall(H_NextCall(h), 'C', 10) && H_NextCall(h) == NULL);
+    CHECK(!h->engine.open && !SDL_SerialEngine_IsStopping(&h->engine) && h->presence[0] == 0 && !Probe(h)->base.closing);
+    CHECK(!SDL_SerialEngine_GetDeadline(&h->engine, &deadline));
+    H_Advance(h, 5000);
+    SDL_SerialEngine_Rescan(&h->engine, H_NS(5000));
+    SDL_SerialEngine_Run(&h->engine, H_NS(6000));
+    CHECK(H_NextCall(h) == NULL && h->engine.opens == 1);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(6000)) && H_NextCall(h) == NULL);
+    H_Destroy(h);
+
+    /* A sequence: the module queues its bytes, reads go on, and the port
+       closes when the module says so */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "PC");
+    H_SkipCalls(h);
+    H_Advance(h, 10);
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(10)));
+    CHECK(Probe(h)->base.closing && !Probe(h)->base.closed && SDL_SerialEngine_IsStopping(&h->engine));
+    CHECK(H_IsWriteText(H_NextCall(h), "BYE", 10) && H_NextCall(h) == NULL && Probe(h)->last_tag == 11);
+    CHECK(h->engine.open && h->presence[0] == 1);
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 110);
+    /* A second call changes nothing */
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(10)) && H_NextCall(h) == NULL);
+    H_Advance(h, 50);
+    FeedText(h, "5");
+    CHECK(H_Last(h)->controls.axes[0] == 5);
+    /* Output waits for nothing and goes nowhere, and a rescan opens nothing */
+    {
+        SDL_SerialOutput request;
+        const int outputs = Probe(h)->outputs;
+
+        memset(&request, 0, sizeof(request));
+        request.kind = SDL_SERIAL_OUTPUT_RUMBLE;
+        SDL_SerialEngine_Output(&h->engine, &request, H_NS(50));
+        CHECK(Probe(h)->outputs == outputs);
+    }
+    SDL_SerialEngine_Rescan(&h->engine, H_NS(50));
+    H_Advance(h, 109);
+    CHECK(H_NextCall(h) == NULL && h->engine.open);
+    H_Advance(h, 110);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 110) && H_NextCall(h) == NULL);
+    CHECK(!h->engine.open && !SDL_SerialEngine_IsStopping(&h->engine) && h->presence[0] == 0);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(110)));
+    H_Advance(h, 10000);
+    SDL_SerialEngine_Rescan(&h->engine, H_NS(10000));
+    CHECK(H_NextCall(h) == NULL && h->engine.opens == 1 && !SDL_SerialEngine_GetDeadline(&h->engine, &deadline));
+    H_Destroy(h);
+
+    /* A sequence that never ends has SDL_SERIAL_CLOSE_MS from the call, which
+       brings its own clock */
+    CHECK(SDL_SERIAL_CLOSE_MS == 3000);
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "H");
+    H_SkipCalls(h);
+    H_Advance(h, 5);
+    h->now = 10;
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(10)));
+    CHECK(H_IsWriteText(H_NextCall(h), "BYE", 10));
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 10 + SDL_SERIAL_CLOSE_MS);
+    /* A later call does not move the end */
+    H_Advance(h, 1000);
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(1000)) && H_NextCall(h) == NULL);
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 10 + SDL_SERIAL_CLOSE_MS);
+    H_Advance(h, 10 + SDL_SERIAL_CLOSE_MS - 1);
+    CHECK(H_NextCall(h) == NULL && SDL_SerialEngine_IsStopping(&h->engine));
+    H_Advance(h, 10 + SDL_SERIAL_CLOSE_MS);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 10 + SDL_SERIAL_CLOSE_MS) && !SDL_SerialEngine_IsStopping(&h->engine));
+    H_Destroy(h);
+
+    /* A write still out: the sequence's bytes follow it, and its completion
+       is not the sequence's */
+    h = H_Create(&probe_module);
+    h->pend_writes = true;
+    H_Start(h);
+    CHECK(H_ExpectOpened(h, 9600, 8, SDL_SERIAL_NOPARITY, 1, 0) && H_IsWriteText(H_NextCall(h), "HI", 0));
+    FeedText(h, "C");
+    dones = Probe(h)->dones;
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(0)) && H_NextCall(h) == NULL);
+    H_Advance(h, 5);
+    H_CompleteWrite(h, true);
+    CHECK(H_IsWriteText(H_NextCall(h), "BYE", 5) && Probe(h)->dones == dones);
+    H_Advance(h, 6);
+    H_CompleteWrite(h, true);
+    CHECK(Probe(h)->dones == dones + 1 && Probe(h)->last_tag == 11 && h->engine.open);
+    H_Advance(h, 100);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 100));
+    H_Destroy(h);
+
+    /* A loss during the sequence closes the port for good */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "C");
+    H_SkipCalls(h);
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(0)));
+    H_Advance(h, 50);
+    H_LosePort(h);
+    CHECK(H_IsWriteText(H_NextCall(h), "BYE", 0) && H_IsCall(H_NextCall(h), 'C', 50));
+    CHECK(!SDL_SerialEngine_IsStopping(&h->engine) && h->engine.losses == 1);
+    H_Advance(h, 5000);
+    CHECK(H_NextCall(h) == NULL && h->engine.opens == 1);
+    H_Destroy(h);
+
+    /* A module that no longer asks for a sequence closes at once */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "Cc");
+    H_SkipCalls(h);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(0)) && H_IsCall(H_NextCall(h), 'C', 0));
+    H_Destroy(h);
+
+    /* Closed without a close running changes nothing */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    H_SkipCalls(h);
+    FeedText(h, "zW");
+    H_Advance(h, 500);
+    CHECK(H_IsWriteText(H_NextCall(h), "W", 0) && h->engine.open && !SDL_SerialEngine_IsStopping(&h->engine));
+    H_Destroy(h);
+
+    /* A sequence that ends with an action still queued closes before it */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "L");
+    H_SkipCalls(h);
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(0)) && H_IsWriteText(H_NextCall(h), "BYE", 0));
+    H_Advance(h, 100);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 100) && H_NextCall(h) == NULL);
+    H_Destroy(h);
+
+    /* A sequence that ends on the pump's last step closes the port there */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "U");
+    H_SkipCalls(h);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(0)) && !h->engine.open);
+    {
+        int i, writes = 0;
+
+        for (i = h->cursor; i < h->ncalls; ++i) {
+            if (H_IsWriteText(&h->calls[i], (i == h->cursor) ? "BYE" : "U", 0)) {
+                ++writes;
+            }
+        }
+        CHECK(writes == 256 && h->calls[h->ncalls - 1].kind == 'C' && Probe(h)->runaway_dones == 256);
+    }
+    H_Destroy(h);
+
+    /* A port lost after its module asked for a sequence runs none */
+    h = H_Create(&probe_module);
+    H_Start(h);
+    FeedText(h, "C");
+    H_LosePort(h);
+    H_SkipCalls(h);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(0)) && H_NextCall(h) == NULL);
+    CHECK(!Probe(h)->base.closing && !Probe(h)->close_started);
+    H_Advance(h, 5000);
+    CHECK(H_NextCall(h) == NULL && h->engine.opens == 1);
+    H_Destroy(h);
+
+    /* A port still retrying its open never opens */
+    h = H_Create(&probe_module);
+    h->open_failures = 1;
+    H_Start(h);
+    CHECK(H_IsCall(H_NextCall(h), 'O', 0) && H_NextCall(h) == NULL);
+    CHECK(!SDL_SerialEngine_BeginStop(&h->engine, H_NS(10)) && !Probe(h)->base.closing);
+    H_Advance(h, 5000);
+    SDL_SerialEngine_Rescan(&h->engine, H_NS(5000));
+    CHECK(H_NextCall(h) == NULL && h->engine.opens == 0);
+    H_Destroy(h);
+}
+
 static void TestBase(void)
 {
     ProbeState *s = (ProbeState *)calloc(1, sizeof(ProbeState));
@@ -768,5 +1142,7 @@ int main(void)
     TestHalfAxis();
     TestScaling();
     TestBase();
+    TestBreak();
+    TestCloseSequence();
     return H_Finish();
 }
