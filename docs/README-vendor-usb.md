@@ -58,6 +58,10 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   handle, with interface 0 claimed on it, stays open until the last of those
   interfaces closes, and a second open of an interface SDL already holds
   fails. The wired pad's chatpad, interface 2, is claimed on the same handle.
+  When a later Xbox interface is the first to open the handle, SDL claims
+  interface 0 before it. Otherwise libusb sets up interface 0's WinUSB handle
+  without counting the claim, and libusb 1.0.29 sets it up a second time, and
+  loses the first, when interface 0 opens afterward.
 - The Switch 2 controllers keep their input on the platform HID backend. Their
   drivers open WinUSB separately for bulk I/O.
 - A rule can serve Windows only. The Gametrak's HID interface needs libusb

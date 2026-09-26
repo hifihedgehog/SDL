@@ -331,6 +331,16 @@ bool SDL_VendorUSB_SkipUnopened(SDL_VendorUSBPlatform platform, bool xbox, bool 
     return platform == SDL_VENDORUSB_PLATFORM_WINDOWS && xbox && !opened;
 }
 
+bool SDL_VendorUSB_ClaimInterface0First(SDL_VendorUSBPlatform platform, bool xbox, int interface_number, bool shared)
+{
+    return platform == SDL_VENDORUSB_PLATFORM_WINDOWS && xbox && interface_number != 0 && !shared;
+}
+
+bool SDL_VendorUSB_KeepClaimed(SDL_VendorUSBPlatform platform, int interface_number, bool shared)
+{
+    return platform == SDL_VENDORUSB_PLATFORM_WINDOWS && interface_number == 0 && shared;
+}
+
 #define VENDORUSB_DT_INTERFACE 0x04
 #define VENDORUSB_DT_ENDPOINT  0x05
 
