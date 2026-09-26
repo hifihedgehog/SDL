@@ -26,7 +26,10 @@
  * service over Bluetooth LE (not HID-over-GATT), so hidapi never sees it and
  * the upstream SDL_hidapi_switch2.c Bluetooth path stays a stub. This driver
  * owns a WinRT BLE connection, modeled on the WGI driver's WinRT-from-C
- * mechanics (SDL_windows_gaming_input.c).
+ * mechanics (SDL_windows_gaming_input.c). The WinRT transport it shares with
+ * the generic BLE GATT driver lives in SDL_ble_gatt.c (hifihedgehog/SDL#33
+ * Part 12): the runtime, the awaits, the delegates, the advertisement watcher,
+ * the open, the uncached discovery and the writes.
  *
  * Hardware-gated: the BLE report byte offsets and IMU scale are reasoned from
  * the reference reimplementations (ndeadly/Nadeflore/joycon2cpp) and must be
@@ -56,68 +59,27 @@
 #include <windows.foundation.h>
 #include <roapi.h>
 #include <objidlbase.h>
+
+#include "SDL_ble_gatt.h"
+
 #include <initguid.h>
 
 // ---------------------------------------------------------------------------
-// Short aliases for the very long WinRT-from-C symbol names.
+// Short aliases for the very long WinRT-from-C symbol names. The transport's
+// own aliases live in SDL_ble_gatt.c.
 // ---------------------------------------------------------------------------
 
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher            BleWatcher;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher2           BleWatcher2;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs  BleRecvArgs;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisement                   BleAdvertisement;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEManufacturerData                BleMfgData;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics                    BleDeviceStatics;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice                           BleDevice;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3                          BleDevice3;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6                          BleDevice6;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics BleConnParamStatics;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParameters    BleConnParam;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersRequest BleConnParamReq;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult                  GattServicesResult;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService                         GattService;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3                        GattService3;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult                 GattCharsResult;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic                        GattChar;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattValueChangedEventArgs                 GattValueArgs;
-typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CGattCommunicationStatus                    GattCommStatus;
-typedef __x_ABI_CWindows_CStorage_CStreams_CIBuffer                                 Buffer;
-typedef __x_ABI_CWindows_CStorage_CStreams_CIDataWriter                             DataWriter;
 
 // ---------------------------------------------------------------------------
 // IIDs. The WinRT C headers ship only declarations, so we define the GUIDs
-// ourselves (same approach as SDL_windows_gaming_input.c).
+// ourselves (same approach as SDL_windows_gaming_input.c). The transport's
+// IIDs live in SDL_ble_gatt.c.
 // ---------------------------------------------------------------------------
-DEFINE_GUID(IID_BleWatcher,       0xa6ac336f, 0xf3d3, 0x4297, 0x8d, 0x6c, 0xc8, 0x1e, 0xa6, 0x62, 0x3f, 0x40);
-DEFINE_GUID(IID_BleWatcher2,      0x01bf26bc, 0xb164, 0x5805, 0x90, 0xa3, 0xe8, 0xa7, 0x99, 0x7f, 0xf2, 0x25);
-DEFINE_GUID(IID_BleRecvHandler,   0x90eb4eca, 0xd465, 0x5ea0, 0xa6, 0x1c, 0x03, 0x3c, 0x8c, 0x5e, 0xce, 0xf2);
-DEFINE_GUID(IID_BleRecvArgs,      0x27987ddf, 0xe596, 0x41be, 0x8d, 0x43, 0x9e, 0x67, 0x31, 0xd4, 0xa9, 0x13);
-DEFINE_GUID(IID_BleAdvertisement, 0x066fb2b7, 0x33d1, 0x4e7d, 0x83, 0x67, 0xcf, 0x81, 0xd0, 0xf7, 0x96, 0x53);
-DEFINE_GUID(IID_BleMfgData,       0x912dba18, 0x6963, 0x4533, 0xb0, 0x61, 0x46, 0x94, 0xda, 0xfb, 0x34, 0xe5);
-DEFINE_GUID(IID_BleDeviceStatics, 0xc8cf1a19, 0xf0b6, 0x4bf0, 0x86, 0x89, 0x41, 0x30, 0x3d, 0xe2, 0xd9, 0xf4);
-DEFINE_GUID(IID_BleDevice,        0xb5ee2f7b, 0x4ad8, 0x4642, 0xac, 0x48, 0x80, 0xa0, 0xb5, 0x00, 0xe8, 0x87);
 DEFINE_GUID(IID_BleDevice3,       0xaee9e493, 0x44ac, 0x40dc, 0xaf, 0x33, 0xb2, 0xc1, 0x3c, 0x01, 0xca, 0x46);
-DEFINE_GUID(IID_BleDevice6,       0xca7190ef, 0x0cae, 0x573c, 0xa1, 0xca, 0xe1, 0xfc, 0x5b, 0xfc, 0x39, 0xe2);
-DEFINE_GUID(IID_BleConnParamStatics, 0x0e3e8edc, 0x2751, 0x55aa, 0xa8, 0x38, 0x8f, 0xae, 0xee, 0x81, 0x8d, 0x72);
-DEFINE_GUID(IID_GattService3,     0xb293a950, 0x0c53, 0x437c, 0xa9, 0xb3, 0x5c, 0x32, 0x10, 0xc6, 0xe5, 0x69);
-DEFINE_GUID(IID_GattChar,         0x59cb50c1, 0x5934, 0x4f68, 0xa1, 0x98, 0xeb, 0x86, 0x4f, 0xa4, 0x4e, 0x6b);
-DEFINE_GUID(IID_GattValueHandler, 0xc1f420f6, 0x6292, 0x5760, 0xa2, 0xc9, 0x9d, 0xdf, 0x98, 0x68, 0x3c, 0xfc);
-// ITypedEventHandler<BluetoothLEDevice*, IInspectable*> (ConnectionStatusChanged),
-// declspec(uuid) on the specialization, windows.devices.bluetooth.h:1597.
-DEFINE_GUID(IID_BleStatusHandler, 0xa90661e2, 0x372e, 0x5d1e, 0xbb, 0xbb, 0xb8, 0xa2, 0xce, 0x0e, 0x7c, 0x4d);
-DEFINE_GUID(IID_GattValueArgs,    0xd21bdb54, 0x06e3, 0x4ed8, 0xa2, 0x63, 0xac, 0xfa, 0xc8, 0xba, 0x73, 0x13);
-DEFINE_GUID(IID_DataWriter,       0x64b89265, 0xd341, 0x4922, 0xb3, 0x8a, 0xdd, 0x4a, 0xf8, 0x80, 0x8c, 0x4e);
-DEFINE_GUID(IID_IBufferByteAccess, 0x905a0fef, 0xbc53, 0x11df, 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda);
-// Parameterized IAsyncOperationCompletedHandler<T> IIDs (PIIDs). The shared
-// awaiter must QI-accept exactly the handler IID put_Completed asks for, like the
-// WGI driver's per-delegate QI (SDL_windows_gaming_input.c:340-342). These are the
-// CompletedHandler IIDs, NOT the IAsyncOperation<T> IIDs that sit on the adjacent
-// near-identically-named struct in the SDK headers (using the operation IID makes
-// put_Completed return E_NOINTERFACE).
-DEFINE_GUID(IID_AsyncDeviceHandler,   0x9156b79f, 0xc54a, 0x5277, 0x8f, 0x8b, 0xd2, 0xcc, 0x43, 0xc7, 0xe0, 0x04); // <BluetoothLEDevice> bt.h:833
-DEFINE_GUID(IID_AsyncServicesHandler, 0x74ab0892, 0xa631, 0x5d6c, 0xb1, 0xb4, 0xbd, 0x2e, 0x1a, 0x74, 0x1a, 0x9b); // <GattDeviceServicesResult> bt.h:916
-DEFINE_GUID(IID_AsyncCharsHandler,    0xd6a15475, 0x1e72, 0x5c56, 0x98, 0xe8, 0x88, 0xf4, 0xbc, 0x3e, 0x03, 0x13); // <GattCharacteristicsResult> gatt.h:1167
-DEFINE_GUID(IID_AsyncStatusHandler,   0x2154117a, 0x978d, 0x59db, 0x99, 0xcf, 0x6b, 0x69, 0x0c, 0xb3, 0x38, 0x9b); // <GattCommunicationStatus> gatt.h:1299
 
 // The custom Switch 2 GATT service and its characteristics (all controllers).
 DEFINE_GUID(GUID_Switch2Service,    0xab7de9be, 0x89fe, 0x49ad, 0x82, 0x8f, 0x11, 0x8f, 0x09, 0xdf, 0x7f, 0xd0);
@@ -136,34 +98,6 @@ DEFINE_GUID(GUID_Switch2VibeGC,   0x3f8fb670, 0xab25, 0x45bf, 0xb5, 0x40, 0x38, 
 // reference paces its ESP32 bridge at 7.5 ms; on a direct BLE link 10 ms sustains
 // the effect without flooding the shared connection.
 #define BLE_RUMBLE_INTERVAL_MS 10
-
-// ---------------------------------------------------------------------------
-// IBufferByteAccess: classic COM interface to reach an IBuffer's raw bytes.
-// robuffer.h is C++-only, so declare the C-callable form here.
-// ---------------------------------------------------------------------------
-typedef struct IBufferByteAccess IBufferByteAccess;
-typedef struct IBufferByteAccessVtbl
-{
-    HRESULT(STDMETHODCALLTYPE *QueryInterface)(IBufferByteAccess *This, REFIID riid, void **ppv);
-    ULONG(STDMETHODCALLTYPE *AddRef)(IBufferByteAccess *This);
-    ULONG(STDMETHODCALLTYPE *Release)(IBufferByteAccess *This);
-    HRESULT(STDMETHODCALLTYPE *Buffer)(IBufferByteAccess *This, byte **value);
-} IBufferByteAccessVtbl;
-struct IBufferByteAccess
-{
-    const IBufferByteAccessVtbl *lpVtbl;
-};
-
-// ---------------------------------------------------------------------------
-// combase entrypoints, resolved at runtime (same as WGI).
-// ---------------------------------------------------------------------------
-typedef HRESULT(WINAPI *CoIncrementMTAUsage_t)(HANDLE *pCookie);
-typedef HRESULT(WINAPI *RoGetActivationFactory_t)(HSTRING activatableClassId, REFIID iid, void **factory);
-typedef HRESULT(WINAPI *RoActivateInstance_t)(HSTRING activatableClassId, IInspectable **instance);
-typedef HRESULT(WINAPI *RoInitialize_t)(RO_INIT_TYPE initType);
-typedef void(WINAPI *RoUninitialize_t)(void);
-typedef HRESULT(WINAPI *WindowsCreateStringReference_t)(PCWSTR sourceString, UINT32 length, HSTRING_HEADER *header, HSTRING *string);
-typedef HRESULT(WINAPI *WindowsDeleteString_t)(HSTRING string);
 
 // Per-axis stick calibration (reimplemented; the wired versions are file-static).
 typedef struct
@@ -266,18 +200,8 @@ static Sint16 BLE_MapStickAxis(const Switch2_AxisCal *calib, float value, bool i
 static struct
 {
     bool initialized;
-    bool ro_initialized;
-    bool scanning;
-    CoIncrementMTAUsage_t CoIncrementMTAUsage;
-    RoGetActivationFactory_t RoGetActivationFactory;
-    RoActivateInstance_t RoActivateInstance;
-    RoInitialize_t RoInitialize;
-    RoUninitialize_t RoUninitialize;
-    WindowsCreateStringReference_t WindowsCreateStringReference;
-    WindowsDeleteString_t WindowsDeleteString;
-
-    BleWatcher *watcher;
-    EventRegistrationToken received_token;
+    bool transport; // holds a reference from SDL_BLEGATT_Init
+    bool scanning;  // BLE_OnAdvertisement is added to the shared watcher
 
     BLE_Controller **controllers;
     int controller_count;
@@ -312,7 +236,7 @@ static void BLE_ReleaseConnect(Uint64 address);
 // multi-second async opens and discovery, and blocking the callback thread starves
 // the same thread pool that must deliver those completions (hifihedgehog/SDL#5:
 // device=NULL on every attempt). joycon2cpp opens on its own connect thread
-// (testapp.cpp:812-827) and bleak dispatches to a task (discoverer.py).
+// (testapp.cpp:1467 and :835) and bleak dispatches to a task (discoverer.py).
 typedef struct
 {
     Uint64 address;
@@ -331,13 +255,11 @@ static int SDLCALL BLE_ConnectThread(void *data)
     // implicit MTA from CoIncrementMTAUsage, so initialize it as MULTITHREADED
     // (not WIN_RoInitialize, which is STA-first and would risk a marshal-back
     // deadlock against the agile completion handlers this thread blocks on).
-    if (ble.RoInitialize) {
-        ro_inited = SUCCEEDED(ble.RoInitialize(RO_INIT_MULTITHREADED));
-    }
+    ro_inited = SDL_BLEGATT_InitThread();
     BLE_ConnectAndSubscribe(req->address, req->vendor, req->product, NULL);
     BLE_ReleaseConnect(req->address); // address reserved by the caller before spawn
-    if (ro_inited && ble.RoUninitialize) {
-        ble.RoUninitialize();
+    if (ro_inited) {
+        SDL_BLEGATT_QuitThread();
     }
     SDL_free(req);
     return 0;
@@ -345,13 +267,16 @@ static int SDLCALL BLE_ConnectThread(void *data)
 
 // Reserve an address for connecting. Returns false if it is already connected or
 // a connect is already in progress. Caller must BLE_ReleaseConnect on completion.
+// Also false once the driver has quit: the shared watcher can still deliver an
+// advertisement that it copied before BLE_JoystickQuit removed the listener
+// (SDL_ble_gatt.h), and ble.initialized is written under this same lock.
 static bool BLE_TryReserveConnect(Uint64 address)
 {
     int i;
     bool reserved = false;
 
     SDL_LockJoysticks();
-    if (!BLE_GetControllerByAddress(address)) {
+    if (ble.initialized && !BLE_GetControllerByAddress(address)) {
         bool pending = false;
         Uint64 now = SDL_GetTicks();
         for (i = 0; i < ble.connecting_count; ++i) {
@@ -425,199 +350,6 @@ static void BLE_ReleaseConnect(Uint64 address)
     SDL_UnlockJoysticks();
 }
 
-// ---------------------------------------------------------------------------
-// Activation helpers.
-// ---------------------------------------------------------------------------
-static HRESULT BLE_GetActivationFactory(PCWSTR class_name, REFIID iid, void **out)
-{
-    HSTRING_HEADER header;
-    HSTRING str;
-    HRESULT hr = ble.WindowsCreateStringReference(class_name, (UINT32)SDL_wcslen(class_name), &header, &str);
-    if (SUCCEEDED(hr)) {
-        hr = ble.RoGetActivationFactory(str, iid, out);
-    }
-    return hr;
-}
-
-static HRESULT BLE_ActivateInstance(PCWSTR class_name, REFIID iid, void **out)
-{
-    HSTRING_HEADER header;
-    HSTRING str;
-    IInspectable *inspectable = NULL;
-    HRESULT hr = ble.WindowsCreateStringReference(class_name, (UINT32)SDL_wcslen(class_name), &header, &str);
-    if (SUCCEEDED(hr)) {
-        hr = ble.RoActivateInstance(str, &inspectable);
-        if (SUCCEEDED(hr)) {
-            hr = inspectable->lpVtbl->QueryInterface(inspectable, iid, out);
-            inspectable->lpVtbl->Release(inspectable);
-        }
-    }
-    return hr;
-}
-
-// ---------------------------------------------------------------------------
-// Async-await: a permissive completed-handler avoids needing any parameterized
-// IID. put_Completed is vtbl slot 6 on every IAsyncOperation<T>, so we register
-// generically; the caller then calls the typed GetResults.
-// ---------------------------------------------------------------------------
-typedef struct BLE_Awaiter
-{
-    void *lpVtbl;
-    SDL_AtomicInt refcount;
-    SDL_Semaphore *sem;
-    const GUID *handler_iid; // PIID of the IAsyncOperationCompletedHandler<T> we are
-} BLE_Awaiter;
-
-static ULONG STDMETHODCALLTYPE Awaiter_AddRef(void *This);
-
-// Strict QI, matching the WGI handler (SDL_windows_gaming_input.c:340-342): accept
-// only IUnknown, IAgileObject, and this awaiter's specific completed-handler IID,
-// AddRef on success, E_NOINTERFACE for everything else. The previous permissive
-// version handed back self (and skipped AddRef) for every IID except IMarshal,
-// including IInspectable, which a delegate is not. WinRT rejected that handler at
-// put_Completed with CO_E_NOTSUPPORTED (0x80004021), so the open never waited
-// (hifihedgehog/SDL#5).
-static HRESULT STDMETHODCALLTYPE Awaiter_QueryInterface(void *This, REFIID riid, void **ppv)
-{
-    BLE_Awaiter *self = (BLE_Awaiter *)This;
-    if (!ppv) {
-        return E_INVALIDARG;
-    }
-    if (WIN_IsEqualIID(riid, &IID_IUnknown) ||
-        WIN_IsEqualIID(riid, &IID_IAgileObject) ||
-        (self->handler_iid && WIN_IsEqualIID(riid, self->handler_iid))) {
-        *ppv = This;
-        Awaiter_AddRef(This);
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG STDMETHODCALLTYPE Awaiter_AddRef(void *This)
-{
-    BLE_Awaiter *self = (BLE_Awaiter *)This;
-    return (ULONG)(SDL_AddAtomicInt(&self->refcount, 1) + 1);
-}
-static ULONG STDMETHODCALLTYPE Awaiter_Release(void *This)
-{
-    BLE_Awaiter *self = (BLE_Awaiter *)This;
-    int rc = SDL_AddAtomicInt(&self->refcount, -1) - 1;
-    if (rc == 0) {
-        SDL_DestroySemaphore(self->sem);
-        SDL_free(self);
-    }
-    return (ULONG)rc;
-}
-static HRESULT STDMETHODCALLTYPE Awaiter_Invoke(void *This, void *op, int status)
-{
-    BLE_Awaiter *self = (BLE_Awaiter *)This;
-    (void)op;
-    (void)status;
-    SDL_SignalSemaphore(self->sem);
-    return S_OK;
-}
-static const struct
-{
-    void *QueryInterface;
-    void *AddRef;
-    void *Release;
-    void *Invoke;
-} g_awaiter_vtbl = { (void *)Awaiter_QueryInterface, (void *)Awaiter_AddRef, (void *)Awaiter_Release, (void *)Awaiter_Invoke };
-
-// Block (up to timeout_ms) until the IAsyncOperation completes. The handler is
-// heap-allocated and refcounted: WinRT holds a reference until it finishes, so a
-// timeout here cannot free the handler out from under a later completion. Returns
-// false on arm failure or timeout.
-static bool BLE_AwaitTimeout(void *async_op, Sint32 timeout_ms, const GUID *handler_iid)
-{
-    typedef HRESULT(STDMETHODCALLTYPE * put_Completed_t)(void *This, void *handler);
-    void ***vtbl;
-    put_Completed_t put_Completed;
-    BLE_Awaiter *awaiter;
-    HRESULT hr;
-    bool completed;
-
-    if (!async_op) {
-        return false;
-    }
-    awaiter = (BLE_Awaiter *)SDL_calloc(1, sizeof(*awaiter));
-    if (!awaiter) {
-        return false;
-    }
-    awaiter->lpVtbl = (void *)&g_awaiter_vtbl;
-    awaiter->handler_iid = handler_iid;
-    awaiter->sem = SDL_CreateSemaphore(0);
-    if (!awaiter->sem) {
-        SDL_free(awaiter);
-        return false;
-    }
-    SDL_SetAtomicInt(&awaiter->refcount, 1); // our reference
-
-    vtbl = (void ***)async_op;
-    put_Completed = (put_Completed_t)(*vtbl)[6]; // IInspectable(0..5) then put_Completed(6)
-    hr = put_Completed(async_op, awaiter);      // WinRT takes its own reference
-    if (SUCCEEDED(hr)) {
-        completed = SDL_WaitSemaphoreTimeout(awaiter->sem, timeout_ms);
-    } else {
-        completed = false;
-    }
-    // Diagnostic (hifihedgehog/SDL#5): pin candidate (b). A put_Completed failure,
-    // or a completed=0 that returns far sooner than timeout_ms, means the await is
-    // not actually waiting on the async op.
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE await: put_Completed hr=0x%08lX wait(%dms) completed=%d",
-                 (unsigned long)hr, (int)timeout_ms, (int)completed);
-    Awaiter_Release(awaiter); // drop our reference; WinRT frees it when it is done
-    return completed;
-}
-
-// Default await for post-link per-op reads and writes (link already up, so a
-// short ceiling is fine and surfaces a wedged op quickly).
-static bool BLE_Await(void *async_op, const GUID *handler_iid)
-{
-    return BLE_AwaitTimeout(async_op, 3000, handler_iid);
-}
-
-// ---------------------------------------------------------------------------
-// IBuffer helpers.
-// ---------------------------------------------------------------------------
-static Buffer *BLE_BufferFromBytes(const Uint8 *bytes, UINT32 length)
-{
-    DataWriter *writer = NULL;
-    Buffer *buffer = NULL;
-
-    if (FAILED(BLE_ActivateInstance(RuntimeClass_Windows_Storage_Streams_DataWriter, &IID_DataWriter, (void **)&writer))) {
-        return NULL;
-    }
-    if (SUCCEEDED(__x_ABI_CWindows_CStorage_CStreams_CIDataWriter_WriteBytes(writer, length, (BYTE *)bytes))) {
-        __x_ABI_CWindows_CStorage_CStreams_CIDataWriter_DetachBuffer(writer, &buffer);
-    }
-    __x_ABI_CWindows_CStorage_CStreams_CIDataWriter_Release(writer);
-    return buffer;
-}
-
-// Copy an IBuffer's bytes into dst (up to dst_len). Returns the number copied.
-static int BLE_BufferToBytes(Buffer *buffer, Uint8 *dst, int dst_len)
-{
-    IBufferByteAccess *access = NULL;
-    UINT32 length = 0;
-    byte *raw = NULL;
-    int copied = 0;
-
-    if (!buffer) {
-        return 0;
-    }
-    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_get_Length(buffer, &length);
-    if (FAILED(__x_ABI_CWindows_CStorage_CStreams_CIBuffer_QueryInterface(buffer, &IID_IBufferByteAccess, (void **)&access))) {
-        return 0;
-    }
-    if (SUCCEEDED(access->lpVtbl->Buffer(access, &raw)) && raw) {
-        copied = (int)SDL_min((int)length, dst_len);
-        SDL_memcpy(dst, raw, copied);
-    }
-    access->lpVtbl->Release(access);
-    return copied;
-}
-
 // Debug hex dump (visible at SDL_LOG_PRIORITY_DEBUG). Used to capture the real
 // on-wire layout so the transport-specific unknowns (input report offsets, flash
 // reply offset) can be confirmed against the reference on first hardware contact.
@@ -630,58 +362,6 @@ static void BLE_LogBytes(const char *label, const Uint8 *data, int len)
     }
     hex[n > 0 ? n * 3 : 0] = '\0';
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 %s (%d bytes): %s", label, len, hex);
-}
-
-// Write bytes to a characteristic. The caller's prefer_response hint asks for a
-// reliable (acknowledged) write for the command channel, but the Switch 2 command
-// characteristic only advertises write-without-response on real hardware
-// (switch2-bt docs/HARDWARE-TEST.md: "command write ... props=write-without-
-// response"; joycon2cpp testapp.cpp:446 and controller.py via Bleak both write
-// commands without response). Honoring a WriteWithResponse against a char that
-// lacks the Write property fails at the ATT layer, so choose the option from the
-// characteristic's actual properties: WriteWithResponse only when Write (0x8) is
-// advertised, otherwise WriteWithoutResponse. The reply still arrives over the
-// response notification, independent of the write acknowledgment.
-static bool BLE_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length, bool prefer_response)
-{
-    Buffer *buffer;
-    void *op = NULL;
-    bool result = false;
-    int option = GattWriteOption_WriteWithoutResponse;
-
-    if (!characteristic) {
-        return false;
-    }
-    if (prefer_response) {
-        enum __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CGattCharacteristicProperties props = 0;
-        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_get_CharacteristicProperties(characteristic, &props)) &&
-            (props & GattCharacteristicProperties_Write)) {
-            option = GattWriteOption_WriteWithResponse;
-        }
-    }
-    buffer = BLE_BufferFromBytes(bytes, (UINT32)length);
-    if (!buffer) {
-        return false;
-    }
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteValueWithOptionAsync(characteristic, buffer, option, (void *)&op)) && op) {
-        result = BLE_Await(op, &IID_AsyncStatusHandler);
-        ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
-    }
-    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(buffer);
-    return result;
-}
-
-// Subscribe a characteristic to notifications (register handler then write CCCD).
-static bool BLE_EnableNotifications(GattChar *characteristic)
-{
-    void *op = NULL;
-    bool result = false;
-
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteClientCharacteristicConfigurationDescriptorAsync(characteristic, GattClientCharacteristicConfigurationDescriptorValue_Notify, (void *)&op)) && op) {
-        result = BLE_Await(op, &IID_AsyncStatusHandler);
-        ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
-    }
-    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -711,130 +391,48 @@ static BLE_Controller *BLE_GetControllerByAddress(Uint64 address)
 
 // ---------------------------------------------------------------------------
 // Input characteristic ValueChanged: copy the raw report into the ring slot.
-// Runs on a WinRT thread-pool (MTA) thread.
+// Runs on a WinRT thread-pool (MTA) thread, called by the shared value delegate
+// (SDL_ble_gatt.c) with the whole value. The report keeps its first 64 bytes.
 // ---------------------------------------------------------------------------
-static HRESULT STDMETHODCALLTYPE InputHandler_QueryInterface(void *This, REFIID riid, void **ppv)
+static void BLE_OnInputValue(void *userdata, int characteristic, const Uint8 *data, size_t length)
 {
-    if (!ppv) {
-        return E_INVALIDARG;
-    }
-    if (WIN_IsEqualIID(riid, &IID_IUnknown) || WIN_IsEqualIID(riid, &IID_IAgileObject) || WIN_IsEqualIID(riid, &IID_GattValueHandler)) {
-        *ppv = This;
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG STDMETHODCALLTYPE InputHandler_AddRef(void *This) { (void)This; return 2; }
-static ULONG STDMETHODCALLTYPE InputHandler_Release(void *This) { (void)This; return 1; }
-static HRESULT STDMETHODCALLTYPE InputHandler_Invoke(void *This, void *sender, GattValueArgs *args)
-{
-    BLE_Controller *ctrl = (BLE_Controller *)((void **)This)[1];
-    Buffer *buffer = NULL;
-    (void)sender;
+    BLE_Controller *ctrl = (BLE_Controller *)userdata;
+    int size = (int)SDL_min(length, sizeof(ctrl->report));
+    (void)characteristic;
 
-    if (!args || !ctrl) {
-        return S_OK;
+    if (!ctrl) {
+        return;
     }
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattValueChangedEventArgs_get_CharacteristicValue(args, &buffer)) && buffer) {
-        Uint8 tmp[64];
-        int size = BLE_BufferToBytes(buffer, tmp, sizeof(tmp));
-        if (size > 0) {
-            SDL_LockMutex(ctrl->report_lock);
-            SDL_memcpy(ctrl->report, tmp, size);
-            ctrl->report_size = size;
-            ctrl->report_pending = true;
-            SDL_UnlockMutex(ctrl->report_lock);
-        }
-        __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(buffer);
+    if (size > 0) {
+        SDL_LockMutex(ctrl->report_lock);
+        SDL_memcpy(ctrl->report, data, size);
+        ctrl->report_size = size;
+        ctrl->report_pending = true;
+        SDL_UnlockMutex(ctrl->report_lock);
     }
-    return S_OK;
 }
-// vtbl + a trailing context slot so Invoke can find its controller.
-typedef struct
-{
-    void *vtbl;
-    BLE_Controller *ctrl;
-} InputHandlerObj;
-static const struct
-{
-    void *QueryInterface;
-    void *AddRef;
-    void *Release;
-    void *Invoke;
-} g_input_vtbl = { (void *)InputHandler_QueryInterface, (void *)InputHandler_AddRef, (void *)InputHandler_Release, (void *)InputHandler_Invoke };
-
-// ---------------------------------------------------------------------------
-// BluetoothLEDevice.ConnectionStatusChanged: link-loss detection (SDL#9
-// follow-up). Fires on a WinRT thread-pool (MTA) thread when the link drops:
-// pad powered off (the SendEffect shutdown), battery died, or out of range.
-// Per the SDL#5 callback-pool rule, no work happens here: set the flag and
-// return. BLE_JoystickDetect drains it on the joystick thread and runs the
-// actual teardown there.
-// ---------------------------------------------------------------------------
-static HRESULT STDMETHODCALLTYPE StatusHandler_QueryInterface(void *This, REFIID riid, void **ppv)
-{
-    if (!ppv) {
-        return E_INVALIDARG;
-    }
-    if (WIN_IsEqualIID(riid, &IID_IUnknown) || WIN_IsEqualIID(riid, &IID_IAgileObject) || WIN_IsEqualIID(riid, &IID_BleStatusHandler)) {
-        *ppv = This;
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG STDMETHODCALLTYPE StatusHandler_AddRef(void *This) { (void)This; return 2; }
-static ULONG STDMETHODCALLTYPE StatusHandler_Release(void *This) { (void)This; return 1; }
-static HRESULT STDMETHODCALLTYPE StatusHandler_Invoke(void *This, BleDevice *sender, void *args)
-{
-    BLE_Controller *ctrl = (BLE_Controller *)((void **)This)[1];
-    enum __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothConnectionStatus status = BluetoothConnectionStatus_Connected;
-    (void)args;
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_get_ConnectionStatus(sender, &status)) &&
-        status == BluetoothConnectionStatus_Disconnected) {
-        SDL_SetAtomicInt(&ctrl->link_lost, 1);
-    }
-    return S_OK;
-}
-static const struct
-{
-    void *QueryInterface;
-    void *AddRef;
-    void *Release;
-    void *Invoke;
-} g_status_vtbl = { (void *)StatusHandler_QueryInterface, (void *)StatusHandler_AddRef, (void *)StatusHandler_Release, (void *)StatusHandler_Invoke };
 
 // ---------------------------------------------------------------------------
 // Command-response characteristic ValueChanged: stash the reply and signal.
+// Called by the shared value delegate, like BLE_OnInputValue. The reply keeps
+// its first 128 bytes.
 // ---------------------------------------------------------------------------
-static HRESULT STDMETHODCALLTYPE ResponseHandler_Invoke(void *This, void *sender, GattValueArgs *args)
+static void BLE_OnResponseValue(void *userdata, int characteristic, const Uint8 *data, size_t length)
 {
-    BLE_Controller *ctrl = (BLE_Controller *)((void **)This)[1];
-    Buffer *buffer = NULL;
-    (void)sender;
+    BLE_Controller *ctrl = (BLE_Controller *)userdata;
+    (void)characteristic;
 
-    if (!args || !ctrl) {
-        return S_OK;
+    if (!ctrl) {
+        return;
     }
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattValueChangedEventArgs_get_CharacteristicValue(args, &buffer)) && buffer) {
-        SDL_LockMutex(ctrl->response_lock);
-        ctrl->response_size = BLE_BufferToBytes(buffer, ctrl->response, sizeof(ctrl->response));
-        SDL_UnlockMutex(ctrl->response_lock);
-        if (ctrl->response_size > 0) {
-            SDL_SignalSemaphore(ctrl->response_sem);
-        }
-        __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(buffer);
+    SDL_LockMutex(ctrl->response_lock);
+    ctrl->response_size = (int)SDL_min(length, sizeof(ctrl->response));
+    SDL_memcpy(ctrl->response, data, ctrl->response_size);
+    SDL_UnlockMutex(ctrl->response_lock);
+    if (ctrl->response_size > 0) {
+        SDL_SignalSemaphore(ctrl->response_sem);
     }
-    return S_OK;
 }
-static const struct
-{
-    void *QueryInterface;
-    void *AddRef;
-    void *Release;
-    void *Invoke;
-} g_response_vtbl = { (void *)InputHandler_QueryInterface, (void *)InputHandler_AddRef, (void *)InputHandler_Release, (void *)ResponseHandler_Invoke };
 
 // Send a command and wait (briefly) for the reply on the response characteristic.
 // Frame: [cmd] 0x91 0x01 [subcmd] 0x00 [data_len] 0x00 0x00 [data...]. Returns
@@ -861,7 +459,7 @@ static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const 
     while (SDL_TryWaitSemaphore(ctrl->response_sem)) {
         // drain stale replies
     }
-    if (!BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
+    if (!SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
         return 0;
     }
     if (ctrl->response_sem && SDL_WaitSemaphoreTimeout(ctrl->response_sem, 500)) {
@@ -979,7 +577,7 @@ static bool BLE_WriteCommandNoReply(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcm
     if (data_len > 0) {
         SDL_memcpy(&frame[8], data, data_len);
     }
-    return BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, false);
+    return SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, false);
 }
 
 // GameCube motor on/off, via command 0x0A subcommand 0x02. Motor on = data byte
@@ -1072,264 +670,95 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
         SDL_memcpy(&packet[17], group, 16);
         len = 33;
     }
-    return BLE_WriteCharacteristic(ctrl->vibration_char, packet, len, false);
+    return SDL_BLEGATT_WriteCharacteristic(ctrl->vibration_char, packet, len, false);
 }
 
 // ---------------------------------------------------------------------------
-// Advertisement Received: match Nintendo BLE company id, parse VID/PID, connect.
+// Advertisement listener: match Nintendo BLE company id, parse VID/PID, connect.
+// The shared watcher (SDL_ble_gatt.c) calls it on a WinRT thread-pool thread
+// with the parsed event, whose manufacturer data holds up to 32 bytes after the
+// company id, as the copy here always has. The event carries at most 4
+// manufacturer entries (SDL_BLE_AD_MANUFACTURER), and the Switch 2 advertises
+// one 0x0553 section beside its Flags (switch2-bt RESEARCH.md:285-286, and
+// btstack_build/sw2d_btstack.c:152-166 finds the controller by that section).
 // ---------------------------------------------------------------------------
-static HRESULT STDMETHODCALLTYPE Received_QueryInterface(void *This, REFIID riid, void **ppv)
+static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void *userdata)
 {
-    if (!ppv) {
-        return E_INVALIDARG;
-    }
-    if (WIN_IsEqualIID(riid, &IID_IUnknown) || WIN_IsEqualIID(riid, &IID_IAgileObject) || WIN_IsEqualIID(riid, &IID_BleRecvHandler)) {
-        *ppv = This;
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG STDMETHODCALLTYPE Received_AddRef(void *This) { (void)This; return 2; }
-static ULONG STDMETHODCALLTYPE Received_Release(void *This) { (void)This; return 1; }
-static HRESULT STDMETHODCALLTYPE Received_Invoke(void *This, void *sender, BleRecvArgs *args)
-{
-    UINT64 address = 0;
-    BleAdvertisement *advertisement = NULL;
-    __FIVector_1_Windows__CDevices__CBluetooth__CAdvertisement__CBluetoothLEManufacturerData *mfg_list = NULL;
-    (void)This;
-    (void)sender;
+    int i;
+    (void)userdata;
 
-    if (!args) {
-        return S_OK;
-    }
-    __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs_get_BluetoothAddress(args, &address);
-    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementReceivedEventArgs_get_Advertisement(args, &advertisement)) || !advertisement) {
-        return S_OK;
-    }
-
-    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisement_get_ManufacturerData(advertisement, &mfg_list)) && mfg_list) {
-        unsigned i, count = 0;
-        __FIVector_1_Windows__CDevices__CBluetooth__CAdvertisement__CBluetoothLEManufacturerData_get_Size(mfg_list, &count);
-        for (i = 0; i < count; ++i) {
-            BleMfgData *mfg = NULL;
-            if (SUCCEEDED(__FIVector_1_Windows__CDevices__CBluetooth__CAdvertisement__CBluetoothLEManufacturerData_GetAt(mfg_list, i, &mfg)) && mfg) {
-                UINT16 company = 0;
-                Buffer *payload = NULL;
-                __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEManufacturerData_get_CompanyId(mfg, &company);
-                if (company == NINTENDO_BLE_COMPANY_ID &&
-                    SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEManufacturerData_get_Data(mfg, &payload)) && payload) {
-                    Uint8 data[32];
-                    int n = BLE_BufferToBytes(payload, data, sizeof(data));
-                    // Company id already stripped: vendor at [3:5], product at [5:7] LE.
-                    if (n >= 7) {
-                        Uint16 vendor = (Uint16)(data[3] | (data[4] << 8));
-                        Uint16 product = (Uint16)(data[5] | (data[6] << 8));
-                        bool supported = (vendor == USB_VENDOR_NINTENDO) &&
-                                         (product == USB_PRODUCT_NINTENDO_SWITCH2_PRO ||
-                                          product == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
-                                          product == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT ||
-                                          product == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER);
-                        // Reserve the address so repeated advertisements during the
-                        // multi-second connect don't start duplicate connects, then
-                        // hand the connect to a worker thread so this WinRT callback
-                        // returns immediately and the thread pool stays free to
-                        // deliver the open/discovery completions.
-                        if (supported && BLE_TryReserveConnect((Uint64)address)) {
-                            BLE_ConnectRequest *req = (BLE_ConnectRequest *)SDL_malloc(sizeof(*req));
-                            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx", vendor, product, (unsigned long long)address);
-                            if (req) {
-                                SDL_Thread *thread;
-                                req->address = (Uint64)address;
-                                req->vendor = vendor;
-                                req->product = product;
-                                thread = SDL_CreateThread(BLE_ConnectThread, "BLESwitch2Connect", req);
-                                if (thread) {
-                                    SDL_DetachThread(thread);
-                                } else {
-                                    SDL_free(req);
-                                    BLE_ReleaseConnect((Uint64)address);
-                                }
-                            } else {
-                                BLE_ReleaseConnect((Uint64)address);
-                            }
+    for (i = 0; i < advertisement->nmanufacturer; ++i) {
+        const SDL_BLEManufacturerData *mfg = &advertisement->manufacturer[i];
+        if (mfg->company == NINTENDO_BLE_COMPANY_ID) {
+            const Uint8 *data = mfg->data;
+            int n = mfg->length;
+            // Company id already stripped: vendor at [3:5], product at [5:7] LE.
+            if (n >= 7) {
+                Uint16 vendor = (Uint16)(data[3] | (data[4] << 8));
+                Uint16 product = (Uint16)(data[5] | (data[6] << 8));
+                bool supported = (vendor == USB_VENDOR_NINTENDO) &&
+                                 (product == USB_PRODUCT_NINTENDO_SWITCH2_PRO ||
+                                  product == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
+                                  product == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT ||
+                                  product == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER);
+                // Reserve the address so repeated advertisements during the
+                // multi-second connect don't start duplicate connects, then
+                // hand the connect to a worker thread so this WinRT callback
+                // returns immediately and the thread pool stays free to
+                // deliver the open/discovery completions.
+                if (supported && BLE_TryReserveConnect(advertisement->address)) {
+                    BLE_ConnectRequest *req = (BLE_ConnectRequest *)SDL_malloc(sizeof(*req));
+                    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx", vendor, product, (unsigned long long)advertisement->address);
+                    if (req) {
+                        SDL_Thread *thread;
+                        req->address = advertisement->address;
+                        req->vendor = vendor;
+                        req->product = product;
+                        thread = SDL_CreateThread(BLE_ConnectThread, "BLESwitch2Connect", req);
+                        if (thread) {
+                            SDL_DetachThread(thread);
+                        } else {
+                            SDL_free(req);
+                            BLE_ReleaseConnect(advertisement->address);
                         }
+                    } else {
+                        BLE_ReleaseConnect(advertisement->address);
                     }
-                    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(payload);
                 }
-                __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEManufacturerData_Release(mfg);
             }
         }
-        __FIVector_1_Windows__CDevices__CBluetooth__CAdvertisement__CBluetoothLEManufacturerData_Release(mfg_list);
     }
-    __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisement_Release(advertisement);
-    return S_OK;
 }
-static const struct
-{
-    void *QueryInterface;
-    void *AddRef;
-    void *Release;
-    void *Invoke;
-} g_received_vtbl = { (void *)Received_QueryInterface, (void *)Received_AddRef, (void *)Received_Release, (void *)Received_Invoke };
-static struct { void *vtbl; } g_received_handler = { (void *)&g_received_vtbl };
 
 // ---------------------------------------------------------------------------
-// Connect + GATT discovery + subscribe (called from the Received callback).
+// Connect + GATT discovery + subscribe (called from the connect thread). The
+// open, the uncached discovery and the lookups are the shared transport's
+// (SDL_ble_gatt.c).
 // ---------------------------------------------------------------------------
-static GattChar *BLE_FindCharacteristic(GattService3 *service3, const GUID *uuid)
-{
-    void *op = NULL;
-    GattCharsResult *result = NULL;
-    GattChar *found = NULL;
-
-    // Uncached, so the read goes to the device rather than a stale OS cache, and
-    // only trust the result when GattCommunicationStatus_Success (joycon2cpp checks
-    // cr.Status() before reading characteristics, testapp.cpp:854). The link is up
-    // by now (service discovery already succeeded), so a single attempt suffices.
-    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_GetCharacteristicsForUuidWithCacheModeAsync(service3, *uuid, BluetoothCacheMode_Uncached, (void *)&op)) || !op) {
-        return NULL;
-    }
-    if (BLE_Await(op, &IID_AsyncCharsHandler)) {
-        // GetResults is vtbl slot 8 on every IAsyncOperation<T>.
-        typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, GattCharsResult **out);
-        void ***vt = (void ***)op;
-        ((GetResults_t)(*vt)[8])(op, &result);
-    }
-    if (result) {
-        GattCommStatus status = GattCommunicationStatus_Unreachable;
-        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCharacteristic *chars = NULL;
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult_get_Status(result, &status);
-        if (status == GattCommunicationStatus_Success &&
-            SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult_get_Characteristics(result, &chars)) && chars) {
-            unsigned size = 0;
-            __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCharacteristic_get_Size(chars, &size);
-            if (size > 0) {
-                __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCharacteristic_GetAt(chars, 0, &found);
-            }
-            __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCharacteristic_Release(chars);
-        }
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult_Release(result);
-    }
-    ((GattCharsResult *)op)->lpVtbl->Release((GattCharsResult *)op);
-    return found;
-}
-
-// Await an IAsyncOperation<BluetoothLEDevice>, return the device (NULL on
-// timeout/failure), and release the operation. GetResults is vtbl slot 8. The
-// cold device open can take several seconds, so it gets a generous 20 s ceiling
-// (matching windows10-gyro controller.py connect(timeout=20.0)), not the 3 s
-// per-op default.
-static BleDevice *BLE_AwaitDevice(void *op)
-{
-    BleDevice *device = NULL;
-    if (!op) {
-        return NULL;
-    }
-    if (BLE_AwaitTimeout(op, 20000, &IID_AsyncDeviceHandler)) {
-        typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, BleDevice **out);
-        void ***vt = (void ***)op;
-        HRESULT gr = ((GetResults_t)(*vt)[8])(op, &device);
-        // Diagnostic (hifihedgehog/SDL#5): pin candidate (c). A returning-fast wait
-        // with GetResults S_OK but device NULL means a synchronous null completion.
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE device open: GetResults hr=0x%08lX device=%p",
-                     (unsigned long)gr, (void *)device);
-    }
-    ((BleDevice *)op)->lpVtbl->Release((BleDevice *)op);
-    return device;
-}
-
 static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name)
 {
-    BleDeviceStatics *statics = NULL;
-    void *op = NULL;
     BleDevice *device = NULL;
     BleDevice3 *device3 = NULL;
-    GattServicesResult *services_result = NULL;
-    GattService *service = NULL;
     GattService3 *service3 = NULL;
     BLE_Controller *ctrl = NULL;
-    InputHandlerObj *input_handler = NULL;
-    InputHandlerObj *response_handler = NULL;
 
-    if (FAILED(BLE_GetActivationFactory(RuntimeClass_Windows_Devices_Bluetooth_BluetoothLEDevice, &IID_BleDeviceStatics, (void **)&statics))) {
-        return;
-    }
-    // Open by raw address and let the OS resolve the address type. The Switch 2 Pro
-    // Controller advertises a Public address (switch2-bt PHASE_B_LOG.md:48, and the
-    // live trace reported type=0), and this single-arg open is exactly joycon2cpp's
-    // working call (testapp.cpp:827). This runs on a dedicated worker thread (see
-    // Received_Invoke), so blocking the 20 s await here does not starve the WinRT
-    // thread pool that has to deliver the completion.
-    op = NULL;
-    {
-        // Diagnostic (hifihedgehog/SDL#5): pin candidate (a). A failed HRESULT here
-        // skips the await entirely, so device stays NULL with no wait.
-        HRESULT open_hr = __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_FromBluetoothAddressAsync(statics, bluetooth_address, (void *)&op);
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE device open: FromBluetoothAddressAsync hr=0x%08lX op=%p",
-                     (unsigned long)open_hr, (void *)op);
-        if (SUCCEEDED(open_hr)) {
-            device = BLE_AwaitDevice(op);
-        }
-    }
-    __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDeviceStatics_Release(statics);
+    // Open by raw address with the 20 s ceiling (SDL_BLEGATT_OpenDevice). This
+    // runs on the connect thread, so the wait does not starve the WinRT thread
+    // pool that has to deliver the completion.
+    device = SDL_BLEGATT_OpenDevice(bluetooth_address, NULL);
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 open addr %012llx: device=%p",
                  (unsigned long long)bluetooth_address, (void *)device);
     if (!device) {
         return;
     }
 
-    // Discover the Switch 2 service. This driver connects bond-free (no SMP, no OS
-    // pairing), so the first GATT query returns before the ACL/GATT link is up and
-    // a Cached read sees an empty table. Query Uncached and retry until the result
-    // is GattCommunicationStatus_Success with the service present, matching the
-    // proven joycon2cpp connect, which loops GetGattServicesAsync(Uncached) up to
-    // 10x at 500 ms checking Success (joycon2cpp/testapp/src/testapp.cpp:841-851).
+    // Discover the Switch 2 service uncached, up to 10 tries 500 ms apart while
+    // the bond-free link comes up (SDL_BLEGATT_FindService).
     if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(device, &IID_BleDevice3, (void **)&device3)) || !device3) {
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
         return;
     }
-    {
-        int attempt;
-        for (attempt = 1; attempt <= 10 && !service; ++attempt) {
-            GattCommStatus status = GattCommunicationStatus_Unreachable;
-            unsigned size = 0;
-            op = NULL;
-            services_result = NULL;
-            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_GetGattServicesForUuidWithCacheModeAsync(device3, GUID_Switch2Service, BluetoothCacheMode_Uncached, (void *)&op)) && op) {
-                if (BLE_Await(op, &IID_AsyncServicesHandler)) {
-                    typedef HRESULT(STDMETHODCALLTYPE * GetResults_t)(void *This, GattServicesResult **out);
-                    void ***vt = (void ***)op;
-                    ((GetResults_t)(*vt)[8])(op, &services_result);
-                }
-                ((GattServicesResult *)op)->lpVtbl->Release((GattServicesResult *)op);
-            }
-            if (services_result) {
-                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_get_Status(services_result, &status);
-                if (status == GattCommunicationStatus_Success) {
-                    __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService *list = NULL;
-                    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_get_Services(services_result, &list)) && list) {
-                        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_get_Size(list, &size);
-                        if (size > 0) {
-                            __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_GetAt(list, 0, &service);
-                        }
-                        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDeviceService_Release(list);
-                    }
-                }
-                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceServicesResult_Release(services_result);
-                services_result = NULL;
-            }
-            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 GATT discovery attempt %d/10: status=%d services=%u",
-                         attempt, (int)status, size);
-            if (!service && attempt < 10) {
-                SDL_Delay(500); // ride out the bond-free link-up window
-            }
-        }
-    }
-    if (service) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService_QueryInterface(service, &IID_GattService3, (void **)&service3);
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService_Release(service);
-    }
+    service3 = SDL_BLEGATT_FindService(device3, &GUID_Switch2Service, 1, 10, "Switch2", NULL);
     if (!service3) {
         SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 GATT service discovery failed after 10 attempts");
         BLE_NoteConnectFailure(bluetooth_address); // back off; likely busy on USB
@@ -1338,27 +767,9 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         return;
     }
 
-    // Best-effort throughput bump, now that the link is up. joycon2cpp requests it
-    // after discovery (testapp.cpp:891). Win10 1809+; ignore failure.
-    {
-        BleDevice6 *device6 = NULL;
-        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(device, &IID_BleDevice6, (void **)&device6))) {
-            BleConnParamStatics *cp_statics = NULL;
-            if (SUCCEEDED(BLE_GetActivationFactory(RuntimeClass_Windows_Devices_Bluetooth_BluetoothLEPreferredConnectionParameters, &IID_BleConnParamStatics, (void **)&cp_statics))) {
-                BleConnParam *params = NULL;
-                if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics_get_ThroughputOptimized(cp_statics, &params)) && params) {
-                    BleConnParamReq *req = NULL;
-                    __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6_RequestPreferredConnectionParameters(device6, params, &req);
-                    if (req) {
-                        ((BleConnParamReq *)req)->lpVtbl->Release((BleConnParamReq *)req);
-                    }
-                    __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParameters_Release(params);
-                }
-                __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEPreferredConnectionParametersStatics_Release(cp_statics);
-            }
-            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice6_Release(device6);
-        }
-    }
+    // Best-effort throughput bump, now that the link is up
+    // (SDL_BLEGATT_RequestThroughput).
+    SDL_BLEGATT_RequestThroughput(device);
 
     // Build the controller record.
     ctrl = (BLE_Controller *)SDL_calloc(1, sizeof(*ctrl));
@@ -1398,19 +809,19 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     ctrl->response_sem = SDL_CreateSemaphore(0);
     ctrl->player_index = -1;
 
-    ctrl->input_char = BLE_FindCharacteristic(service3, &GUID_Switch2Input);
-    ctrl->command_char = BLE_FindCharacteristic(service3, &GUID_Switch2Command);
-    ctrl->response_char = BLE_FindCharacteristic(service3, &GUID_Switch2CmdResponse);
+    ctrl->input_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Input, NULL);
+    ctrl->command_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Command, NULL);
+    ctrl->response_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2CmdResponse, NULL);
     switch (product_id) {
     case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
-        ctrl->vibration_char = BLE_FindCharacteristic(service3, &GUID_Switch2VibeJCL);
+        ctrl->vibration_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2VibeJCL, NULL);
         break;
     case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
-        ctrl->vibration_char = BLE_FindCharacteristic(service3, &GUID_Switch2VibeJCR);
+        ctrl->vibration_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2VibeJCR, NULL);
         break;
     default:
-        ctrl->vibration_char = BLE_FindCharacteristic(service3,
-            (product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) ? &GUID_Switch2VibePro : &GUID_Switch2VibeGC);
+        ctrl->vibration_char = SDL_BLEGATT_FindCharacteristic(service3,
+            (product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) ? &GUID_Switch2VibePro : &GUID_Switch2VibeGC, NULL);
         break;
     }
 
@@ -1422,13 +833,9 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     // read calibration over the command channel, and only THEN enable the input
     // report notification.
     if (ctrl->response_char) {
-        response_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*response_handler));
-        if (response_handler) {
-            response_handler->vtbl = (void *)&g_response_vtbl;
-            response_handler->ctrl = ctrl;
-            ctrl->response_handler = response_handler;
-            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(ctrl->response_char, (void *)response_handler, &ctrl->response_token);
-            BLE_EnableNotifications(ctrl->response_char);
+        ctrl->response_handler = SDL_BLEGATT_AddValueHandler(ctrl->response_char, BLE_OnResponseValue, ctrl, 0, &ctrl->response_token);
+        if (ctrl->response_handler) {
+            SDL_BLEGATT_EnableNotifications(ctrl->response_char);
         }
     }
 
@@ -1451,7 +858,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
          ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT)) {
         static const Uint8 set_input_mode[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30 };
-        BLE_WriteCharacteristic(ctrl->command_char, set_input_mode, (int)sizeof(set_input_mode), false);
+        SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, set_input_mode, (int)sizeof(set_input_mode), false);
 
         /* Opt-in side-channel sensors (Joy-Con only, both L and R). Feature
            flags command 0x0C: subcommand 0x02 (init) then 0x04 (enable), u32 LE
@@ -1476,20 +883,16 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
                                          (ctrl->magnetometer_enabled ? 0x80 : 0x00));
             feature_init[8] = feature_mask;
             feature_enable[8] = feature_mask;
-            BLE_WriteCharacteristic(ctrl->command_char, feature_init, (int)sizeof(feature_init), false);
-            BLE_WriteCharacteristic(ctrl->command_char, feature_enable, (int)sizeof(feature_enable), false);
+            SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, feature_init, (int)sizeof(feature_init), false);
+            SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, feature_enable, (int)sizeof(feature_enable), false);
         }
     }
 
     if (ctrl->input_char) {
-        input_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*input_handler));
-        if (input_handler) {
-            input_handler->vtbl = (void *)&g_input_vtbl;
-            input_handler->ctrl = ctrl;
-            ctrl->input_handler = input_handler;
-            // Register the handler before enabling notifications (controller.py order).
-            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(ctrl->input_char, (void *)input_handler, &ctrl->input_token);
-            BLE_EnableNotifications(ctrl->input_char);
+        // Register the handler before enabling notifications (controller.py order).
+        ctrl->input_handler = SDL_BLEGATT_AddValueHandler(ctrl->input_char, BLE_OnInputValue, ctrl, 0, &ctrl->input_token);
+        if (ctrl->input_handler) {
+            SDL_BLEGATT_EnableNotifications(ctrl->input_char);
         }
     }
 
@@ -1500,24 +903,8 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     // callback only sets link_lost; BLE_JoystickDetect runs the teardown. If
     // the append below is skipped (duplicate/teardown race), BLE_FreeController
     // removes this subscription on the cleanup path like the others.
-    {
-        InputHandlerObj *status_handler = (InputHandlerObj *)SDL_calloc(1, sizeof(*status_handler));
-        if (status_handler) {
-            enum __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothConnectionStatus status = BluetoothConnectionStatus_Connected;
-            status_handler->vtbl = (void *)&g_status_vtbl;
-            status_handler->ctrl = ctrl;
-            ctrl->status_handler = status_handler;
-            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_add_ConnectionStatusChanged(ctrl->device, (void *)status_handler, &ctrl->status_token);
-            // The event fires only on transitions after registration, never as a
-            // state replay. A pad that died during the multi-second setup above
-            // would be appended already-dead with no event ever coming, so poll
-            // the status once after subscribing to close that window.
-            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_get_ConnectionStatus(ctrl->device, &status)) &&
-                status == BluetoothConnectionStatus_Disconnected) {
-                SDL_SetAtomicInt(&ctrl->link_lost, 1);
-            }
-        }
-    }
+    // SDL_BLEGATT_AddStatusHandler polls the status once after registering.
+    ctrl->status_handler = SDL_BLEGATT_AddStatusHandler(ctrl->device, &ctrl->link_lost, &ctrl->status_token);
 
     SDL_LockJoysticks();
     {
@@ -1906,38 +1293,16 @@ static bool BLE_JoystickInit(void)
         return true;
     }
 
-    if (FAILED(WIN_RoInitialize())) {
-        return SDL_SetError("RoInitialize() failed");
+    // RoInitialize, the combase entry points and the MTA pin are the shared
+    // transport's, counted across both BLE drivers.
+    if (!SDL_BLEGATT_Init()) {
+        return false;
     }
-    ble.ro_initialized = true;
+    ble.transport = true;
 
-#define RESOLVE(x) ble.x = (x##_t)WIN_LoadComBaseFunction(#x); if (!ble.x) return SDL_SetError("GetProcAddress failed for " #x)
-    RESOLVE(CoIncrementMTAUsage);
-    RESOLVE(RoGetActivationFactory);
-    RESOLVE(RoActivateInstance);
-    RESOLVE(RoInitialize);
-    RESOLVE(RoUninitialize);
-    RESOLVE(WindowsCreateStringReference);
-    RESOLVE(WindowsDeleteString);
-#undef RESOLVE
-
-    {
-        static HANDLE cookie = NULL;
-        if (!cookie) {
-            ble.CoIncrementMTAUsage(&cookie); // pin MTA for BLE callback threads
-        }
-    }
-
-    // Start the advertisement watcher.
-    if (SUCCEEDED(BLE_ActivateInstance(RuntimeClass_Windows_Devices_Bluetooth_Advertisement_BluetoothLEAdvertisementWatcher, &IID_BleWatcher, (void **)&ble.watcher))) {
-        BleWatcher2 *watcher2 = NULL;
-        __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_put_ScanningMode(ble.watcher, BluetoothLEScanningMode_Active);
-        if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_QueryInterface(ble.watcher, &IID_BleWatcher2, (void **)&watcher2))) {
-            __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher2_put_AllowExtendedAdvertisements(watcher2, TRUE);
-            __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher2_Release(watcher2);
-        }
-        __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_add_Received(ble.watcher, (void *)&g_received_handler, &ble.received_token);
-        __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_Start(ble.watcher);
+    // Start the advertisement watcher, or join it when the generic BLE GATT
+    // driver started it first.
+    if (SDL_BLEGATT_AddListener(BLE_OnAdvertisement, NULL)) {
         ble.scanning = true;
     }
 
@@ -2202,7 +1567,7 @@ static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int
     if (data_len > 0) {
         SDL_memcpy(&frame[8], bytes + 2, data_len);
     }
-    if (!BLE_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
+    if (!SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
         return SDL_SetError("Switch 2 command write failed");
     }
     return true;
@@ -2333,13 +1698,9 @@ static void BLE_JoystickQuit(void)
 {
     int i;
 
-    if (ble.watcher) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_Stop(ble.watcher);
-        if (ble.received_token.value) {
-            __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_remove_Received(ble.watcher, ble.received_token);
-        }
-        __x_ABI_CWindows_CDevices_CBluetooth_CAdvertisement_CIBluetoothLEAdvertisementWatcher_Release(ble.watcher);
-        ble.watcher = NULL;
+    // The watcher stops when the last listener goes
+    if (ble.scanning) {
+        SDL_BLEGATT_RemoveListener(BLE_OnAdvertisement, NULL);
     }
     for (i = 0; i < ble.controller_count; ++i) {
         BLE_FreeController(ble.controllers[i]);
@@ -2348,9 +1709,9 @@ static void BLE_JoystickQuit(void)
     ble.controllers = NULL;
     ble.controller_count = 0;
 
-    if (ble.ro_initialized) {
-        WIN_RoUninitialize();
-        ble.ro_initialized = false;
+    if (ble.transport) {
+        SDL_BLEGATT_Quit();
+        ble.transport = false;
     }
     ble.scanning = false;
     ble.initialized = false;
