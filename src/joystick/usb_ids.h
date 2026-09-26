@@ -116,6 +116,7 @@
 #define USB_PRODUCT_DJI_RC_RM330                          0x1023
 #define USB_PRODUCT_DREAMCHEEKY_DRUM_KIT                  0x8021 // Shared with a weather station and a missile launcher
 #define USB_PRODUCT_CAPCOM_STEEL_BATTALION                0xd000
+#define USB_PRODUCT_GOOGLE_DAYDREAM_CONTROLLER            0x9210 // From its Bluetooth LE PnP ID characteristic
 #define USB_PRODUCT_GOOGLE_STADIA_CONTROLLER              0x9400
 #define USB_PRODUCT_GUILLEMOT_FFB_RACING_WHEEL            0x0004
 #define USB_PRODUCT_GUILLEMOT_JET_LEADER_3D               0xa302
