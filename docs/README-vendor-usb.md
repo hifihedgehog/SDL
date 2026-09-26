@@ -38,11 +38,26 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   isochronous endpoints are never used. The alternate setting goes back to 0
   when the device closes.
 - Xbox 360 and Xbox One interfaces on Windows are enumerated only when libusb
-  can open them. A pad that xusb22 or the GIP driver holds cannot be opened and
-  does not appear twice. A pad bound to WinUSB is read by SDL's Xbox drivers.
+  can open them, or when this process already holds the device open on a
+  handle that still reads. A pad that xusb22 or the GIP driver holds cannot be
+  opened and does not appear twice. A pad bound to WinUSB is read by SDL's
+  Xbox drivers.
 - Original Xbox XID interfaces, class 0x58, follow the same rule. Windows has
   no driver for them, so one appears only once WinUSB is bound. See
   [README-xid.md](README-xid.md).
+- The Xbox 360 wired pad, 045E:028E, and wireless receiver, 045E:0719, stay
+  with xusb22 until WinUSB is bound to the whole device, which takes the pad,
+  or every slot of the receiver, away from XInput. SDL's Xbox 360 drivers then
+  read them with their chatpads and the Xbox 360 uDraw GameTablet. See
+  [README-xbox360-accessories.md](README-xbox360-accessories.md).
+- WinUSB lets one handle open a device, so every interface SDL opens on a
+  device goes through the handle of the first one it opened. The four pad
+  slots of an Xbox 360 receiver bound to WinUSB open this way. While SDL
+  holds a device on a handle that still reads, a later enumeration lists
+  every interface of the device, though it cannot open them again. The
+  handle, with interface 0 claimed on it, stays open until the last of those
+  interfaces closes, and a second open of an interface SDL already holds
+  fails. The wired pad's chatpad, interface 2, is claimed on the same handle.
 - The Switch 2 controllers keep their input on the platform HID backend. Their
   drivers open WinUSB separately for bulk I/O.
 - A rule can serve Windows only. The Gametrak's HID interface needs libusb

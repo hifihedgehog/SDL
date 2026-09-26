@@ -197,3 +197,7 @@ protocol_test(trackir "${PROTOCOL_TESTS}/testtrackir.c"
 protocol_test(tacx "${PROTOCOL_TESTS}/testtacx.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_tacx_proto.c"
     "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+# hifihedgehog/SDL#33 Part 15: the Xbox 360 chatpads and the Xbox 360 uDraw.
+protocol_test(xbox360acc "${PROTOCOL_TESTS}/testxbox360acc.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_xbox360acc_proto.c")

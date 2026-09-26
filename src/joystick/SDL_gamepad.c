@@ -40,6 +40,7 @@
 #include "hidapi/SDL_hidapi_ps3ext_proto.h"
 #include "hidapi/SDL_hidapi_sinput.h"
 #include "hidapi/SDL_hidapi_usio_proto.h"
+#include "hidapi/SDL_hidapi_xbox360acc_proto.h"
 #include "hidapi/SDL_hidapi_xid_proto.h"
 #include "hidapi/SDL_hidapijoystick_c.h"
 #include "../hidapi/SDL_hidapi_collections.h"
@@ -1260,6 +1261,13 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
         // A pen tablet has no gamepad shape, so it stays a joystick with raw pen axes
         return NULL;
     }
+
+#if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XBOX360)
+    if (SDL_Xbox360Acc_IsAccessoryGUID(vendor, product, guid.data[15])) {
+        // Neither the Xbox 360 chatpad's keys nor the uDraw's pen have a gamepad shape (hifihedgehog/SDL#33 Part 15)
+        return NULL;
+    }
+#endif
 
     if ((vendor == USB_VENDOR_NINTENDO && product == USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER) ||
         (vendor == USB_VENDOR_DRAGONRISE &&

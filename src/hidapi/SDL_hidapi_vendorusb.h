@@ -145,7 +145,9 @@ extern bool SDL_VendorUSB_IsXIDInterface(uint8_t interface_class, uint8_t interf
 /* Whether the libusb enumeration skips an interface it could not open.
  * On Windows an Xbox interface that xusb22 or the GIP driver holds cannot be
  * opened, and skipping it keeps a pad Windows serves from appearing twice.
- * One bound to WinUSB opens and is enumerated. */
+ * One bound to WinUSB opens and is enumerated. WinUSB lets one handle open a
+ * device, so while this process holds an interface of a device open on a
+ * handle that still reads, every interface of that device counts as opened. */
 extern bool SDL_VendorUSB_SkipUnopened(SDL_VendorUSBPlatform platform, bool xbox, bool opened);
 
 #define SDL_VENDORUSB_TRANSFER_BULK      2
