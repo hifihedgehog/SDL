@@ -176,6 +176,9 @@ extern bool SDL_IsJoystickVIRTUAL(SDL_GUID guid);
 // Function to return whether a joystick guid comes from the serial driver
 extern bool SDL_IsJoystickSERIAL(SDL_GUID guid);
 
+// Function to return whether a joystick guid comes from the iCade driver
+extern bool SDL_IsJoystickICADE(SDL_GUID guid);
+
 // Function to return whether a joystick guid comes from the BLE GATT driver
 extern bool SDL_IsJoystickBLEGATT(SDL_GUID guid);
 

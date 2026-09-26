@@ -1351,3 +1351,4 @@ SDL_DYNAPI_PROC(const char*,SDL_GetOpenHarmonyInternalStoragePath,(void),(),retu
 SDL_DYNAPI_PROC(bool,SDL_RequestOpenHarmonyPermission,(const char *a,SDL_RequestOpenHarmonyPermissionCallback b,void *c),(a,b,c),return)
 SDL_DYNAPI_PROC(SDL_PropertiesID,SDL_GetAudioDeviceProperties,(SDL_AudioDeviceID a),(a),return)
 SDL_DYNAPI_PROC(bool,SDL_GetGamepadNfcTagUid,(SDL_Gamepad *a,char *b,int c),(a,b,c),return)
+SDL_DYNAPI_PROC(bool,SDL_ICadeProcessRawKeyboard,(void *a,Uint16 b,Uint16 c),(a,b,c),return)

@@ -1478,6 +1478,37 @@ extern SDL_DECLSPEC SDL_JoystickConnectionState SDLCALL SDL_GetJoystickConnectio
  */
 extern SDL_DECLSPEC SDL_PowerState SDLCALL SDL_GetJoystickPowerInfo(SDL_Joystick *joystick, int *percent);
 
+/**
+ * Pass one keyboard record from a host's own Raw Input to the iCade driver.
+ *
+ * This is a PadForge fork addition, for Windows. In a process, only the
+ * window registered last for a device class receives its Raw Input. A host
+ * that registers keyboards itself sets SDL_HINT_JOYSTICK_ICADE_RAWINPUT to
+ * "0" and passes each RAWKEYBOARD record its window receives here. The
+ * driver decodes the records of the keyboards it identified as iCade
+ * controllers and ignores the rest.
+ *
+ * The joystick path of an iCade controller, SDL_GetJoystickPathForID(), is
+ * its keyboard's Raw Input device name (RIDI_DEVICENAME) in UTF-8. A record
+ * with make code 0 and RI_KEY_BREAK set changes no control, so passing one
+ * only asks whether a handle is decoded. A host can use either to find the
+ * device for a keyboard hook or a filter driver of its own.
+ *
+ * \param device_handle the hDevice member of the record's RAWINPUTHEADER.
+ * \param make_code the record's MakeCode.
+ * \param flags the record's Flags.
+ * \returns true if the record came from a keyboard the driver decodes as an
+ *          iCade controller, false otherwise. A host can use it to keep
+ *          those keyboards out of its own keyboard handling.
+ *
+ * \threadsafety It is safe to call this function from any thread.
+ *
+ * \since This function is available since SDL 3.6.0.
+ *
+ * \sa SDL_HINT_JOYSTICK_ICADE_RAWINPUT
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_ICadeProcessRawKeyboard(void *device_handle, Uint16 make_code, Uint16 flags);
+
 /* Ends C function definitions when using C++ */
 #ifdef __cplusplus
 }
