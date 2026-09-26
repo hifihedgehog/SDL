@@ -2316,6 +2316,215 @@ extern "C" {
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER "SDL_JOYSTICK_BLE_SWITCH2_MAGNETOMETER"
 
 /**
+ * A variable controlling whether the driver for controllers that send their
+ * input over a vendor GATT service on Bluetooth LE should be used.
+ *
+ * This is a PadForge fork addition, for Windows. It covers Nintendo's Poke
+ * Ball Plus, Google's Daydream controller, Samsung's Gear VR controller, the
+ * Oculus Go controller, the iOS model of the Guitar Hero Live guitar, the
+ * Zwift Play and Zwift Click, and the Thalmic Myo armband. The driver watches
+ * for their Bluetooth LE advertisements and connects to each one it finds.
+ * Each family has its own hint, which defaults to this one.
+ * SDL_HINT_JOYSTICK_BLE_SWITCH2 belongs to another driver and does not.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver connects only to the families whose own hint is set to
+ *   "1". (default)
+ * - "1": The driver connects to the controllers of every family whose hint is
+ *   not set to "0".
+ *
+ * The default is off so a BLE scan never runs unless the app opts in.
+ *
+ * This hint can be set anytime. The driver applies a change at the next
+ * joystick update, and it watches for advertisements only while a family is
+ * on.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE "SDL_JOYSTICK_BLE"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to Nintendo's
+ * Poke Ball Plus.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices that
+ * advertise the name "Pokemon PBP".
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Poke Ball Plus alone.
+ * - "1": The driver connects to the Poke Ball Plus.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_POKEBALL "SDL_JOYSTICK_BLE_POKEBALL"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to Google's
+ * Daydream controller.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices that
+ * advertise the name "Daydream controller". The driver uses the controller
+ * only over a Windows bond, since from firmware 1.2.11 it streams only over
+ * an encrypted link. Pair it in Windows Settings, or turn on
+ * SDL_HINT_JOYSTICK_BLE_PAIRING.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Daydream controller alone.
+ * - "1": The driver connects to the Daydream controller.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_DAYDREAM "SDL_JOYSTICK_BLE_DAYDREAM"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to Samsung's
+ * Gear VR controller.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices that
+ * advertise the service 4f63756c-7573-2054-6872-65656d6f7465 or a name that
+ * starts with "Gear VR Controller".
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Gear VR controller alone.
+ * - "1": The driver connects to the Gear VR controller.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_GEARVR "SDL_JOYSTICK_BLE_GEARVR"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to the Oculus
+ * Go controller.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices that
+ * advertise a name that starts with "OMVR" or the service
+ * 81265652-3692-ae93-e711-270f223c83b3. The controller streams only to a
+ * bonded host: pair it in Windows Settings, or turn on
+ * SDL_HINT_JOYSTICK_BLE_PAIRING.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Oculus Go controller alone.
+ * - "1": The driver connects to the Oculus Go controller.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_OCULUSGO "SDL_JOYSTICK_BLE_OCULUSGO"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to the iOS
+ * model of the Guitar Hero Live guitar.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices whose
+ * advertised name contains "Ble Guitar", or that advertise the 16-bit service
+ * 1523.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the guitar alone.
+ * - "1": The driver connects to the guitar.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_GHLIVE "SDL_JOYSTICK_BLE_GHLIVE"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to the Zwift
+ * Play and the Zwift Click.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices whose
+ * manufacturer data carries company 0x094A and one of four type bytes: 02 and
+ * 03 for the right and left halves of a Zwift Play on firmware 1.x, 09 for
+ * the Zwift Click and 0E for a Zwift Play on firmware 2.0.1. The Zwift Ride
+ * and the Zwift Click v2 are left alone.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves these controllers alone.
+ * - "1": The driver connects to these controllers.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_ZWIFT "SDL_JOYSTICK_BLE_ZWIFT"
+
+/**
+ * A variable controlling whether the BLE GATT driver connects to the Thalmic
+ * Myo armband.
+ *
+ * This is a PadForge fork addition, for Windows. It takes devices that
+ * advertise the service d5060001-a904-deb9-4748-2c7f4a124842, whatever their
+ * name, and shows each as a joystick with five pose buttons and three
+ * orientation axes, not as a gamepad.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver leaves the Myo alone.
+ * - "1": The driver connects to the Myo.
+ *
+ * The default is the value of SDL_HINT_JOYSTICK_BLE.
+ *
+ * This hint can be set anytime.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_MYO "SDL_JOYSTICK_BLE_MYO"
+
+/**
+ * A variable controlling whether the BLE GATT driver may pair with a
+ * controller that needs a Windows bond.
+ *
+ * This is a PadForge fork addition, for Windows. The driver uses the
+ * Daydream controller only over a bond, and the Oculus Go controller streams
+ * only over one. With this hint on, the driver pairs a Daydream controller
+ * that Windows holds no bond for before it discovers its services, and the
+ * Gear VR and Oculus Go controllers when a subscription fails for want of
+ * authentication or encryption. Pairing writes a bond to Windows, and pairing
+ * an Oculus Go controller with the PC can replace its pairing with its
+ * headset. With this hint off, such a controller appears after the user
+ * pairs it in Windows Settings. One the driver tried before then appears at
+ * its next attempt, up to 5 minutes later.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": The driver never pairs or removes a bond. (default)
+ * - "1": The driver pairs a controller that needs a bond, and removes a bond
+ *   through which it cannot reach a controller.
+ *
+ * This hint can be set anytime. A change applies to the next connection.
+ *
+ * \since This hint is available since SDL 3.5.0.
+ */
+#define SDL_HINT_JOYSTICK_BLE_PAIRING "SDL_JOYSTICK_BLE_PAIRING"
+
+/**
  * A variable controlling whether the right Joy-Con's NIR camera is powered
  * when app sensors are enabled, exposing its average-intensity scalar as an
  * extra joystick axis for cover/proximity detection.
@@ -2954,7 +3163,8 @@ extern "C" {
  *
  * The variable can be set to the following values:
  *
- * - "0": The driver connects to no controller.
+ * - "0": The driver connects only to the families whose own hint is set to
+ *   "1".
  * - "1": The driver connects to the controllers of every family whose hint is
  *   not set to "0". (default)
  *

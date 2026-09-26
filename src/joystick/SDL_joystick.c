@@ -69,6 +69,7 @@ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
 #endif
 #ifdef SDL_JOYSTICK_BLE // PadForge fork: WinRT BLE-GATT Switch 2 driver (issue #5)
     &SDL_BLE_JoystickDriver,
+    &SDL_BLEGATT_JoystickDriver, // PadForge fork: Bluetooth LE GATT controllers (issue #33)
 #endif
 #ifdef SDL_JOYSTICK_SERIAL // PadForge fork: joysticks on COM ports (issue #33)
     &SDL_SERIAL_JoystickDriver,
@@ -3685,6 +3686,11 @@ bool SDL_IsJoystickSERIAL(SDL_GUID guid)
     return (guid.data[14] == 's') ? true : false;
 }
 
+bool SDL_IsJoystickBLEGATT(SDL_GUID guid)
+{
+    return (guid.data[14] == 'l') ? true : false;
+}
+
 bool SDL_IsJoystickWheel(Uint16 vendor_id, Uint16 product_id, Uint16 crc)
 {
     if (vendor_id == 0x11FF && product_id == 0x3331 && (crc == 0xFAF6 || crc == 0x2004)) {
@@ -3791,6 +3797,10 @@ static SDL_JoystickType SDL_GetJoystickGUIDType(SDL_GUID guid)
     }
 
     if (SDL_IsJoystickSERIAL(guid)) {
+        return (SDL_JoystickType)guid.data[15];
+    }
+
+    if (SDL_IsJoystickBLEGATT(guid)) {
         return (SDL_JoystickType)guid.data[15];
     }
 
