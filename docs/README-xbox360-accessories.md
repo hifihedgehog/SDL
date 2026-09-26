@@ -343,11 +343,6 @@ SDL's libusb backend leaves them to it unless
   Sources show a whole-device libusb driver working on Windows for the
   receiver only, with libusb-win32 or an unnamed libusb driver. None names
   WinUSB on either device or shows the wired pad under such a binding.
-- If the receiver's first slot fails to open while a later slot opens, the
-  first slot's next open claims interface 0 after libusb has already set it
-  up for the later slot. libusb 1.0.29 then calls WinUSB's Initialize a
-  second time. libusb's source at a45bb16 skips that call and notes that it
-  leaks the first handle.
 - The wired start-up follows xboxdrv, and the sources disagree on its details.
   The Chatpad Super Driver always writes `09 00` at step 5 and notes that
   `01 02` may be needed on some pads. It also waits 12 ms after every request
