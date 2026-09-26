@@ -1933,11 +1933,13 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 					get_path(&dev_path, usb_dev, conf_desc->bConfigurationValue, intf_desc->bInterfaceNumber);
 					if (!strcmp(dev_path, path)) {
 						/* Matched Paths. Open this device */
+						bool shared = false;
 
 						/* OPEN HERE */
 #ifdef SDL_PLATFORM_WIN32
 						dev->device_handle = get_open_handle(usb_dev);
-						if (dev->device_handle)
+						shared = (dev->device_handle != NULL);
+						if (shared)
 							res = 0;
 						else
 #endif
@@ -1946,6 +1948,17 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 							LOG("can't open device\n");
 							break;
 						}
+#ifdef HIDAPI_VENDOR_USB
+						/* A later interface claimed first makes libusb set up interface 0's
+						   WinUSB handle without counting the claim, and libusb 1.0.29 sets
+						   it up again, losing the first, when interface 0 opens later
+						   (windows_winusb.c:2855-2862, :2779-2785). A claim made first is
+						   counted, and a later one returns at once (core.c:1786-1787). A
+						   claim that fails here is left to the claim below. */
+						if (SDL_VendorUSB_ClaimInterface0First(SDL_VENDORUSB_THIS_PLATFORM, is_xbox_interface(desc.idVendor, intf_desc),
+						                                       intf_desc->bInterfaceNumber, shared))
+							(void)libusb_claim_interface(dev->device_handle, 0);
+#endif
 						good_open = hidapi_initialize_device(dev, intf_desc, conf_desc);
 						if (!good_open) {
 #ifdef SDL_PLATFORM_WIN32
@@ -2402,7 +2415,7 @@ void HID_API_EXPORT hid_close(hid_device *dev)
 #ifdef SDL_PLATFORM_WIN32
 	/* The other interfaces of a WinUSB device go through interface 0's claim,
 	   so it stays claimed until the last of them closes the handle */
-	if (dev->interface != 0 || !is_handle_shared(dev))
+	if (!SDL_VendorUSB_KeepClaimed(SDL_VENDORUSB_THIS_PLATFORM, dev->interface, is_handle_shared(dev)))
 #endif
 	libusb_release_interface(dev->device_handle, dev->interface);
 

@@ -1456,6 +1456,250 @@ static void TestHeldInterfaces(void)
     }
 }
 
+/* Part 15: libusb 1.0.29 claiming the interfaces of a device bound whole to
+ * WinUSB, modeled from its source. libusb counts a claim and returns at once
+ * for one it counted (core.c:1786-1787), and releasing an interface it did not
+ * count does nothing (core.c:1827-1828). The WinUSB backend sets up interface
+ * 0's WinUSB handle whenever interface 0 is claimed, with no check for one it
+ * set up before (windows_winusb.c:2779-2785), and sets it up without counting
+ * interface 0 when a later interface is claimed first (:2855-2862). Releasing
+ * interface 0 frees that handle, and closing frees the rest (:2681-2690). The
+ * model runs hid.c's opens and closes of the receiver's four pad slots
+ * through SDL_VendorUSB_ClaimInterface0First and SDL_VendorUSB_KeepClaimed. */
+typedef struct ClaimModel
+{
+    bool rule;        /* hid.c claims interface 0 first */
+    bool open;        /* libusb_open made the handle */
+    unsigned counted; /* libusb's claimed_interfaces */
+    bool winusb0;     /* the backend holds interface 0's WinUSB handle */
+    int setups;       /* interface 0 WinUSB setups since the handle opened */
+    int lost;         /* interface 0 WinUSB handles overwritten, over the run */
+    int freed_early;  /* interface 0's WinUSB handle freed under a reader */
+    bool reading[8];  /* the slot interfaces SDL holds open */
+    int readers;
+} ClaimModel;
+
+static void ClaimModel_Claim(ClaimModel *m, int iface)
+{
+    if (m->counted & (1u << iface)) {
+        return;
+    }
+    if (iface == 0) {
+        if (m->winusb0) {
+            ++m->lost;
+        }
+        m->winusb0 = true;
+        ++m->setups;
+    } else if (!m->winusb0) {
+        m->winusb0 = true;
+        ++m->setups;
+    }
+    m->counted |= 1u << iface;
+}
+
+static void ClaimModel_Release(ClaimModel *m, int iface)
+{
+    if (!(m->counted & (1u << iface))) {
+        return;
+    }
+    m->counted &= ~(1u << iface);
+    if (iface == 0) {
+        if (m->readers > 0) {
+            ++m->freed_early;
+        }
+        m->winusb0 = false;
+    }
+}
+
+static void ClaimModel_CloseHandle(ClaimModel *m)
+{
+    m->open = false;
+    m->counted = 0;
+    m->winusb0 = false;
+    m->setups = 0;
+}
+
+/* hid_open_path on Windows. With fail the open fails after its claim, as
+   hidapi_initialize_device can, and a handle no one else uses closes. */
+static void ClaimModel_Open(ClaimModel *m, int iface, bool fail)
+{
+    const bool shared = m->readers > 0;
+
+    m->open = true;
+    if (m->rule && SDL_VendorUSB_ClaimInterface0First(SDL_VENDORUSB_PLATFORM_WINDOWS, true, iface, shared)) {
+        ClaimModel_Claim(m, 0);
+    }
+    ClaimModel_Claim(m, iface);
+    if (fail) {
+        if (!shared) {
+            ClaimModel_CloseHandle(m);
+        }
+        return;
+    }
+    m->reading[iface] = true;
+    ++m->readers;
+}
+
+/* hid_close on Windows: the release, then libusb_close for the last reader */
+static void ClaimModel_Close(ClaimModel *m, int iface)
+{
+    bool shared;
+
+    m->reading[iface] = false;
+    --m->readers;
+    shared = m->readers > 0;
+    if (!SDL_VendorUSB_KeepClaimed(SDL_VENDORUSB_PLATFORM_WINDOWS, iface, shared)) {
+        ClaimModel_Release(m, iface);
+    }
+    if (!shared) {
+        ClaimModel_CloseHandle(m);
+    }
+}
+
+/* Every slot SDL reads is counted, interface 0's WinUSB handle lives while
+   any slot reads, and a handle sets it up once */
+static bool ClaimModel_Sound(const ClaimModel *m)
+{
+    int iface;
+
+    for (iface = 0; iface < 8; ++iface) {
+        if (m->reading[iface] && !(m->counted & (1u << iface))) {
+            return false;
+        }
+    }
+    if (m->readers > 0 && !m->winusb0) {
+        return false;
+    }
+    return m->lost == 0 && m->freed_early == 0 && m->setups <= 1;
+}
+
+static void TestClaimOrder(void)
+{
+    static const SDL_VendorUSBPlatform platforms[] = {
+        SDL_VENDORUSB_PLATFORM_OTHER, SDL_VENDORUSB_PLATFORM_WINDOWS, SDL_VENDORUSB_PLATFORM_MACOS
+    };
+    static const int interfaces[] = { 0, 1, 2, 6 };
+    static const int slots[4] = { 0, 2, 4, 6 };
+    size_t p, i;
+    int flags, a, b, c, d;
+    unsigned seed;
+
+    /* Interface 0 is claimed first only for a later Xbox interface on Windows
+       that opens a new handle, and it stays claimed while another interface
+       uses the handle */
+    for (p = 0; p < sizeof(platforms) / sizeof(platforms[0]); ++p) {
+        for (i = 0; i < sizeof(interfaces) / sizeof(interfaces[0]); ++i) {
+            for (flags = 0; flags < 4; ++flags) {
+                const bool xbox = (flags & 1) != 0;
+                const bool shared = (flags & 2) != 0;
+                const bool windows = platforms[p] == SDL_VENDORUSB_PLATFORM_WINDOWS;
+
+                CHECK(SDL_VendorUSB_ClaimInterface0First(platforms[p], xbox, interfaces[i], shared) ==
+                      (windows && xbox && interfaces[i] != 0 && !shared));
+                CHECK(SDL_VendorUSB_KeepClaimed(platforms[p], interfaces[i], shared) ==
+                      (windows && interfaces[i] == 0 && shared));
+            }
+        }
+    }
+
+    /* Every order of opening the four slots, then every order of closing
+       them */
+    for (a = 0; a < 4; ++a) {
+        for (b = 0; b < 4; ++b) {
+            for (c = 0; c < 4; ++c) {
+                for (d = 0; d < 4; ++d) {
+                    const int open_order[4] = { slots[a], slots[b], slots[c], slots[d] };
+                    int e, f, g, h;
+
+                    if (a == b || a == c || a == d || b == c || b == d || c == d) {
+                        continue;
+                    }
+                    for (e = 0; e < 4; ++e) {
+                        for (f = 0; f < 4; ++f) {
+                            for (g = 0; g < 4; ++g) {
+                                for (h = 0; h < 4; ++h) {
+                                    const int close_order[4] = { slots[e], slots[f], slots[g], slots[h] };
+                                    ClaimModel m;
+                                    bool sound = true;
+                                    int k;
+
+                                    if (e == f || e == g || e == h || f == g || f == h || g == h) {
+                                        continue;
+                                    }
+                                    memset(&m, 0, sizeof(m));
+                                    m.rule = true;
+                                    for (k = 0; k < 4; ++k) {
+                                        ClaimModel_Open(&m, open_order[k], false);
+                                        sound = sound && ClaimModel_Sound(&m);
+                                    }
+                                    sound = sound && m.setups == 1 && m.readers == 4;
+                                    for (k = 0; k < 4; ++k) {
+                                        ClaimModel_Close(&m, close_order[k]);
+                                        sound = sound && ClaimModel_Sound(&m);
+                                    }
+                                    CHECK(sound && !m.open && m.counted == 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Slot 0's first open fails and closes the new handle, the other slots
+       open, and slot 0 opens again on their handle */
+    {
+        ClaimModel m;
+
+        memset(&m, 0, sizeof(m));
+        m.rule = true;
+        ClaimModel_Open(&m, 0, true);
+        CHECK(!m.open && m.readers == 0);
+        ClaimModel_Open(&m, 2, false);
+        ClaimModel_Open(&m, 4, false);
+        ClaimModel_Open(&m, 6, false);
+        ClaimModel_Open(&m, 0, false);
+        CHECK(ClaimModel_Sound(&m) && m.setups == 1 && m.readers == 4);
+
+        /* Without the rule libusb sets interface 0 up twice and loses the
+           first handle, which the model sees */
+        memset(&m, 0, sizeof(m));
+        ClaimModel_Open(&m, 0, true);
+        ClaimModel_Open(&m, 2, false);
+        ClaimModel_Open(&m, 0, false);
+        CHECK(m.lost == 1 && m.setups == 2);
+    }
+
+    /* Random opens, failed opens and closes, with and without the rule */
+    for (flags = 0; flags < 2; ++flags) {
+        ClaimModel m;
+        bool sound = true;
+        int step;
+
+        memset(&m, 0, sizeof(m));
+        m.rule = (flags == 0);
+        seed = 12345u;
+        for (step = 0; step < 20000; ++step) {
+            int slot;
+
+            seed = seed * 1103515245u + 12345u;
+            slot = slots[(seed >> 16) & 3];
+            if (m.reading[slot]) {
+                ClaimModel_Close(&m, slot);
+            } else {
+                ClaimModel_Open(&m, slot, ((seed >> 20) & 7) == 0);
+            }
+            sound = sound && ClaimModel_Sound(&m);
+        }
+        if (m.rule) {
+            CHECK(sound);
+        } else {
+            CHECK(!sound && m.lost > 0);
+        }
+    }
+}
+
 /* Part 14: Konami's P4IO, whose input comes on the interrupt endpoint behind
  * its bulk IN endpoint */
 static void TestKonamiP4IO(void)
@@ -1619,6 +1863,7 @@ int main(void)
     TestEarlierRules();
     TestRoutingTable();
     TestHeldInterfaces();
+    TestClaimOrder();
     TestKonamiP4IO();
     TestAgainstOldRules();
     printf("%s: %d checks, %d failures\n", failures ? "FAILED" : "PASSED", checks, failures);
