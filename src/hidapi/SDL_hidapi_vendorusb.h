@@ -150,6 +150,22 @@ extern bool SDL_VendorUSB_IsXIDInterface(uint8_t interface_class, uint8_t interf
  * handle that still reads, every interface of that device counts as opened. */
 extern bool SDL_VendorUSB_SkipUnopened(SDL_VendorUSBPlatform platform, bool xbox, bool opened);
 
+/* Whether the libusb backend claims interface 0 before it opens a later
+ * Xbox interface on a handle no other interface uses yet. On Windows libusb
+ * opens the other interfaces of a device bound whole to WinUSB through
+ * interface 0's WinUSB handle. When a later interface is claimed first,
+ * libusb sets that handle up without counting interface 0 as claimed, and
+ * libusb 1.0.29 sets it up again when interface 0 is claimed afterward and
+ * loses the first one. A claim of interface 0 made first is counted, so a
+ * later one returns at once. */
+extern bool SDL_VendorUSB_ClaimInterface0First(SDL_VendorUSBPlatform platform, bool xbox, int interface_number, bool shared);
+
+/* Whether closing an interface leaves it claimed. On Windows the other
+ * interfaces of a device bound whole to WinUSB go through interface 0's
+ * WinUSB handle, which libusb frees when interface 0 is released, so
+ * interface 0 stays claimed while another interface uses its handle. */
+extern bool SDL_VendorUSB_KeepClaimed(SDL_VendorUSBPlatform platform, int interface_number, bool shared);
+
 #define SDL_VENDORUSB_TRANSFER_BULK      2
 #define SDL_VENDORUSB_TRANSFER_INTERRUPT 3
 
