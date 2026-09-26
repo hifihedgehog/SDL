@@ -33,6 +33,11 @@ set(PROTOCOL_JOYSTICK "${PROTOCOL_SDL_ROOT}/src/joystick/hidapi")
 set(PROTOCOL_JOYSTICK_SHARED "${PROTOCOL_SDL_ROOT}/src/joystick")
 
 enable_testing()
+if(NOT MSVC)
+    # Rules written before read_size leave it to zero-initialization.
+    set_source_files_properties("${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c"
+        PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
+endif()
 
 function(protocol_test part)
     set(target "testprotocol${part}")
@@ -156,3 +161,39 @@ protocol_test(guncon "${PROTOCOL_TESTS}/testguncon.c"
 # src/joystick, since the serial driver uses it too.
 protocol_test(train "${PROTOCOL_TESTS}/testtrain.c"
     "${PROTOCOL_JOYSTICK_SHARED}/SDL_train_proto.c")
+
+# hifihedgehog/SDL#33 Part 14: the Namco USIO arcade I/O board.
+protocol_test(usio "${PROTOCOL_TESTS}/testusio.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_usio_proto.c")
+
+# hifihedgehog/SDL#33 Part 14: Konami's P3IO. The test also checks the
+# board's vendor rule.
+protocol_test(konamip3io "${PROTOCOL_TESTS}/testkonamip3io.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_konami_p3io_proto.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+# hifihedgehog/SDL#33 Part 14: Konami's P4IO.
+protocol_test(konamip4io "${PROTOCOL_TESTS}/testkonamip4io.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_konami_p4io_proto.c")
+
+# hifihedgehog/SDL#33 Part 14: the CH Products Multi-Function Panel and the
+# Ergodex DX1.
+protocol_test(chmfp "${PROTOCOL_TESTS}/testchmfp.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_chmfp_proto.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+protocol_test(ergodex "${PROTOCOL_TESTS}/testergodex.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_ergodex_proto.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+# hifihedgehog/SDL#33 Part 14: the TrackIR 2 and TrackIR 3, and their
+# vendor rules.
+protocol_test(trackir "${PROTOCOL_TESTS}/testtrackir.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_trackir_proto.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")
+
+# hifihedgehog/SDL#33 Part 14: the Tacx trainer head units, replayed from
+# antifier's two captures.
+protocol_test(tacx "${PROTOCOL_TESTS}/testtacx.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_tacx_proto.c"
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_vendorusb.c")

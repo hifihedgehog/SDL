@@ -25,9 +25,11 @@
  * the port through SDL_SerialPortOps, so tests substitute a fake port. One
  * port thread owns each engine. The thread passes SDL_GetTicksNS at every
  * call. Modules see that time in milliseconds, which equals SDL_GetTicks.
+ * When the port closes for good, a module that asks for it runs a close
+ * sequence first.
  *
- * The line settings, timeouts, purge flags and modem functions below carry
- * the values of the Windows DCB, COMMTIMEOUTS, PurgeComm and
+ * The line settings, timeouts, purge flags and modem and break functions
+ * below carry the values of the Windows DCB, COMMTIMEOUTS, PurgeComm and
  * EscapeCommFunction documentation, so the Windows port layer copies them
  * field by field.
  */
@@ -38,6 +40,7 @@
 #include "SDL_serial_proto.h"
 
 #define SDL_SERIAL_RETRY_MS      1000
+#define SDL_SERIAL_CLOSE_MS      3000 /* The longest a close sequence keeps the port */
 #define SDL_SERIAL_QUEUE_ENTRIES 64
 #define SDL_SERIAL_READ_SIZE     256
 #define SDL_SERIAL_MAX_PORTS     16
@@ -66,11 +69,14 @@
 /* PurgeComm: PURGE_TXABORT 0x1, PURGE_RXABORT 0x2, PURGE_TXCLEAR 0x4, PURGE_RXCLEAR 0x8 */
 #define SDL_SERIAL_PURGE_ALL 0x000Fu
 
-/* EscapeCommFunction */
-#define SDL_SERIAL_SETRTS 3
-#define SDL_SERIAL_CLRRTS 4
-#define SDL_SERIAL_SETDTR 5
-#define SDL_SERIAL_CLRDTR 6
+/* EscapeCommFunction. SETBREAK and CLRBREAK do what SetCommBreak and
+ * ClearCommBreak do. */
+#define SDL_SERIAL_SETRTS   3
+#define SDL_SERIAL_CLRRTS   4
+#define SDL_SERIAL_SETDTR   5
+#define SDL_SERIAL_CLRDTR   6
+#define SDL_SERIAL_SETBREAK 8
+#define SDL_SERIAL_CLRBREAK 9
 
 typedef struct SDL_SerialLineConfig
 {
@@ -166,6 +172,7 @@ typedef struct SDL_SerialEngine
     bool open;
     bool configured; /* The first line is set, the timeouts too, and the port purged */
     bool busy;       /* A write is pending */
+    bool breaking;   /* The line is held in a break */
     SDL_SerialLine line;
     uint64_t retry_at; /* ms, while closed */
     uint64_t now;      /* ms of the current call */
@@ -174,6 +181,8 @@ typedef struct SDL_SerialEngine
     uint32_t generation[SDL_SERIAL_MAX_SUBDEVICES];
     uint32_t opens;
     uint32_t losses;
+    bool stopping;    /* Closing for good: the port never opens again */
+    uint64_t stop_at; /* ms, the end of the time a close sequence has */
 } SDL_SerialEngine;
 
 /* Closed, with the first open due at once */
@@ -194,6 +203,13 @@ extern bool SDL_SerialEngine_GetDeadline(const SDL_SerialEngine *engine, uint64_
 extern bool SDL_SerialEngine_IsReading(const SDL_SerialEngine *engine);
 /* Closes an open port and clears presence */
 extern void SDL_SerialEngine_Stop(SDL_SerialEngine *engine);
+/* Starts closing the port for good. A module whose base asks for a close
+ * sequence runs it first: the port stays open, read and written, until the
+ * module sets closed or SDL_SERIAL_CLOSE_MS pass. True while the sequence
+ * runs, false when the port closed at once. */
+extern bool SDL_SerialEngine_BeginStop(SDL_SerialEngine *engine, uint64_t now_ns);
+/* A close sequence runs */
+extern bool SDL_SerialEngine_IsStopping(const SDL_SerialEngine *engine);
 
 /* SDL_HINT_JOYSTICK_SERIAL: a comma-separated list of PORT=PROTOCOL
  * entries. PORT is COMn, case-insensitive, or a device instance ID prefix

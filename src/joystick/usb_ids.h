@@ -34,6 +34,7 @@
 #define USB_VENDOR_AVB          0x05ef
 #define USB_VENDOR_BACKBONE     0x358a
 #define USB_VENDOR_CAPCOM       0x0a7b
+#define USB_VENDOR_CH_PRODUCTS  0x068e
 #define USB_VENDOR_CRKD         0x3651
 #define USB_VENDOR_CORSAIR      0x1b1c
 #define USB_VENDOR_CREATIVE     0x041e
@@ -41,6 +42,7 @@
 #define USB_VENDOR_DJI          0x2ca3
 #define USB_VENDOR_DRAGONRISE   0x0079
 #define USB_VENDOR_DREAMCHEEKY  0x1941
+#define USB_VENDOR_ERGODEX      0x1603
 #define USB_VENDOR_FLYDIGI_V1   0x04b4
 #define USB_VENDOR_FLYDIGI_V2   0x37d7
 #define USB_VENDOR_GOOGLE       0x18d1
@@ -51,6 +53,7 @@
 #define USB_VENDOR_HYPERKIN     0x2e24
 #define USB_VENDOR_IN2GAMES     0x14b7
 #define USB_VENDOR_INTEL        0x8086
+#define USB_VENDOR_KONAMI       0x1ccf
 #define USB_VENDOR_LOGITECH     0x046d
 #define USB_VENDOR_MADCATZ      0x0738
 #define USB_VENDOR_MAYFLASH     0x33df
@@ -59,6 +62,7 @@
 #define USB_VENDOR_NACON        0x146b
 #define USB_VENDOR_NACON_ALT    0x3285
 #define USB_VENDOR_NAMCO        0x0b9a
+#define USB_VENDOR_NATURALPOINT 0x131d
 #define USB_VENDOR_NIA          0x1234 // The OCZ NIA's placeholder ID
 #define USB_VENDOR_NINTENDO     0x057e
 #define USB_VENDOR_NVIDIA       0x0955
@@ -78,6 +82,7 @@
 #define USB_VENDOR_SONY         0x054c
 #define USB_VENDOR_STEELSERIES  0x1038
 #define USB_VENDOR_STEELSERIES_BT 0x0111 // Bluetooth SIG company ID
+#define USB_VENDOR_TACX         0x3561
 #define USB_VENDOR_TAITO        0x0ae4
 #define USB_VENDOR_THRUSTMASTER 0x044f
 #define USB_VENDOR_TRAIN_MASCON 0x1c06 // Pony Canyon, as OpenBVE names it
@@ -111,6 +116,7 @@
 #define USB_PRODUCT_BDA_XB1_CLASSIC                       0x581a
 #define USB_PRODUCT_BDA_XB1_FIGHTPAD                      0x791a
 #define USB_PRODUCT_BDA_XB1_SPECTRA_PRO                   0x592a
+#define USB_PRODUCT_CH_PRODUCTS_MFP                       0x00f0
 #define USB_PRODUCT_CREATIVE_PRODIKEYS                    0x2801
 #define USB_PRODUCT_DJI_RC231                             0x1020 // From a user report, not a descriptor capture
 #define USB_PRODUCT_DJI_RC_RM330                          0x1023
@@ -122,6 +128,7 @@
 #define USB_PRODUCT_GUILLEMOT_JET_LEADER_3D               0xa302
 #define USB_PRODUCT_GUILLEMOT_JET_LEADER_FFB              0x0003
 #define USB_PRODUCT_GUILLEMOT_RACE_LEADER_FFB             0x0001
+#define USB_PRODUCT_ERGODEX_DX1                           0x0002
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER1            0x1843
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER2            0x1844
 #define USB_PRODUCT_EVORETRO_GAMECUBE_ADAPTER3            0x1846
@@ -149,6 +156,10 @@
 #define USB_PRODUCT_HORI_STEAM_CONTROLLER_BT              0x0196
 #define USB_PRODUCT_INTEL_WIRELESS_SERIES                 0xc013
 #define USB_PRODUCT_IN2GAMES_GAMETRAK                     0x0982
+#define USB_PRODUCT_KONAMI_P3IO                           0x8008 // DDR SuperNova 2 and DDR X cabinets
+#define USB_PRODUCT_KONAMI_P4IO                           0x8010 // jubeat and DDR White cabinets
+#define USB_PRODUCT_KONAMI_BIO2_8040                      0x8040 // BIO2, a COM port on Windows' USB serial driver
+#define USB_PRODUCT_KONAMI_BIO2_804C                      0x804c // BIO2, a COM port on Windows' USB serial driver
 #define USB_PRODUCT_LOGITECH_F310                         0xc216
 #define USB_PRODUCT_LOGITECH_CHILLSTREAM                  0xcad1
 #define USB_PRODUCT_LOGITECH_SPEED_FORCE_WIRELESS         0xc29c
@@ -165,6 +176,10 @@
 #define USB_PRODUCT_NACON_REVOLUTION_X_UNLIMITED_BT       0x0689
 #define USB_PRODUCT_NAMCO_GUNCON2                         0x016a // Shared with the EMS LCD TopGun
 #define USB_PRODUCT_NAMCO_GUNCON3                         0x0800
+#define USB_PRODUCT_NAMCO_H050_USJC                       0x0900 // "H050 USJ(C) PCB rev00", used when it identifies as a USIO
+#define USB_PRODUCT_NAMCO_USIO                            0x0910 // "USIO PCB rev00"
+#define USB_PRODUCT_NATURALPOINT_TRACKIR2                 0x0150
+#define USB_PRODUCT_NATURALPOINT_TRACKIR3                 0x0155
 #define USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER             0x0337
 #define USB_PRODUCT_NINTENDO_N64_CONTROLLER               0x2019
 #define USB_PRODUCT_NINTENDO_SEGA_GENESIS_CONTROLLER      0x201e
@@ -243,6 +258,8 @@
 #define USB_PRODUCT_SONY_DS5_EDGE                         0x0df2
 #define USB_PRODUCT_STEALTH_ULTRA_WIRED                   0x7073
 #define USB_PRODUCT_SWITCH_RETRO_CONTROLLER               0x0575
+#define USB_PRODUCT_TACX_T1904                            0x1904 // White and green i-Magic head unit
+#define USB_PRODUCT_TACX_T1932                            0x1932 // White and blue Flow, Fortius and VR head unit
 #define USB_PRODUCT_TAITO_DENSHA_TYPE2                    0x0004
 #define USB_PRODUCT_TAITO_DENSHA_SHINKANSEN               0x0005
 #define USB_PRODUCT_TAITO_DENSHA_RYOJOHEN                 0x0007

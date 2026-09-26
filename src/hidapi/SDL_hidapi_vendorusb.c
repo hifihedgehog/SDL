@@ -97,6 +97,65 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
     { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_DENSHA_RYOJOHEN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     { USB_VENDOR_TAITO, USB_PRODUCT_TAITO_MULTI_TRAIN_CONTROLLER, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     { USB_VENDOR_TRAIN_MASCON, USB_PRODUCT_TRAIN_MASCON, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+
+    /* The Namco USIO and the H050 USJ(C): interface 0 with bulk OUT 0x01,
+     * bulk IN 0x82 and interrupt IN 0x83, as the emulators describe it
+     * (rpcs3/Emu/Io/usio.cpp:93-122). The command protocol runs on the two
+     * bulk endpoints, and 0x83 is never read. Byte 0 of every command is its
+     * operation, never a report ID, so commands go out unchanged. Like every
+     * rule of Part 14 it serves Windows only, the platform the part covers. */
+    { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_USIO, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x82, 0x01, 0, 0 },
+    { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_H050_USJC, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x82, 0x01, 0, 0 },
+
+    /* Konami's P3IO of the DDR SuperNova 2 and DDR X cabinets. The inputs
+     * come on interrupt IN 0x83 of interface 0, which the rule names because
+     * bulk IN 0x81 carries the replies to the board's commands. The driver
+     * sends those on bulk OUT 0x02 and reads 0x81 itself on the libusb
+     * handle. Like every rule of Part 14 it serves Windows only. */
+    { USB_VENDOR_KONAMI, USB_PRODUCT_KONAMI_P3IO, SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x83, 0, 0, 0 },
+
+    /* Konami's P4IO: interface 0 with bulk OUT, bulk IN and interrupt IN in
+     * that order, as p4io-mdxfdrv reads it, and no source records the
+     * addresses. The input reports come on the interrupt endpoint. Bulk IN
+     * carries the replies to commands, which the driver reads itself. Like
+     * every rule of Part 14 it serves Windows only. */
+    { USB_VENDOR_KONAMI, USB_PRODUCT_KONAMI_P4IO, SDL_VENDORUSB_IN_INTERRUPT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+
+    /* The CH Products Multi-Function Panel: its only interface, 0, is class
+     * FF with one interrupt IN endpoint, 0x81 of 8 bytes, and no OUT
+     * endpoint. The host never writes to it. Like every rule of Part 14 it
+     * serves Windows only. */
+    { USB_VENDOR_CH_PRODUCTS, USB_PRODUCT_CH_PRODUCTS_MFP, SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x81, 0, 8, 0 },
+
+    /* The Ergodex DX1. Interface 0 is a boot keyboard and is not enumerated.
+     * Interface 1 is class FF, subclass 00, protocol 01: interrupt IN 0x82
+     * and interrupt OUT 0x02, 16 bytes each. Byte 0 of every request is its
+     * type, never a report ID, so requests go out unchanged. Like every rule
+     * of Part 14 it serves Windows only. */
+    { USB_VENDOR_ERGODEX, USB_PRODUCT_ERGODEX_DX1, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 1, 0, 0, 0, 0, 0x82, 0x02, 16, 16 },
+
+    /* The NaturalPoint TrackIR 2 and TrackIR 3: interface 0 with commands on
+     * bulk OUT 0x02 and a stream of packets on bulk IN 0x82. A read takes
+     * 16384 bytes, as linuxtrack reads them, so it holds every packet the
+     * camera sent up to its next short packet. The commands go out
+     * unchanged. Like every rule of Part 14 they serve Windows only, and
+     * elsewhere linuxtrack keeps the cameras. */
+    { USB_VENDOR_NATURALPOINT, USB_PRODUCT_NATURALPOINT_TRACKIR2, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x82, 0x02, 0, 0, 16384 },
+    { USB_VENDOR_NATURALPOINT, USB_PRODUCT_NATURALPOINT_TRACKIR3, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x82, 0x02, 0, 0, 16384 },
+
+    /* Tacx trainer head units, the T1904 and the T1932. Interface 0 takes
+     * frames on OUT 0x02 and answers on IN 0x82, the endpoints FortiusANT,
+     * antifier and the fortius_1942 Linux driver use. No source records the
+     * class, and the descriptors give the transfer type. A reply is 64 bytes,
+     * and a bulk IN endpoint is read 64 bytes at a time, as every source
+     * reads it, so a reply spread over smaller packets still arrives whole.
+     * The first byte of a frame is a command number, never a report ID. Like
+     * every rule of Part 14 they serve Windows only, and elsewhere FortiusANT
+     * and the Linux driver keep the head units. */
+#define SDL_VENDORUSB_TACX(product) { USB_VENDOR_TACX, product, SDL_VENDORUSB_RAW_OUTPUT | SDL_VENDORUSB_WINDOWS_ONLY, 0, 0, 0, 0, 0, 0x82, 0x02, 0, 0, 64 }
+    SDL_VENDORUSB_TACX(USB_PRODUCT_TACX_T1904),
+    SDL_VENDORUSB_TACX(USB_PRODUCT_TACX_T1932),
+#undef SDL_VENDORUSB_TACX
 };
 
 /* Devices that need libusb on every platform. The Switch 2 devices carry
@@ -352,7 +411,10 @@ bool SDL_VendorUSB_SelectEndpoints(const SDL_VendorUSBRule *rule, uint8_t interf
             if (in_alternate &&
                 (transfer == SDL_VENDORUSB_TRANSFER_BULK || transfer == SDL_VENDORUSB_TRANSFER_INTERRUPT)) {
                 if (address & 0x80) {
-                    VendorUSB_TakeEndpoint(rule->in_endpoint, rule->in_size, address, transfer, w_max_packet_size, &result.in);
+                    /* A rule that reads an interrupt endpoint passes over bulk ones */
+                    if (transfer == SDL_VENDORUSB_TRANSFER_INTERRUPT || !(rule->flags & SDL_VENDORUSB_IN_INTERRUPT)) {
+                        VendorUSB_TakeEndpoint(rule->in_endpoint, rule->in_size, address, transfer, w_max_packet_size, &result.in);
+                    }
                 } else {
                     VendorUSB_TakeEndpoint(rule->out_endpoint, rule->out_size, address, transfer, w_max_packet_size, &result.out);
                 }
@@ -366,6 +428,13 @@ bool SDL_VendorUSB_SelectEndpoints(const SDL_VendorUSBRule *rule, uint8_t interf
     }
     if (rule->out_endpoint && !result.out.address) {
         return false;
+    }
+    if (rule->read_size && result.in.transfer == SDL_VENDORUSB_TRANSFER_BULK) {
+        /* A whole number of packets, so the device's last packet always fits */
+        if (!result.in.max_packet_size || (rule->read_size % result.in.max_packet_size) != 0) {
+            return false;
+        }
+        result.in.read_size = rule->read_size;
     }
     *selection = result;
     return true;
