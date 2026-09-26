@@ -39,13 +39,18 @@
 #include "../../SDL_hints_c.h"
 #include "../../core/windows/SDL_windows.h"
 #include "../serial/SDL_serial_engine.h"
+#include "../serial/SDL_serial_bio2_proto.h"
 #include "../serial/SDL_serial_cyberman_proto.h"
 #include "../serial/SDL_serial_ibus_proto.h"
 #include "../serial/SDL_serial_jvs_proto.h"
 #include "../serial/SDL_serial_kettler_proto.h"
 #include "../serial/SDL_serial_iforce_proto.h"
+#include "../serial/SDL_serial_kfca_proto.h"
 #include "../serial/SDL_serial_magellan_proto.h"
 #include "../serial/SDL_serial_mastercontroller_proto.h"
+#include "../serial/SDL_serial_mdxf_proto.h"
+#include "../serial/SDL_serial_panb_proto.h"
+#include "../serial/SDL_serial_rvol_proto.h"
 #include "../serial/SDL_serial_spaceball_proto.h"
 #include "../serial/SDL_serial_spaceorb_proto.h"
 #include "../serial/SDL_serial_stinger_proto.h"
@@ -71,6 +76,8 @@ SDL_COMPILE_TIME_ASSERT(serial_setrts, SETRTS == SDL_SERIAL_SETRTS);
 SDL_COMPILE_TIME_ASSERT(serial_clrrts, CLRRTS == SDL_SERIAL_CLRRTS);
 SDL_COMPILE_TIME_ASSERT(serial_setdtr, SETDTR == SDL_SERIAL_SETDTR);
 SDL_COMPILE_TIME_ASSERT(serial_clrdtr, CLRDTR == SDL_SERIAL_CLRDTR);
+SDL_COMPILE_TIME_ASSERT(serial_setbreak, SETBREAK == SDL_SERIAL_SETBREAK);
+SDL_COMPILE_TIME_ASSERT(serial_clrbreak, CLRBREAK == SDL_SERIAL_CLRBREAK);
 SDL_COMPILE_TIME_ASSERT(serial_maxdword, MAXDWORD == SDL_SERIAL_MAXDWORD);
 SDL_COMPILE_TIME_ASSERT(serial_hat_up, SDL_HAT_UP == SDL_SERIAL_HAT_UP);
 SDL_COMPILE_TIME_ASSERT(serial_hat_right, SDL_HAT_RIGHT == SDL_SERIAL_HAT_RIGHT);
@@ -80,6 +87,8 @@ SDL_COMPILE_TIME_ASSERT(serial_type_unknown, SDL_JOYSTICK_TYPE_UNKNOWN == SDL_SE
 SDL_COMPILE_TIME_ASSERT(serial_type_gamepad, SDL_JOYSTICK_TYPE_GAMEPAD == SDL_SERIAL_TYPE_GAMEPAD);
 SDL_COMPILE_TIME_ASSERT(serial_type_arcade, SDL_JOYSTICK_TYPE_ARCADE_STICK == SDL_SERIAL_TYPE_ARCADE_STICK);
 SDL_COMPILE_TIME_ASSERT(serial_type_flight, SDL_JOYSTICK_TYPE_FLIGHT_STICK == SDL_SERIAL_TYPE_FLIGHT_STICK);
+SDL_COMPILE_TIME_ASSERT(serial_type_dance, SDL_JOYSTICK_TYPE_DANCE_PAD == SDL_SERIAL_TYPE_DANCE_PAD);
+SDL_COMPILE_TIME_ASSERT(serial_type_drum, SDL_JOYSTICK_TYPE_DRUM_KIT == SDL_SERIAL_TYPE_DRUM_KIT);
 
 /* cfgmgr32, loaded at run time as SDL_hid.c loads it */
 #define SERIAL_CR_SUCCESS                           0x00000000
@@ -158,7 +167,25 @@ static const SDL_SerialModule *const serial_modules[] = {
     &SDL_DJIRemoteRCN1Module,
     &SDL_DJIRemoteMavicMiniModule,
     &SDL_DJIRemotePhantom3Module,
-    &SDL_DJIRemotePhantom2Module
+    &SDL_DJIRemotePhantom2Module,
+    &SDL_SerialBIO2Module,
+    &SDL_SerialBIO2IIDXModule,
+    &SDL_SerialBIO2SDVXModule,
+    &SDL_SerialKFCAModule,
+    &SDL_SerialPANBModule,
+    &SDL_SerialRVOLModule,
+    &SDL_SerialMDXFModule
+};
+
+/* The Konami ACIO modules, which SDL_HINT_JOYSTICK_KONAMI_ACIO turns off */
+static const SDL_SerialModule *const serial_acio_modules[] = {
+    &SDL_SerialBIO2Module,
+    &SDL_SerialBIO2IIDXModule,
+    &SDL_SerialBIO2SDVXModule,
+    &SDL_SerialKFCAModule,
+    &SDL_SerialPANBModule,
+    &SDL_SerialRVOLModule,
+    &SDL_SerialMDXFModule
 };
 
 /* Ports whose device identifies itself, by device instance ID prefix. The
@@ -168,6 +195,12 @@ static const SDL_SerialAutoRule serial_auto_rules[] = {
        driver binds it on PIDs 1020 and 1030, and other RC-N1 PIDs are not
        recorded, so any DJI PID matches (hifihedgehog/SDL#33 Part 6). */
     { "USB\\VID_2CA3&PID_????&MI_02\\", "dji", 0x2CA3, 0 },
+    /* The Konami BIO2, a COM port on Windows' own USB serial driver. A row
+       matches the device and any interface of it, as bemanitools' search by
+       ID does. Token bio2 takes its mode from
+       SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE (hifihedgehog/SDL#33 Part 14). */
+    { "USB\\VID_1CCF&PID_804C", "bio2", 0x1CCF, 0x804C },
+    { "USB\\VID_1CCF&PID_8040", "bio2", 0x1CCF, 0x8040 },
     { NULL, NULL, 0, 0 }
 };
 
@@ -243,6 +276,8 @@ static char *serial_hint;
 static SDL_AtomicInt serial_hint_changed;
 static SDL_AtomicInt serial_rescan;
 static bool serial_auto;
+static bool serial_acio;                             /* SDL_HINT_JOYSTICK_KONAMI_ACIO */
+static const SDL_SerialModule *serial_bio2_module;   /* What token bio2 runs, from SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE */
 static SERIAL_Port *serial_ports;
 static HMODULE serial_cfgmgr32;
 static SERIAL_CM_Get_Device_Interface_List_SizeW serial_list_size;
@@ -779,10 +814,14 @@ typedef enum SERIAL_Wake
     SERIAL_WAKE_WRITE
 } SERIAL_Wake;
 
-/* Only this thread touches the handle and the module state */
+/* Only this thread touches the handle and the module state. A module whose
+ * device must hear from the host before the port closes, such as a
+ * streaming PANB, keeps the thread through its close sequence, which
+ * SDL_SERIAL_CLOSE_MS bounds. */
 static int SDLCALL SERIAL_PortThread(void *data)
 {
     SERIAL_Port *port = (SERIAL_Port *)data;
+    bool stopping = false;
 
     SDL_SerialEngine_Init(&port->engine, &serial_ops, port, port->module, port->module_state, SDL_GetTicksNS());
     for (;;) {
@@ -793,6 +832,13 @@ static int SDLCALL SERIAL_PortThread(void *data)
 
         SDL_SerialEngine_Run(&port->engine, SDL_GetTicksNS());
         SERIAL_ReadMore(port);
+        if (stopping && !SDL_SerialEngine_IsStopping(&port->engine)) {
+            /* The close sequence ended, or the port was lost during it. A
+               read that finished at once can end it, so this follows the
+               reads: a closed port has nothing left to wait for. */
+            SDL_SerialEngine_Stop(&port->engine);
+            return 0;
+        }
         if (SDL_SerialEngine_GetDeadline(&port->engine, &deadline)) {
             const Uint64 now = SDL_GetTicks();
 
@@ -801,8 +847,10 @@ static int SDLCALL SERIAL_PortThread(void *data)
         if (port->read_idle && timeout > 10) {
             timeout = 10;
         }
-        handles[count] = port->stop_event;
-        wakes[count++] = SERIAL_WAKE_STOP;
+        if (!stopping) {
+            handles[count] = port->stop_event;
+            wakes[count++] = SERIAL_WAKE_STOP;
+        }
         handles[count] = port->output_event;
         wakes[count++] = SERIAL_WAKE_OUTPUT;
         handles[count] = port->rescan_event;
@@ -826,8 +874,12 @@ static int SDLCALL SERIAL_PortThread(void *data)
         }
         switch (wakes[result - WAIT_OBJECT_0]) {
         case SERIAL_WAKE_STOP:
-            SDL_SerialEngine_Stop(&port->engine);
-            return 0;
+            stopping = true;
+            if (!SDL_SerialEngine_BeginStop(&port->engine, SDL_GetTicksNS())) {
+                SDL_SerialEngine_Stop(&port->engine);
+                return 0;
+            }
+            break;
         case SERIAL_WAKE_OUTPUT:
             SERIAL_TakeOutput(port);
             break;
@@ -972,6 +1024,55 @@ static void SERIAL_LogHintEntry(void *userdata, const char *entry, size_t length
     SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "SDL_JOYSTICK_SERIAL entry \"%.*s\" skipped: %s", (int)length, entry, reason);
 }
 
+static bool SERIAL_IsACIO(const SDL_SerialModule *module)
+{
+    size_t i;
+
+    for (i = 0; i < SDL_arraysize(serial_acio_modules); ++i) {
+        if (serial_acio_modules[i] == module) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The module a port runs for a hint entry or an auto rule. Token bio2 takes
+ * its mode from SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE, and no ACIO module runs
+ * while SDL_HINT_JOYSTICK_KONAMI_ACIO is off. NULL leaves the port closed. A
+ * module reads no configuration, so a mode is a module of its own, and a
+ * mode that changes restarts the port. */
+static const SDL_SerialModule *SERIAL_ResolveModule(const SDL_SerialModule *module)
+{
+    if (!module || (!serial_acio && SERIAL_IsACIO(module))) {
+        return NULL;
+    }
+    if (module == &SDL_SerialBIO2Module && serial_bio2_module) {
+        return serial_bio2_module;
+    }
+    return module;
+}
+
+/* Resolves the entries of a parsed hint and drops the ones that run nothing.
+ * Returns the number kept. */
+static int SERIAL_ResolveEntries(SDL_SerialPortEntry *entries, int count)
+{
+    int i, kept = 0;
+
+    for (i = 0; i < count; ++i) {
+        const SDL_SerialModule *module = SERIAL_ResolveModule(entries[i].module);
+
+        if (!module) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Serial joystick %s (%s): SDL_JOYSTICK_KONAMI_ACIO is off", entries[i].key, entries[i].module->token);
+            continue;
+        }
+        if (kept != i) {
+            entries[kept] = entries[i];
+        }
+        entries[kept++].module = module;
+    }
+    return kept;
+}
+
 /* Applies the latest SDL_HINT_JOYSTICK_SERIAL on the joystick thread */
 static void SERIAL_ApplyHint(void)
 {
@@ -993,6 +1094,7 @@ static void SERIAL_ApplyHint(void)
     SDL_UnlockMutex(serial_lock);
     nnew = SDL_Serial_ParseHint(hint, serial_modules, (int)SDL_arraysize(serial_modules), entries, SDL_SERIAL_MAX_PORTS, SERIAL_LogHintEntry, NULL);
     SDL_free(hint);
+    nnew = SERIAL_ResolveEntries(entries, nnew);
 
     for (port = serial_ports; port && nold < SDL_SERIAL_MAX_PORTS; port = port->next) {
         if (!port->rule) {
@@ -1097,13 +1199,18 @@ static void SERIAL_ScanAuto(void)
     for (interface_path = list; interface_path && *interface_path; interface_path += SDL_wcslen(interface_path) + 1) {
         char *instance_id = SERIAL_InterfaceInstanceId(interface_path);
         const SDL_SerialAutoRule *rule = instance_id ? SDL_Serial_MatchAuto(serial_auto_rules, nrules, instance_id) : NULL;
-        const SDL_SerialModule *module = rule ? SERIAL_FindModule(rule->token) : NULL;
+        const SDL_SerialModule *module = rule ? SERIAL_ResolveModule(SERIAL_FindModule(rule->token)) : NULL;
 
         if (module && !SERIAL_HintClaims(instance_id)) {
             for (port = serial_ports; port; port = port->next) {
                 if (port->rule && SDL_Serial_KeysEqual(port->key, instance_id)) {
                     break;
                 }
+            }
+            if (port && port->module != module) {
+                /* A hint picked another module: the port starts over */
+                SERIAL_StopPort(port, true);
+                port = NULL;
             }
             if (!port) {
                 port = SERIAL_StartPort(instance_id, module, rule);
@@ -1202,6 +1309,34 @@ static void SDLCALL SERIAL_AutoHintChanged(void *userdata, const char *name, con
     SDL_SetAtomicInt(&serial_rescan, 1);
 }
 
+/* The ACIO hints change what hint entries and auto rules run, so both are
+   applied again */
+static void SDLCALL SERIAL_ACIOHintChanged(void *userdata, const char *name, const char *oldValue, const char *hint)
+{
+    (void)userdata;
+    (void)name;
+    (void)oldValue;
+    serial_acio = SDL_GetStringBoolean(hint, true);
+    SDL_SetAtomicInt(&serial_hint_changed, 1);
+    SDL_SetAtomicInt(&serial_rescan, 1);
+}
+
+static void SDLCALL SERIAL_BIO2HintChanged(void *userdata, const char *name, const char *oldValue, const char *hint)
+{
+    (void)userdata;
+    (void)name;
+    (void)oldValue;
+    if (hint && SDL_strcasecmp(hint, "iidx") == 0) {
+        serial_bio2_module = &SDL_SerialBIO2IIDXModule;
+    } else if (hint && SDL_strcasecmp(hint, "sdvx") == 0) {
+        serial_bio2_module = &SDL_SerialBIO2SDVXModule;
+    } else {
+        serial_bio2_module = &SDL_SerialBIO2Module;
+    }
+    SDL_SetAtomicInt(&serial_hint_changed, 1);
+    SDL_SetAtomicInt(&serial_rescan, 1);
+}
+
 static bool SERIAL_JoystickInit(void)
 {
     serial_lock = SDL_CreateMutex();
@@ -1211,6 +1346,8 @@ static bool SERIAL_JoystickInit(void)
     serial_cancel_io_ex = (SERIAL_CancelIoEx)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "CancelIoEx");
     SDL_SetAtomicInt(&serial_rescan, 1);
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_SERIAL_AUTO, SERIAL_AutoHintChanged, NULL);
+    SDL_AddHintCallback(SDL_HINT_JOYSTICK_KONAMI_ACIO, SERIAL_ACIOHintChanged, NULL);
+    SDL_AddHintCallback(SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE, SERIAL_BIO2HintChanged, NULL);
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_SERIAL, SERIAL_HintChanged, NULL);
     return true;
 }
@@ -1521,13 +1658,26 @@ static void SERIAL_JoystickClose(SDL_Joystick *joystick)
 
 static void SERIAL_JoystickQuit(void)
 {
+    SERIAL_Port *port;
+
     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_SERIAL, SERIAL_HintChanged, NULL);
+    SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE, SERIAL_BIO2HintChanged, NULL);
+    SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_KONAMI_ACIO, SERIAL_ACIOHintChanged, NULL);
     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_SERIAL_AUTO, SERIAL_AutoHintChanged, NULL);
     /* Unregistering waits for a callback in progress, which takes serial_lock */
     if (serial_notification && serial_unregister_notification) {
         serial_unregister_notification(serial_notification);
         serial_notification = NULL;
     }
+    /* Every port starts its close at once, so the close sequences of
+       several ports run side by side and SDL_Quit waits for the longest
+       one, not their sum. The stop event is manual reset, so
+       SERIAL_StopPort setting it again changes nothing. */
+    SDL_LockMutex(serial_lock);
+    for (port = serial_ports; port; port = port->next) {
+        SetEvent(port->stop_event);
+    }
+    SDL_UnlockMutex(serial_lock);
     while (serial_ports) {
         SERIAL_StopPort(serial_ports, false);
     }

@@ -176,11 +176,17 @@ static void Engine_ClearPresence(SDL_SerialEngine *engine)
 static void Engine_Close(SDL_SerialEngine *engine)
 {
     if (engine->open) {
+        /* Nothing documents that closing a USB serial port ends a break, so
+           a break the engine holds ends first */
+        if (engine->breaking) {
+            (void)engine->ops->Escape(engine->userdata, SDL_SERIAL_CLRBREAK);
+        }
         engine->ops->Close(engine->userdata);
         engine->open = false;
     }
     engine->configured = false;
     engine->busy = false;
+    engine->breaking = false;
     Engine_ClearPresence(engine);
 }
 
@@ -280,10 +286,28 @@ static void Engine_Execute(SDL_SerialEngine *engine, const SDL_SerialAction *act
         }
         Engine_Done(engine, true);
         break;
+    case SDL_SERIAL_ACTION_BREAK:
+        if (!engine->ops->Escape(engine->userdata, action->on ? SDL_SERIAL_SETBREAK : SDL_SERIAL_CLRBREAK)) {
+            Engine_Lose(engine);
+            break;
+        }
+        engine->breaking = action->on;
+        Engine_Done(engine, true);
+        break;
     default:
         Engine_Done(engine, false);
         break;
     }
+}
+
+/* True once a close sequence is done and the port has closed */
+static bool Engine_CloseIfDone(SDL_SerialEngine *engine)
+{
+    if (engine->stopping && ((const SDL_SerialBase *)engine->state)->closed) {
+        Engine_Close(engine);
+        return true;
+    }
+    return false;
 }
 
 static void Engine_Pump(SDL_SerialEngine *engine)
@@ -294,6 +318,9 @@ static void Engine_Pump(SDL_SerialEngine *engine)
         SDL_SerialAction action;
         uint64_t deadline;
 
+        if (Engine_CloseIfDone(engine)) {
+            return;
+        }
         if (!engine->busy && engine->module->NextAction(engine->state, &action)) {
             Engine_Execute(engine, &action);
             continue;
@@ -304,6 +331,7 @@ static void Engine_Pump(SDL_SerialEngine *engine)
         }
         break;
     }
+    (void)Engine_CloseIfDone(engine);
 }
 
 static void Engine_TryOpen(SDL_SerialEngine *engine)
@@ -340,10 +368,15 @@ void SDL_SerialEngine_Run(SDL_SerialEngine *engine, uint64_t now_ns)
 {
     Engine_SetClock(engine, now_ns);
     if (!engine->open) {
-        if (engine->now < engine->retry_at) {
+        if (engine->stopping || engine->now < engine->retry_at) {
             return;
         }
         Engine_TryOpen(engine);
+    }
+    if (engine->stopping && engine->now >= engine->stop_at) {
+        /* The close sequence ran out of time */
+        Engine_Close(engine);
+        return;
     }
     Engine_Pump(engine);
 }
@@ -380,7 +413,7 @@ void SDL_SerialEngine_Lost(SDL_SerialEngine *engine, uint64_t now_ns)
 void SDL_SerialEngine_Rescan(SDL_SerialEngine *engine, uint64_t now_ns)
 {
     Engine_SetClock(engine, now_ns);
-    if (!engine->open) {
+    if (!engine->open && !engine->stopping) {
         engine->retry_at = engine->now;
         Engine_TryOpen(engine);
         Engine_Pump(engine);
@@ -390,7 +423,7 @@ void SDL_SerialEngine_Rescan(SDL_SerialEngine *engine, uint64_t now_ns)
 void SDL_SerialEngine_Output(SDL_SerialEngine *engine, const SDL_SerialOutput *request, uint64_t now_ns)
 {
     Engine_SetClock(engine, now_ns);
-    if (!SDL_SerialEngine_IsReading(engine) || !request) {
+    if (engine->stopping || !SDL_SerialEngine_IsReading(engine) || !request) {
         return;
     }
     engine->module->Output(engine->state, request, engine->now);
@@ -399,14 +432,23 @@ void SDL_SerialEngine_Output(SDL_SerialEngine *engine, const SDL_SerialOutput *r
 
 bool SDL_SerialEngine_GetDeadline(const SDL_SerialEngine *engine, uint64_t *deadline)
 {
+    bool have;
+
     if (!engine->open) {
+        if (engine->stopping) {
+            return false;
+        }
         *deadline = engine->retry_at;
         return true;
     }
     if (!engine->configured) {
         return false;
     }
-    return engine->module->GetDeadline(engine->state, deadline);
+    have = engine->module->GetDeadline(engine->state, deadline);
+    if (engine->stopping) {
+        SDL_Serial_EarlierDeadline(&have, deadline, engine->stop_at);
+    }
+    return have;
 }
 
 bool SDL_SerialEngine_IsReading(const SDL_SerialEngine *engine)
@@ -417,6 +459,31 @@ bool SDL_SerialEngine_IsReading(const SDL_SerialEngine *engine)
 void SDL_SerialEngine_Stop(SDL_SerialEngine *engine)
 {
     Engine_Close(engine);
+}
+
+bool SDL_SerialEngine_BeginStop(SDL_SerialEngine *engine, uint64_t now_ns)
+{
+    SDL_SerialBase *base = (SDL_SerialBase *)engine->state;
+
+    Engine_SetClock(engine, now_ns);
+    if (engine->stopping) {
+        return SDL_SerialEngine_IsStopping(engine);
+    }
+    engine->stopping = true;
+    if (!SDL_SerialEngine_IsReading(engine) || !base->close_sequence) {
+        Engine_Close(engine);
+        return false;
+    }
+    engine->stop_at = engine->now + SDL_SERIAL_CLOSE_MS;
+    base->closing = true;
+    engine->module->Tick(engine->state, engine->now);
+    Engine_Pump(engine);
+    return SDL_SerialEngine_IsStopping(engine);
+}
+
+bool SDL_SerialEngine_IsStopping(const SDL_SerialEngine *engine)
+{
+    return engine->stopping && engine->open;
 }
 
 static char Serial_Lower(char c)

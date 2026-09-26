@@ -178,6 +178,17 @@ bool SDL_Serial_QueueDrain(SDL_SerialBase *base, uint8_t tag)
     return Serial_AppendAction(base, SDL_SERIAL_ACTION_DRAIN, tag) != NULL;
 }
 
+bool SDL_Serial_QueueBreak(SDL_SerialBase *base, uint8_t tag, bool on)
+{
+    SDL_SerialAction *action = Serial_AppendAction(base, SDL_SERIAL_ACTION_BREAK, tag);
+
+    if (!action) {
+        return false;
+    }
+    action->on = on;
+    return true;
+}
+
 void SDL_Serial_ClearActions(SDL_SerialBase *base)
 {
     base->action_head = 0;

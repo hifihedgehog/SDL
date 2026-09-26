@@ -82,6 +82,30 @@
 #define SDL_JOYSTICK_HIDAPI_TRAIN
 #endif
 
+// The Namco USIO arcade I/O board on its vendor interface (hifihedgehog/SDL#33 Part 14)
+#define SDL_JOYSTICK_HIDAPI_USIO
+
+// Konami's P3IO, whose commands go through libusb (hifihedgehog/SDL#33 Part 14)
+#ifdef HAVE_LIBUSB
+#define SDL_JOYSTICK_HIDAPI_KONAMI_P3IO
+#endif
+
+// Konami's P4IO, whose commands go through libusb (hifihedgehog/SDL#33 Part 14)
+#ifdef HAVE_LIBUSB
+#define SDL_JOYSTICK_HIDAPI_KONAMI_P4IO
+#endif
+
+// The CH Products Multi-Function Panel and the Ergodex DX1 on their vendor
+// interfaces (hifihedgehog/SDL#33 Part 14)
+#define SDL_JOYSTICK_HIDAPI_CHMFP
+#define SDL_JOYSTICK_HIDAPI_ERGODEX
+
+// The TrackIR 2 and TrackIR 3 on their vendor interface (hifihedgehog/SDL#33 Part 14)
+#define SDL_JOYSTICK_HIDAPI_TRACKIR
+
+// Tacx trainer head units on their vendor interface (hifihedgehog/SDL#33 Part 14)
+#define SDL_JOYSTICK_HIDAPI_TACX
+
 // Joystick capability definitions
 #define SDL_JOYSTICK_CAP_MONO_LED       0x00000001
 #define SDL_JOYSTICK_CAP_RGB_LED        0x00000002
@@ -134,6 +158,9 @@ typedef struct SDL_HIDAPI_Device
     SDL_AtomicInt rumble_pending;
     int num_joysticks;
     SDL_JoystickID *joysticks;
+    // One joystick's name, or NULL to use name. A driver with several
+    // joysticks sets it, and the device clears it when its driver is released.
+    const char *(*GetJoystickName)(struct SDL_HIDAPI_Device *device, SDL_JoystickID instance_id);
 
     // Used during scanning for device changes
     bool seen;
@@ -223,6 +250,13 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverIForce;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverGunCon;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverTrain;
 extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverProdikeys;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverUSIO;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverKonamiP3IO;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverKonamiP4IO;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverCHMFP;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverErgodex;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverTrackIR;
+extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverTacx;
 
 #define LOAD16(A, B)       (Sint16)((Uint16)(A) | (((Uint16)(B)) << 8))
 #define LOAD32(A, B, C, D) ((((Uint32)(A)) << 0) |  \
