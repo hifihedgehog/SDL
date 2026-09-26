@@ -1078,6 +1078,13 @@ static const Device devices[] = {
     { "Xbox 360 wired pad", USB_VENDOR_MICROSOFT, 0x028E, 0, 0xFF, 0x5D, 0x01, true },
     { "Xbox 360 wireless receiver", USB_VENDOR_MICROSOFT, 0x0719, 0, 0xFF, 0x5D, 0x81, true },
     { "Xbox One pad", USB_VENDOR_MICROSOFT, 0x02EA, 0, 0xFF, 0x47, 0xD0, true },
+    /* Part 15: the wired pad's other interfaces, from Javan Cook's lsusb of
+     * 045E:028E at bcdDevice 1.14, and a receiver headset interface, from
+     * rombert's lsusb of 045E:0719. is_xbox360 takes none of them. */
+    { "Xbox 360 wired pad headset", USB_VENDOR_MICROSOFT, 0x028E, 1, 0xFF, 0x5D, 0x03, false },
+    { "Xbox 360 wired pad chatpad", USB_VENDOR_MICROSOFT, 0x028E, 2, 0xFF, 0x5D, 0x02, false },
+    { "Xbox 360 wired pad security", USB_VENDOR_MICROSOFT, 0x028E, 3, 0xFF, 0xFD, 0x13, false },
+    { "Xbox 360 receiver headset", USB_VENDOR_MICROSOFT, 0x0719, 1, 0xFF, 0x5D, 0x82, false },
     { "Vendor interface, no rule", 0x1234, 0x5678, 0, 0xFF, 0, 0, false },
     { "HID keyboard", 0x046D, 0xC31C, 0, 3, 1, 1, false },
     { "Gametrak", USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK, 0, 3, 0, 0, false },
@@ -1387,6 +1394,68 @@ static void TestRoutingTable(void)
     }
 }
 
+/* Part 15: WinUSB lets one handle open a device, so the enumeration's own
+ * open of an Xbox interface fails while this process holds any interface of
+ * the device. hid.c passes the interface as opened while that holder still
+ * reads, so the joystick layer keeps the pad it has open and finds the
+ * receiver's other slots. The wired pad's chatpad, headset and security
+ * interfaces, and the receiver's headset interfaces, are never enumerated. */
+static void TestHeldInterfaces(void)
+{
+    static const SDL_VendorUSBPlatform platforms[] = {
+        SDL_VENDORUSB_PLATFORM_OTHER, SDL_VENDORUSB_PLATFORM_WINDOWS, SDL_VENDORUSB_PLATFORM_MACOS
+    };
+    static const char *const others[] = {
+        "Xbox 360 wired pad headset", "Xbox 360 wired pad chatpad", "Xbox 360 wired pad security",
+        "Xbox 360 receiver headset"
+    };
+    const SDL_VendorUSBPlatform W = SDL_VENDORUSB_PLATFORM_WINDOWS;
+    size_t p, i;
+    int flags;
+
+    /* Only an Xbox interface on Windows that neither opened nor is held is
+       skipped */
+    for (p = 0; p < sizeof(platforms) / sizeof(platforms[0]); ++p) {
+        for (flags = 0; flags < 8; ++flags) {
+            const bool xbox = (flags & 1) != 0;
+            const bool opened = (flags & 2) != 0;
+            const bool held = (flags & 4) != 0;
+
+            CHECK(SDL_VendorUSB_SkipUnopened(platforms[p], xbox, opened || held) ==
+                  (platforms[p] == W && xbox && !opened && !held));
+        }
+    }
+
+    /* The wired pad and the receiver stay on libusb while this process
+       holds them */
+    {
+        const char *const held[] = { "Xbox 360 wired pad", "Xbox 360 wireless receiver" };
+
+        for (i = 0; i < sizeof(held) / sizeof(held[0]); ++i) {
+            const Device *d = Find(held[i]);
+            SDL_VendorUSBRouting r = Route(W, true, d);
+
+            CHECK(!SDL_VendorUSB_Ignore(&r));
+            CHECK(SDL_VendorUSB_IsCandidate(W, d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol, d->xbox));
+            CHECK(NewLibUSBEnumerates(&r, d, true));
+            CHECK(!NewLibUSBEnumerates(&r, d, false));
+        }
+    }
+
+    for (p = 0; p < sizeof(platforms) / sizeof(platforms[0]); ++p) {
+        for (i = 0; i < sizeof(others) / sizeof(others[0]); ++i) {
+            const Device *d = Find(others[i]);
+            SDL_VendorUSBRouting r = Route(platforms[p], true, d);
+
+            CHECK(!OnLibUSB(platforms[p], others[i], true));
+            r.whitelist = false;
+            CHECK(!NewLibUSBEnumerates(&r, d, true));
+            CHECK(!SDL_VendorUSB_IsCandidate(platforms[p], d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol, d->xbox));
+            CHECK(SDL_VendorUSB_FindRule(d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol) == NULL);
+        }
+    }
+}
+
 /* Part 14: Konami's P4IO, whose input comes on the interrupt endpoint behind
  * its bulk IN endpoint */
 static void TestKonamiP4IO(void)
@@ -1549,6 +1618,7 @@ int main(void)
     TestReadSize();
     TestEarlierRules();
     TestRoutingTable();
+    TestHeldInterfaces();
     TestKonamiP4IO();
     TestAgainstOldRules();
     printf("%s: %d checks, %d failures\n", failures ? "FAILED" : "PASSED", checks, failures);
