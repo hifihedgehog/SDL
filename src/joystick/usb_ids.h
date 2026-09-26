@@ -53,6 +53,7 @@
 #define USB_VENDOR_HYPERKIN     0x2e24
 #define USB_VENDOR_IN2GAMES     0x14b7
 #define USB_VENDOR_INTEL        0x8086
+#define USB_VENDOR_ION          0x15e4
 #define USB_VENDOR_KONAMI       0x1ccf
 #define USB_VENDOR_LOGITECH     0x046d
 #define USB_VENDOR_MADCATZ      0x0738
@@ -156,6 +157,7 @@
 #define USB_PRODUCT_HORI_STEAM_CONTROLLER_BT              0x0196
 #define USB_PRODUCT_INTEL_WIRELESS_SERIES                 0xc013
 #define USB_PRODUCT_IN2GAMES_GAMETRAK                     0x0982
+#define USB_PRODUCT_ION_ICADE                             0x0132 // Over Bluetooth, as Linux matches it
 #define USB_PRODUCT_KONAMI_P3IO                           0x8008 // DDR SuperNova 2 and DDR X cabinets
 #define USB_PRODUCT_KONAMI_P4IO                           0x8010 // jubeat and DDR White cabinets
 #define USB_PRODUCT_KONAMI_BIO2_8040                      0x8040 // BIO2, a COM port on Windows' USB serial driver

@@ -2783,6 +2783,9 @@ elseif(WINDOWS OR CYGWIN)
     # PadForge fork: Bluetooth RFCOMM controllers, whose driver and modules
     # the Windows joystick glob takes (hifihedgehog/SDL#33 Part 11)
     set(SDL_JOYSTICK_RFCOMM 1)
+    # PadForge fork: the ION iCade and pads in iCade mode, whose driver and
+    # decoder the Windows joystick glob takes (hifihedgehog/SDL#33 Part 16)
+    set(SDL_JOYSTICK_ICADE 1)
     if(HAVE_GAMEINPUT_H)
       sdl_glob_sources("${SDL3_SOURCE_DIR}/src/joystick/gdk/*.cpp")
       set(SDL_JOYSTICK_GAMEINPUT 1)

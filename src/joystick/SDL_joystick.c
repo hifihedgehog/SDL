@@ -80,6 +80,9 @@ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
 #ifdef SDL_JOYSTICK_RFCOMM // PadForge fork: Bluetooth RFCOMM controllers (issue #33)
     &SDL_RFCOMM_JoystickDriver,
 #endif
+#ifdef SDL_JOYSTICK_ICADE // PadForge fork: the ION iCade and pads in iCade mode (issue #33)
+    &SDL_ICADE_JoystickDriver,
+#endif
 #ifdef SDL_JOYSTICK_WINMM
     &SDL_WINMM_JoystickDriver,
 #endif
@@ -3686,6 +3689,23 @@ bool SDL_IsJoystickSERIAL(SDL_GUID guid)
     return (guid.data[14] == 's') ? true : false;
 }
 
+bool SDL_IsJoystickICADE(SDL_GUID guid)
+{
+    return (guid.data[14] == 'i') ? true : false;
+}
+
+#ifndef SDL_JOYSTICK_ICADE
+/* PadForge fork: the export exists in every build, and without the iCade
+   driver no keyboard is an iCade */
+bool SDL_ICadeProcessRawKeyboard(void *device_handle, Uint16 make_code, Uint16 flags)
+{
+    (void)device_handle;
+    (void)make_code;
+    (void)flags;
+    return false;
+}
+#endif
+
 bool SDL_IsJoystickBLEGATT(SDL_GUID guid)
 {
     return (guid.data[14] == 'l') ? true : false;
@@ -3797,6 +3817,10 @@ static SDL_JoystickType SDL_GetJoystickGUIDType(SDL_GUID guid)
     }
 
     if (SDL_IsJoystickSERIAL(guid)) {
+        return (SDL_JoystickType)guid.data[15];
+    }
+
+    if (SDL_IsJoystickICADE(guid)) {
         return (SDL_JoystickType)guid.data[15];
     }
 

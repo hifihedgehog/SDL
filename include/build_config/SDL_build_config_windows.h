@@ -238,6 +238,8 @@ typedef unsigned int uintptr_t;
 #define SDL_JOYSTICK_DJI_TCP 1
 // PadForge fork: Bluetooth RFCOMM controllers (hifihedgehog/SDL#33 Part 11)
 #define SDL_JOYSTICK_RFCOMM 1
+// PadForge fork: the ION iCade and pads in iCade mode (hifihedgehog/SDL#33 Part 16)
+#define SDL_JOYSTICK_ICADE 1
 #define SDL_JOYSTICK_XINPUT 1
 #define SDL_HAPTIC_DINPUT 1
 
