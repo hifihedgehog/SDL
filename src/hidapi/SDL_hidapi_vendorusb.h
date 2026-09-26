@@ -51,6 +51,11 @@ typedef enum SDL_VendorUSBPlatform
 #define SDL_VENDORUSB_WINDOWS_ONLY 0x04
 /* With SDL_VENDORUSB_MATCH_CLASS: any protocol matches */
 #define SDL_VENDORUSB_ANY_PROTOCOL 0x08
+/* Input comes on an interrupt endpoint. With in_endpoint 0 the first
+ * interrupt IN endpoint is taken and bulk IN endpoints are passed over. A
+ * named in_endpoint must be an interrupt endpoint too, or nothing is
+ * selected. */
+#define SDL_VENDORUSB_IN_INTERRUPT 0x10
 
 /* One vendor interface of one device. */
 typedef struct SDL_VendorUSBRule
@@ -67,6 +72,18 @@ typedef struct SDL_VendorUSBRule
     uint8_t out_endpoint; /* 0 takes the first interrupt or bulk OUT endpoint, which is then optional */
     uint16_t in_size;     /* Required packet size, bits 0 to 10 of wMaxPacketSize, or 0 for any */
     uint16_t out_size;
+    /* Bytes read per transfer on a bulk IN endpoint, or 0 to read
+     * wMaxPacketSize as every other interface is read. A bulk transfer ends
+     * at a short packet or a full buffer (USB 2.0 section 5.8.3), so one read
+     * returns what the device sent up to its next short packet. The size must
+     * be a whole number of packets, or the device's last packet can overrun
+     * the read, which libusb reports as an overflow (libusb io.c, "Packets
+     * and overflows") and WinUSB carries into the next read. Nothing is
+     * selected when it is not. An interrupt IN endpoint ignores the size. Its
+     * transfers end the same way but move their packets at the pipe's polling
+     * interval (USB 2.0 section 5.7.3), so a longer read would hold each
+     * full-size report back and return several at once. */
+    uint16_t read_size;
 } SDL_VendorUSBRule;
 
 /* The rule for this interface, or NULL. */
@@ -139,8 +156,9 @@ typedef struct SDL_VendorUSBEndpoint
     uint8_t address;          /* 0 when absent */
     uint8_t transfer;         /* SDL_VENDORUSB_TRANSFER_BULK or _INTERRUPT */
     uint16_t max_packet_size; /* Bits 0 to 10 of wMaxPacketSize, which a rule's size matches */
-    uint16_t read_size;       /* wMaxPacketSize as the descriptor gives it. The backend reads
-                                 this many bytes, as it does for every other interface. */
+    uint16_t read_size;       /* The bytes the backend reads per IN transfer: the rule's read_size
+                                 on a bulk IN endpoint, otherwise wMaxPacketSize as the descriptor
+                                 gives it, as the backend reads every other interface. */
 } SDL_VendorUSBEndpoint;
 
 typedef struct SDL_VendorUSBSelection
@@ -152,10 +170,12 @@ typedef struct SDL_VendorUSBSelection
 
 /* Walks one interface's descriptors, every alternate setting in order, the
  * way a configuration descriptor carries them. Selects the rule's alternate
- * and its endpoints. Control and isochronous endpoints are never selected.
- * Fails on a descriptor that is shorter than its type needs, has a length
- * below 2, or runs past the given length, and when the alternate or a
- * required endpoint is missing. Reads nothing at or past the given length. */
+ * and its endpoints. Control and isochronous endpoints are never selected,
+ * and bulk IN endpoints are not under SDL_VENDORUSB_IN_INTERRUPT. Fails on a
+ * descriptor that is shorter than its type needs, has a length below 2, or
+ * runs past the given length, when the alternate or a required endpoint is
+ * missing, and when the rule's read_size is not a whole number of the bulk
+ * IN endpoint's packets. Reads nothing at or past the given length. */
 extern bool SDL_VendorUSB_SelectEndpoints(const SDL_VendorUSBRule *rule, uint8_t interface_number,
                                           const uint8_t *descriptors, size_t length,
                                           SDL_VendorUSBSelection *selection);

@@ -37,6 +37,11 @@
  *   the pulse emits a released snapshot and a pressed one, then restarts the
  *   pulse, so event consumers see every press and state pollers see a held
  *   button.
+ * - A module whose device must hear from the host before its port closes
+ *   sets close_sequence in its base while that holds. When the port is to
+ *   close, the engine sets closing and calls Tick, where the module queues
+ *   what must go out. The engine runs the actions and the deadlines until
+ *   the module sets closed, then closes the port.
  */
 
 #ifndef SDL_serial_proto_h_
@@ -69,6 +74,8 @@
 #define SDL_SERIAL_TYPE_WHEEL        2
 #define SDL_SERIAL_TYPE_ARCADE_STICK 3
 #define SDL_SERIAL_TYPE_FLIGHT_STICK 4
+#define SDL_SERIAL_TYPE_DANCE_PAD    5
+#define SDL_SERIAL_TYPE_DRUM_KIT     7
 
 typedef enum SDL_SerialParity
 {
@@ -101,7 +108,8 @@ typedef enum SDL_SerialActionKind
     SDL_SERIAL_ACTION_SET_LINE,  /* line: every field */
     SDL_SERIAL_ACTION_SET_MODEM, /* line.dtr and line.rts only */
     SDL_SERIAL_ACTION_WRITE,     /* data, length */
-    SDL_SERIAL_ACTION_DRAIN      /* returns once written bytes have left the host */
+    SDL_SERIAL_ACTION_DRAIN,     /* returns once written bytes have left the host */
+    SDL_SERIAL_ACTION_BREAK      /* on: true holds the line in a break, false ends it */
 } SDL_SerialActionKind;
 
 typedef struct SDL_SerialAction
@@ -109,6 +117,7 @@ typedef struct SDL_SerialAction
     SDL_SerialActionKind kind;
     uint8_t tag; /* Module-defined, handed back when the action is done */
     SDL_SerialLine line;
+    bool on;
     size_t length;
     uint8_t data[SDL_SERIAL_MAX_WRITE];
 } SDL_SerialAction;
@@ -209,6 +218,11 @@ typedef struct SDL_SerialBase
 
     SDL_SerialSnapshot snapshots[SDL_SERIAL_MAX_SUBDEVICES];
     uint64_t pulse_end[SDL_SERIAL_MAX_SUBDEVICES][SDL_SERIAL_MAX_BUTTONS]; /* 0 when not pulsing */
+
+    /* The close sequence, see above */
+    bool close_sequence; /* Set by the module */
+    bool closing;        /* Set by the engine */
+    bool closed;         /* Set by the module when its sequence is done */
 } SDL_SerialBase;
 
 /* The entry points. state points to the module's state, which begins with an
@@ -256,6 +270,7 @@ extern bool SDL_Serial_QueueLine(SDL_SerialBase *base, uint8_t tag, const SDL_Se
 extern bool SDL_Serial_QueueModem(SDL_SerialBase *base, uint8_t tag, bool dtr, bool rts);
 extern bool SDL_Serial_QueueWrite(SDL_SerialBase *base, uint8_t tag, const uint8_t *data, size_t length);
 extern bool SDL_Serial_QueueDrain(SDL_SerialBase *base, uint8_t tag);
+extern bool SDL_Serial_QueueBreak(SDL_SerialBase *base, uint8_t tag, bool on);
 /* Replaces the data of a queued write that has not been taken yet, found by
  * its tag, so repeated output requests collapse into the latest. False when
  * no such write waits. */

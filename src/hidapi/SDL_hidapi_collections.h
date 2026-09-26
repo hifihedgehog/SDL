@@ -43,8 +43,9 @@
  * keyboard, pens and touch) are never admitted. */
 extern bool SDL_HIDAPI_IsAdmittedCollection(uint16_t vendor, uint16_t product, uint16_t usage_page, uint16_t usage);
 
-/* The devices of this group that stay joysticks, with no gamepad mapping.
- * The Speed Force Wireless goes on the wheel list instead. */
+/* The devices that stay joysticks, with no gamepad mapping, whatever
+ * interface SDL reads them on. The Speed Force Wireless goes on the wheel
+ * list instead. */
 extern bool SDL_HIDAPI_IsJoystickOnlyDevice(uint16_t vendor, uint16_t product);
 
 /* The report IDs a report descriptor declares, one bit per ID. A descriptor

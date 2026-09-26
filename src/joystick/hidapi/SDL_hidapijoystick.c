@@ -175,6 +175,27 @@ static SDL_HIDAPI_DeviceDriver *SDL_HIDAPI_drivers[] = {
 #ifdef SDL_JOYSTICK_HIDAPI_TRAIN
     &SDL_HIDAPI_DriverTrain,
 #endif
+#ifdef SDL_JOYSTICK_HIDAPI_USIO
+    &SDL_HIDAPI_DriverUSIO,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_KONAMI_P3IO
+    &SDL_HIDAPI_DriverKonamiP3IO,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_KONAMI_P4IO
+    &SDL_HIDAPI_DriverKonamiP4IO,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_CHMFP
+    &SDL_HIDAPI_DriverCHMFP,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_ERGODEX
+    &SDL_HIDAPI_DriverErgodex,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_TRACKIR
+    &SDL_HIDAPI_DriverTrackIR,
+#endif
+#ifdef SDL_JOYSTICK_HIDAPI_TACX
+    &SDL_HIDAPI_DriverTacx,
+#endif
 };
 static int SDL_HIDAPI_numdrivers = 0;
 static SDL_AtomicInt SDL_HIDAPI_updating_devices;
@@ -571,6 +592,8 @@ static void HIDAPI_CleanupDeviceDriver(SDL_HIDAPI_Device *device)
         device->driver->FreeDevice(device);
     }
     device->driver = NULL;
+    // The joystick names come from the driver's context, freed below
+    device->GetJoystickName = NULL;
 
     if (device->dev) {
         SDL_hid_close(device->dev);
@@ -1511,11 +1534,20 @@ static SDL_JoystickDevice *HIDAPI_CreateJoystickDevice(SDL_HIDAPI_Device *entry,
     }
 
     if (joystickID) {
+        const char *name = entry->name;
+
         device->instance_id = joystickID;
         device->unique_id = &device->instance_id;
         device->unique_id_len = sizeof(device->instance_id);
 
-        device->name = SDL_strdup(entry->name);
+        if (entry->GetJoystickName) {
+            // A device with several joysticks can name each one (hifihedgehog/SDL#33 Part 14)
+            const char *joystick_name = entry->GetJoystickName(entry, joystickID);
+            if (joystick_name) {
+                name = joystick_name;
+            }
+        }
+        device->name = SDL_strdup(name);
         if (!device->name) {
             SDL_DestroyJoystickDevice(device);
             return NULL;
