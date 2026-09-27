@@ -55,6 +55,7 @@ typedef struct TestSink
     int player_calls[SDL_USIO_MAX_PLAYERS];
     SDL_USIOControls last[SDL_USIO_MAX_PLAYERS];
     int logs;
+    char last_log[128];
     SDL_USIOLayout layout;
 } TestSink;
 
@@ -97,6 +98,9 @@ static void TestLog(void *userdata, const char *text)
 
     CHECK(text != NULL && text[0] != '\0');
     ++sink->logs;
+    if (text) {
+        snprintf(sink->last_log, sizeof(sink->last_log), "%s", text);
+    }
 }
 
 static SDL_USIOSink Sink(TestSink *sink, SDL_USIOLayout layout)
@@ -1186,6 +1190,8 @@ static void TestIdentification(void)
         CHECK(Expect(&state, 0, 0x1800, IDENT_LENGTH, &sink));
         FeedPackets(&state, other, IDENT_LENGTH, 0, &sink);
         CHECK(test.connects == 0 && state.phase == SDL_USIO_PHASE_REJECTED && test.logs >= 2);
+        /* The board stays open, so the line says what stops */
+        CHECK(strcmp(test.last_log, "0B9A:0900 is not a USIO: no more commands and no joysticks") == 0);
         for (now = 0; now < 3600000 * MS; now += 60000 * MS) {
             SDL_USIO_Tick(&state, now, &sink);
             CHECK(!SDL_USIO_NextCommand(&state, now, command));
@@ -1431,6 +1437,28 @@ static void TestTiming(void)
     /* A done with nothing out does nothing */
     SDL_USIO_CommandDone(&state, -1, t + 2 * SDL_USIO_QUIET_NS, &sink);
     CHECK(state.failures == 1);
+
+    /* The driver learns a write's result one update after it hands the
+       command out, so the reply can be whole first. The reply is used, and
+       the result that follows changes nothing, a failed one included. */
+    t = t0 + 4000 * MS;
+    CHECK(SDL_USIO_NextCommand(&state, t, command));
+    FeedPackets(&state, block, TAIKO_LENGTH, t, &sink);
+    CHECK(!state.waiting && state.failures == 0 && !state.quiet);
+    SDL_USIO_CommandDone(&state, 6, t + MS, &sink);
+    CHECK(!state.waiting && state.failures == 0 && !state.quiet);
+    CHECK(SDL_USIO_NextCommand(&state, t + MS, command));
+    FeedPackets(&state, block, TAIKO_LENGTH, t + MS, &sink);
+    SDL_USIO_CommandDone(&state, -1, t + 2 * MS, &sink);
+    CHECK(!state.waiting && state.failures == 0 && !state.quiet && test.connected);
+    /* A read the reply timeout abandoned while its write was blocked counts
+       once, when the timeout abandons it, and the failed result that comes
+       later counts nothing */
+    CHECK(SDL_USIO_NextCommand(&state, t + 2 * MS, command));
+    SDL_USIO_Tick(&state, t + 2 * MS + SDL_USIO_REPLY_TIMEOUT_NS, &sink);
+    CHECK(!state.waiting && state.failures == 1 && state.quiet);
+    SDL_USIO_CommandDone(&state, -1, t + 1002 * MS, &sink);
+    CHECK(state.failures == 1 && state.quiet_until == t + 2 * MS + SDL_USIO_REPLY_TIMEOUT_NS + SDL_USIO_QUIET_NS);
 
     /* Two abandoned reads keep the joysticks, and a whole reply clears the
        count. Three in a row disconnect them, and the module starts over

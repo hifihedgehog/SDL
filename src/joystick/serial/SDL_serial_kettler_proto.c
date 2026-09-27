@@ -149,7 +149,9 @@ static void Kettler_Tick(void *state, uint64_t now)
     switch (s->step) {
     case SDL_KETTLER_STEP_SETUP:
         if (now >= s->next_at) {
-            /* Each command 150 ms after the one before it left */
+            /* Each command 150 ms after the Tick that queued the one before
+               it, as KettlerBLE and kettlerUSB2BLE time theirs from the
+               write call */
             Kettler_Command(s, kettler_setup[s->command], 0);
             if (++s->command == SDL_KETTLER_COMMANDS) {
                 /* The first ST is due 2000 ms after SP1 */

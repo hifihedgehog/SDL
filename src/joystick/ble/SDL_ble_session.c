@@ -220,6 +220,7 @@ void SDL_BLEHost_SessionEnded(SDL_BLEHost *host, uint64_t address, const SDL_BLE
     if (outcome->published) {
         entry->failures = 0;
         entry->pairing_failures = 0;
+        entry->removal_losses = 0;
         entry->until = 0;
     }
     if (outcome->pairing_failed) {
@@ -234,6 +235,22 @@ void SDL_BLEHost_SessionEnded(SDL_BLEHost *host, uint64_t address, const SDL_BLE
             ++entry->pairing_failures;
         }
         if (entry->pairing_failures >= SDL_BLE_PAIRING_TRIES) {
+            backoff = true;
+        }
+    }
+    if (outcome->removal_lost) {
+        /* Unpairing can drop the link (bleak client.py:643), and after a
+           removal that worked the next session starts without the bond, so
+           the first two losses are retried at the next advertisement. A
+           session that finds the bond again, as when the removal failed as
+           the link dropped, would otherwise remove it on every
+           advertisement, so from the third loss on the address waits out
+           the schedule. The count is its own, so a removal that worked
+           leaves every pairing try to the next sessions. */
+        if (entry->removal_losses < 255) {
+            ++entry->removal_losses;
+        }
+        if (entry->removal_losses >= SDL_BLE_PAIRING_TRIES) {
             backoff = true;
         }
     }
@@ -266,6 +283,16 @@ void SDL_BLEHost_SessionEnded(SDL_BLEHost *host, uint64_t address, const SDL_BLE
            (OculusGo-Air-Mouse-4-macOS main.swift:616-630). */
         entry->until = now + SDL_BLE_CONNECT_RETRY_MS;
     }
+    if (entry->restart_on_end) {
+        /* The session began before SDL_BLEHost_ClearBackoff, so nothing it
+           earned applies: a session made with pairing off ends with a
+           backoff that says nothing once pairing is on */
+        entry->restart_on_end = false;
+        entry->until = 0;
+        entry->failures = 0;
+        entry->pairing_failures = 0;
+        entry->removal_losses = 0;
+    }
 }
 
 void SDL_BLEHost_ClearBackoff(SDL_BLEHost *host)
@@ -275,10 +302,13 @@ void SDL_BLEHost_ClearBackoff(SDL_BLEHost *host)
     for (i = 0; i < host->count; ++i) {
         SDL_BLEHostEntry *entry = &host->entries[i];
 
-        if (!entry->active) {
+        if (entry->active) {
+            entry->restart_on_end = true;
+        } else {
             entry->until = 0;
             entry->failures = 0;
             entry->pairing_failures = 0;
+            entry->removal_losses = 0;
         }
     }
 }
@@ -660,6 +690,7 @@ void SDL_BLESession_GetOutcome(const SDL_BLESession *session, SDL_BLEOutcome *ou
     outcome->published = session->published;
     outcome->pairing_failed = session->pairing_failed;
     outcome->connect_failed = session->connect_failed;
+    outcome->removal_lost = session->removal_lost;
 }
 
 /* True when the answer belongs to the session as it stands. An answer to an
@@ -916,19 +947,30 @@ void SDL_BLESession_Lost(SDL_BLESession *session, uint64_t now)
            start-up would be connected again at its next advertisement, each
            time with two threads and a GattSession. A loss in the repairing
            phase, while a bond is removed or a pairing runs after a failed
-           subscription, frees the address at once: removing a bond can drop
-           the link (bleak client.py:643 says unpairing disconnects), and the
-           Oculus Go can drop it while pairing (OculusGo-Air-Mouse-4-macOS
-           README.md:49), so the next session pairs afresh without a wait. */
+           subscription, does not wait SDL_BLE_CONNECT_RETRY_MS: removing a
+           bond can drop the link (bleak client.py:643 says unpairing
+           disconnects), and the Oculus Go can drop it while pairing
+           (OculusGo-Air-Mouse-4-macOS README.md:49), so the next session
+           pairs afresh at once. Such a loss counts toward the schedule
+           instead, below. */
         session->connect_failed = true;
     }
     if (session->waiting && session->answer == SDL_BLE_ACTION_PAIR) {
-        /* The link dropped while a pairing was out, and the driver takes a
-           loss before any answer, so the pairing's own failure never comes.
-           It counts as a failed pairing, so a device that drops its link
-           whenever it pairs still waits out the schedule from the third
-           try, as one that refuses the pairing does. */
+        /* The link dropped while a pairing was out. The driver takes a loss
+           before the pairing's answer unless that answer is a success
+           already posted (BLEGATT_TakeEnds), so a failure of the pairing is
+           never taken. The loss counts as a failed pairing, so a device
+           that drops its link whenever it pairs still waits out the
+           schedule from the third try, as one that refuses the pairing
+           does. */
         session->pairing_failed = true;
+    }
+    if (session->waiting && session->answer == SDL_BLE_ACTION_REMOVE_BOND) {
+        /* The link dropped while a bond removal was out. The host counts
+           such losses, so a device whose removal never takes waits out the
+           schedule from the third, where it would otherwise be connected
+           and have its bond removed on every advertisement. */
+        session->removal_lost = true;
     }
     BLE_End(session, false, now);
 }
@@ -966,6 +1008,7 @@ void SDL_BLESession_Tick(SDL_BLESession *session, uint64_t now)
            module's timers, so a timer due at the same time sends nothing to
            a device about to be released. A ready module is not ended: the
            pump below publishes it. */
+        SDL_BLE_Log(BLE_Base(session), "no input 30 s after the start-up began, giving up");
         BLE_End(session, true, now);
         return;
     }

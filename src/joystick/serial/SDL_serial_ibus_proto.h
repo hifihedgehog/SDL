@@ -47,7 +47,7 @@ typedef struct SDL_IBusState
     int length;
     bool timer;
     uint64_t deadline;
-    int bad_frames;
+    int bad_frames; /* Frames whose checksum failed */
 } SDL_IBusState;
 
 extern const SDL_SerialModule SDL_SerialIBusModule;

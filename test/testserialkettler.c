@@ -84,6 +84,24 @@ static void TestStartup(void)
     }
     CHECK(h->presence[0] == 1);
     H_Destroy(h);
+
+    /* The spacing runs from the Tick that queued each command, so a write
+       the port holds back delays only itself */
+    h = H_Create(&SDL_SerialKettlerModule);
+    h->pend_writes = true;
+    H_Start(h);
+    CHECK(H_ExpectOpened(h, 9600, 8, SDL_SERIAL_NOPARITY, 1, 0) && H_IsWriteText(H_NextCall(h), "VE\r\n", 0));
+    H_Advance(h, 200);
+    CHECK(H_NextCall(h) == NULL);
+    H_CompleteWrite(h, true);
+    CHECK(H_IsWriteText(H_NextCall(h), "ID\r\n", 200));
+    H_Advance(h, 210);
+    H_CompleteWrite(h, true);
+    H_Advance(h, 299);
+    CHECK(H_NextCall(h) == NULL);
+    H_Advance(h, 300);
+    CHECK(H_IsWriteText(H_NextCall(h), "VE\r\n", 300));
+    H_Destroy(h);
 }
 
 static void TestLines(void)

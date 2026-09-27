@@ -602,6 +602,7 @@ static void Test7(void)
 {
     BH_Harness *h;
     Mark mark;
+    uint64_t deadline;
     int index;
 
     Section("Test 7: start-up");
@@ -646,6 +647,96 @@ static void Test7(void)
     CHECK(Unchanged(h, &mark));
     Data(h, sensor_mode, 2);
     CHECK(Unchanged(h, &mark) && h->published == 0);
+    BH_Destroy(h);
+
+    /* The 4 s run from the 08 00 write's completion, where gearvr.py:158-168
+       starts its wait. No timer runs while the write is out. It completes at
+       +2600 ms, and the echo 1580 ms after that still leads to 01 00. */
+    h = Create(false);
+    h->now = 5000;
+    BH_Start(h, false);
+    CHECK(Writes(h) == 1 && IsCommand(h, WriteAt(h, 0), vr_mode, 5000) && h->session.waiting);
+    CHECK(!SDL_BLEGearVRModule.GetDeadline(h->state, &deadline));
+    h->now = 7600;
+    BH_Written(h, true);
+    CHECK(SDL_BLEGearVRModule.GetDeadline(h->state, &deadline) && deadline == 7600 + SDL_GEARVR_ACK_WAIT_MS);
+    BH_Advance(h, 9179);
+    CHECK(Writes(h) == 1 && State(h)->phase == SDL_GEARVR_WAIT_ACK);
+    BH_Advance(h, 9180);
+    Data(h, vr_mode, 2);
+    CHECK(Writes(h) == 2 && IsCommand(h, WriteAt(h, 1), sensor_mode, 9180));
+    BH_Destroy(h);
+
+    /* A write that fails starts the 4 s too */
+    h = Create(false);
+    h->now = 5000;
+    BH_Start(h, false);
+    h->now = 6000;
+    BH_Written(h, false);
+    BH_Advance(h, 9999);
+    CHECK(Writes(h) == 1);
+    BH_Advance(h, 10000);
+    CHECK(Writes(h) == 2 && IsCommand(h, WriteAt(h, 1), sensor_mode, 10000));
+    BH_Destroy(h);
+
+    /* The 3 s without a packet run from the 01 00 write's completion, so a
+       slow 01 00 write cannot restart the start-up before the first packet */
+    h = Started(5000);
+    BH_Advance(h, 6580);
+    BH_Value(h, SDL_GEARVR_DATA, vr_mode, 2, false);
+    CHECK(Writes(h) == 2 && IsCommand(h, WriteAt(h, 1), sensor_mode, 6580) && h->session.waiting);
+    BH_Advance(h, 9580);
+    CHECK(Writes(h) == 2 && State(h)->restarts == 0);
+    h->now = 9600;
+    BH_Written(h, true);
+    CHECK(SDL_BLEGearVRModule.GetDeadline(h->state, &deadline) && deadline == 9600 + SDL_GEARVR_SILENCE_MS);
+    BH_Advance(h, 12599);
+    CHECK(Writes(h) == 2);
+    BH_Advance(h, 12600);
+    CHECK(Writes(h) == 3 && IsCommand(h, WriteAt(h, 2), vr_mode, 12600) && State(h)->restarts == 1);
+    BH_Destroy(h);
+
+    /* A restart's 08 00 queued behind a keep-alive that is still out: the
+       keep-alive's answer starts nothing, and the 4 s run from the answer
+       of the 08 00 */
+    h = Published(0);
+    Stream(h, 11579, Packet("idle"));
+    h->now = 11580;
+    Data(h, Packet("idle"), PACKET);
+    SDL_BLESession_Tick(&h->session, h->now);
+    BH_Drain(h);
+    CHECK(Writes(h) == 3 && IsCommand(h, WriteAt(h, 2), keep_alive, 11580) && h->session.waiting);
+    h->now = 14580;
+    SDL_BLESession_Tick(&h->session, h->now);
+    BH_Drain(h);
+    CHECK(Writes(h) == 3 && State(h)->phase == SDL_GEARVR_WAIT_ACK && State(h)->restarts == 1);
+    h->now = 15000;
+    BH_Written(h, true);
+    CHECK(Writes(h) == 4 && IsCommand(h, WriteAt(h, 3), vr_mode, 15000));
+    CHECK(!SDL_BLEGearVRModule.GetDeadline(h->state, &deadline));
+    h->now = 16000;
+    BH_Written(h, true);
+    BH_Advance(h, 19999);
+    CHECK(Writes(h) == 4);
+    BH_Advance(h, 20000);
+    CHECK(Writes(h) == 5 && IsCommand(h, WriteAt(h, 4), sensor_mode, 20000));
+    BH_Destroy(h);
+
+    /* The echo before the 08 00 write's answer: 01 00 follows the echo, and
+       the answer of the 08 00 after it starts no timer */
+    h = Create(false);
+    h->now = 5000;
+    BH_Start(h, false);
+    h->now = 6560;
+    BH_Value(h, SDL_GEARVR_DATA, vr_mode, 2, false);
+    CHECK(State(h)->phase == SDL_GEARVR_STREAMING && Writes(h) == 1);
+    h->now = 6570;
+    BH_Written(h, true);
+    CHECK(Writes(h) == 2 && IsCommand(h, WriteAt(h, 1), sensor_mode, 6570) && h->session.waiting);
+    CHECK(SDL_BLEGearVRModule.GetDeadline(h->state, &deadline) && deadline == 6560 + SDL_GEARVR_KEEPALIVE_MS);
+    h->now = 6600;
+    BH_Written(h, true);
+    CHECK(SDL_BLEGearVRModule.GetDeadline(h->state, &deadline) && deadline == 6600 + SDL_GEARVR_SILENCE_MS);
     BH_Destroy(h);
 }
 
@@ -1156,7 +1247,7 @@ static void TestEchoes(void)
     CHECK(Unchanged(h, &mark));
     BH_Destroy(h);
 
-    /* An echo before the start-up is not an acknowledgement */
+    /* An echo before the start-up is not an acknowledgment */
     h = Create(false);
     BH_Connected(h, true, false);
     BH_Discovered(h, true, NULL);
@@ -1402,7 +1493,7 @@ static void TestSilence(void)
     BH_Harness *h;
     const SDL_BLEControls *c;
     Mark mark;
-    int n;
+    int n, logs;
 
     Section("Decision: silence");
     Held(held);
@@ -1490,8 +1581,11 @@ static void TestSilence(void)
     BH_Advance(h, 18599);
     CHECK(Writes(h) == 6 && h->published == 1 && !SDL_BLESession_Ended(&h->session));
     n = h->nactions;
+    logs = bh_log_lines;
     BH_Advance(h, 18600);
     CHECK(Writes(h) == 6 && SDL_BLESession_Ended(&h->session) && h->session.backoff && h->published == 0);
+    /* One line gives the reason */
+    BH_CHECK(bh_log_lines == logs + 1, "%d log lines at the give-up", bh_log_lines - logs);
     CHECK(h->nactions == n + 3 && h->actions[n].action.kind == SDL_BLE_ACTION_REMOVE &&
           h->actions[n + 1].action.kind == SDL_BLE_ACTION_BACKOFF &&
           h->actions[n + 2].action.kind == SDL_BLE_ACTION_DISCONNECT && h->actions[n + 2].now == 18600);
@@ -1502,10 +1596,14 @@ static void TestSilence(void)
     /* A start-up that never streams, the echo late every time: the same
        three silences, with the joystick never published, well before the
        session's start timeout */
+    logs = bh_log_lines;
     h = Started(0);
     BH_Advance(h, 3999);
     CHECK(Writes(h) == 1);
+    BH_Advance(h, 20999);
+    BH_CHECK(bh_log_lines == logs, "%d log lines before the give-up", bh_log_lines - logs);
     BH_Advance(h, 21000);
+    BH_CHECK(bh_log_lines == logs + 1, "%d log lines at the give-up", bh_log_lines - logs);
     CHECK(Writes(h) == 6 && IsCommand(h, WriteAt(h, 1), sensor_mode, 4000) && IsCommand(h, WriteAt(h, 2), vr_mode, 7000));
     CHECK(IsCommand(h, WriteAt(h, 3), sensor_mode, 11000) && IsCommand(h, WriteAt(h, 4), vr_mode, 14000));
     CHECK(IsCommand(h, WriteAt(h, 5), sensor_mode, 18000));
@@ -2061,7 +2159,7 @@ static void ReplayVRFirst(const Capture *capture)
         BH_Advance(h, ms);
         BH_Value(h, SDL_GEARVR_DATA, r->bytes, r->length, false);
         if (r->length == 2) {
-            /* The 01 00 echo is no acknowledgement: nothing follows it */
+            /* The 01 00 echo is no acknowledgment: nothing follows it */
             ++echoes;
             CHECK(r->us == 2498300 && memcmp(r->bytes, sensor_mode, 2) == 0);
             CHECK(h->nactions == nactions && h->nsamples == nsamples);

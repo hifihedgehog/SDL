@@ -81,6 +81,11 @@ typedef enum SDL_WMRHand
 
 extern bool SDL_WMR_IsControllerID(uint16_t vendor, uint16_t product, SDL_WMRModel *model);
 
+/* Whether a collection's report IDs, one bit per ID, include status report 1
+ * and command output report 6, as Monado uses them on one handle. The driver
+ * opens only such a collection. */
+extern bool SDL_WMR_CarriesController(const uint8_t input_report_ids[32], const uint8_t output_report_ids[32]);
+
 /* The whole product string must match, as Monado compares it */
 extern SDL_WMRHand SDL_WMR_GetHand(const char *product);
 

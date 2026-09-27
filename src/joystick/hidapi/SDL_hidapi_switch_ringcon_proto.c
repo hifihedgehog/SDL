@@ -218,8 +218,10 @@ static void SendCurrent(SDL_RingConMachine *machine, uint64_t now_ms, SDL_RingCo
     machine->acked = false;
     machine->retry = false;
 
-    // The report format changes from the moment these may reach the Joy-Con
-    if (machine->command == RINGCON_CMD_FORMAT) {
+    // The report layout can change from the moment each of these may reach the Joy-Con
+    if (machine->command == RINGCON_CMD_MCU_RESUME) {
+        machine->slot_held = true;
+    } else if (machine->command == RINGCON_CMD_FORMAT) {
         machine->format_set = true;
     } else if (machine->command == RINGCON_CMD_POLL) {
         machine->polling_set = true;
@@ -282,11 +284,14 @@ static void FinishStop(SDL_RingConMachine *machine, uint64_t now_ms, SDL_RingCon
 
     /* The Switch's captures show bytes 37-48 still without IMU data for up to
        45 ms after the reset's acknowledgment. The stop's later commands take
-       longer than that, so the IMU samples count as three again only here. */
+       longer than that, so the IMU samples count as three again only here:
+       the hold 22 01 began ends with every stop, the format's only with a
+       stop whose reset was acknowledged. */
     if (machine->format_reset) {
         machine->format_set = false;
         machine->format_reset = false;
     }
+    machine->slot_held = false;
 
     switch (reason) {
     case SDL_RINGCON_STOP_WATCHDOG:
@@ -307,6 +312,16 @@ static void FinishStop(SDL_RingConMachine *machine, uint64_t now_ms, SDL_RingCon
     }
 }
 
+// 5A was answered and no stop waits: polling begins, and the active property turns true
+static void BeginPolling(SDL_RingConMachine *machine, uint64_t now_ms, SDL_RingConOutput *out)
+{
+    machine->phase = SDL_RINGCON_PHASE_POLLING;
+    machine->rest = 0;
+    machine->alive_ms = now_ms;
+    out->polling_changed = true;
+    out->polling = true;
+}
+
 static void Advance(SDL_RingConMachine *machine, uint64_t now_ms, SDL_RingConOutput *out)
 {
     if (machine->phase == SDL_RINGCON_PHASE_START) {
@@ -315,6 +330,9 @@ static void Advance(SDL_RingConMachine *machine, uint64_t now_ms, SDL_RingConOut
         } else if (machine->index + 1 < RINGCON_START_STEPS) {
             ++machine->index;
             BeginCommand(machine, RINGCON_CMD_INPUT_MODE + machine->index, now_ms, out);
+        } else {
+            // 5A was answered while a stop was asked for, and the request is gone
+            BeginPolling(machine, now_ms, out);
         }
     } else if (machine->phase == SDL_RINGCON_PHASE_STOP) {
         if (machine->index + 1 < machine->program_length) {
@@ -453,12 +471,7 @@ void SDL_RingCon_OnReply(SDL_RingConMachine *machine, const uint8_t *report, siz
 
     if (machine->phase == SDL_RINGCON_PHASE_START && machine->command == RINGCON_CMD_POLL &&
         machine->stop_request == SDL_RINGCON_STOP_NONE) {
-        machine->phase = SDL_RINGCON_PHASE_POLLING;
-        machine->strain = 0;
-        machine->rest = 0;
-        machine->alive_ms = now_ms;
-        out->polling_changed = true;
-        out->polling = true;
+        BeginPolling(machine, now_ms, out);
     }
 }
 
@@ -471,7 +484,6 @@ void SDL_RingCon_OnFullReport(SDL_RingConMachine *machine, const uint8_t *report
         return;
     }
 
-    machine->strain = value;
     machine->alive_ms = now_ms;
     machine->reprobe_spent = false;
     out->post = true;
@@ -490,7 +502,7 @@ bool SDL_RingCon_Engaged(const SDL_RingConMachine *machine)
 
 int SDL_RingCon_ImuPostOrder(const SDL_RingConMachine *machine, int order[3])
 {
-    if (machine && machine->format_set) {
+    if (machine && (machine->format_set || machine->slot_held)) {
         order[0] = 1;
         order[1] = 0;
         return 2;

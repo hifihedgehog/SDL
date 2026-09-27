@@ -4,9 +4,11 @@ Some controllers reach Windows only as a COM port: RS-232 devices behind a
 USB-serial adapter, an RC receiver's serial pin on a USB-UART cable, JVS
 arcade boards on a USB-RS485 adapter, and flight panels with a USB-serial
 chip inside. Windows loads a port driver and nothing reads the protocol. The
-serial joystick driver, for Windows, reads them. It opens only the ports the
+serial joystick driver, for Windows, reads them. It opens the ports the
 application names, because a USB-serial adapter carries its own maker's IDs
-and says nothing about the device behind it.
+and says nothing about the device behind it. By default it also opens the
+ports of the few devices whose COM port is one of their own USB interfaces,
+described under Self-identifying ports.
 
 ## Naming the ports
 
@@ -17,16 +19,29 @@ entries:
 
 `PORT` is `COMn`, or the start of a device instance ID as Device Manager
 shows it under "Device instance path", for example
-`FTDIBUS\VID_0403+PID_6001+A1B2C3D4A`. An instance ID follows an adapter to a
-new COM number. Spaces around entries are ignored, an entry that cannot be
-used is skipped with a log message, and a port named twice keeps its last
-entry. The hint can change at any time: ports that leave the list close and
-their joysticks go, new ports open, and a port whose protocol changed starts
-over.
+`FTDIBUS\VID_0403+PID_6001+A1B2C3D4A`. The start must include the backslash
+after the enumerator, so `FTDIBUS` alone is not a port. An instance ID follows
+an adapter to a new COM number. When several present ports start with it, the
+first one opens, and the matching of self-identifying ports below leaves all
+of them alone. Spaces around entries are ignored, an entry that cannot be used
+is skipped with a log message, and a port named twice with the same spelling,
+ignoring case, keeps its last entry. A port named both as `COMn` and by
+instance ID gets two entries, and while one of them holds the port the other
+retries every second. The hint can change at any time: ports that leave the
+list close and their joysticks go, new ports open, and a port whose protocol
+changed starts over.
 
 The driver holds each port exclusively. A port that is absent or held by
 another program is retried every second, and at once when Windows reports a
 COM port arriving.
+
+A named port's USB IDs, if it has any, are the adapter maker's, so its
+joysticks' GUIDs carry bus 0x13 and vendor 0. Their product name is a key: the
+device name's CRC-16 as four hex digits, the sub-device as one, a space, then
+the name. SDL keeps the key's first 9 bytes, which differ for every device
+name and sub-device, so the four players of a JVS board and the two sides of
+an MDXF stage each keep their own gamepad mapping. The joystick's name is the
+device name.
 
 | Token | Devices | Line | SDL device |
 |---|---|---|---|
@@ -72,10 +87,14 @@ devices in [README-iforce.md](README-iforce.md), the Master Controllers in
   tactile motor needs batteries or the AC adapter.
 - JVS: the driver is the bus master. It resets the boards, assigns addresses
   until one goes unanswered, identifies each board and polls them in turn.
+  While no board reports a player, it scans the bus again a second after
+  each scan, so a board attached later is found.
   The adapter must switch direction on RTS or by itself, and the bus needs
   120 ohms across A and B at the host end if the adapter has none. A coin
   pulses the player's coin button for 100 ms per coin, and TEST is player 1's
-  guide button.
+  guide button. Players 1 to 4 are player indexes 0 to 3. Player 1 also
+  gets, as axes, the analog channels and then the rotary channels of the
+  first board that reports either.
 - i-BUS: wire the cable's RX, ground and +5 V to the receiver's i-BUS, ground
   and power pins. Channels are masked to 12 bits and scaled from 1000 to
   2000. Switch channels are axes, for the application to threshold.
@@ -121,8 +140,9 @@ devices in [README-iforce.md](README-iforce.md), the Master Controllers in
   released, since the KFCA has none. The RVOL gets the expand mode C0 and
   gives MUSECA's five spinners as axes, position x 256 - 32768, then their
   presses and the pedal as buttons. The MDXF stage gives a dance pad per
-  side, player 1 on the first MDXF node, with the arrows as buttons that the
-  gamepad mapping puts on the D-pad, so a jump holds two opposite arrows. No
+  side, player 1 on the first MDXF node at player index 0 and player 2 at
+  player index 1, with the arrows as buttons that the gamepad mapping puts on
+  the D-pad, so a jump holds two opposite arrows. No
   source records the PANB's or the RVOL's rate: the driver tries 57600, and
   after each bring-up that fails switches between it and 115200. Test and
   Service on the KFCA follow bemanitools' SOUND VOLTEX API, Test on bit 5
@@ -143,18 +163,24 @@ message, such as `SPD250` and two 00 bytes for the speed display, for a
 Kettler a 2-byte little-endian power target in watts, and for an I-Force
 device one whole force feedback command, which the driver frames.
 
+VRinsight messages and I-Force commands go out in the order sent, each once
+the one before it has left, and `SDL_SendJoystickEffect` fails while 16 of
+them wait. It also fails for bytes that are not one whole I-Force command.
+The JVS outputs, the Kettler target and the CyberMan's rumble are states, so
+a newer request replaces one that has not gone out.
+
 ## Losing and finding devices
 
 A read or write error closes the port, removes its joysticks and retries the
 open every second. When the device answers its start-up again, it appears as
 a new joystick. Devices that stream or answer polls, the Zhen Hua
-transmitters, the i-BUS receiver, JVS boards, VRinsight panels and Kettler
-consoles, also disappear after their silence limit. A BIO2, KFCA or RVOL
-disappears after three failed polls in a row, an MDXF after three failed
-polls of one side, and a PANB after 600 ms without a frame, and the driver
-then resets its bus. The others have no silence limit, because they can be
-silent at rest, so unplugging one from an adapter that stays connected goes
-unnoticed.
+transmitters, the i-BUS receiver, JVS boards, VRinsight panels, Kettler
+consoles and the DJI remotes, also disappear after their silence limit, for a
+DJI remote 2000 ms without a stick report. A BIO2, KFCA or RVOL disappears
+after three failed polls in a row, an MDXF after three failed polls of one
+side, and a PANB after 600 ms without a frame, and the driver then resets its
+bus. The others have no silence limit, because they can be silent at rest, so
+unplugging one from an adapter that stays connected goes unnoticed.
 
 ## Self-identifying ports
 
@@ -165,14 +191,25 @@ turns that matching off, and a port the hint names keeps the hint's protocol.
 
 | Instance ID | Token | Device |
 |---|---|---|
-| `USB\VID_2CA3&PID_????&MI_02\` | `dji` | The protocol port of a DJI RC-N1 family remote |
+| `USB\VID_2CA3&PID_1010&MI_02\` | `dji` | The protocol port of a DJI RC-N1 family remote |
+| `USB\VID_2CA3&PID_1020&MI_02\` | `dji` | The protocol port of a DJI RC-N1 family remote |
+| `USB\VID_2CA3&PID_1030&MI_02\` | `dji` | The protocol port of a DJI RC-N1 family remote |
 | `USB\VID_1CCF&PID_804C` | `bio2` | Konami BIO2 board |
 | `USB\VID_1CCF&PID_8040` | `bio2` | Konami BIO2 board |
 
-The BIO2 rows match the device and any interface of it, as bemanitools'
+DJI's VCOM driver names interface 2 of these three product IDs "DJI USB VCOM
+For Protocol". Other DJI products carry a "DJI USB Virtual COM" port there,
+which the driver leaves alone, and a remote on another product ID needs the
+hint. The BIO2 rows match the device and any interface of it, as bemanitools'
 search by ID does. Such a port's joystick GUID carries the USB vendor and
 product IDs of its device, the product ID taken from the instance ID when
 its row gives none.
+
+`SDL_HINT_JOYSTICK_BLACKLIST_DEVICES`,
+`SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES` and
+`SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT` apply to these ports by their
+USB IDs, and the driver does not open a port they exclude. They do not apply
+to the ports the hint names, whose USB IDs, if any, are the adapter's.
 
 `SDL_HINT_JOYSTICK_KONAMI_ACIO` turns the ACIO protocols off on every port,
 named or matched.

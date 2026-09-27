@@ -132,7 +132,8 @@ add_custom_command(TARGET testicade PRE_LINK
 
 # Every other joystick driver is off, so only the driver under test can add
 # a joystick. The test also sets these hints at override priority before
-# each SDL_Init. The driver's own hints are cleared, since the test sets them.
+# each SDL_Init. The driver's own hints and SDL's ignore lists, which the
+# driver reads, are cleared, since the test sets them.
 set(ICADE_DRIVER_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_HIDAPI=0"
     "SDL_JOYSTICK_RAWINPUT=0"
@@ -153,7 +154,10 @@ set(ICADE_DRIVER_CLEARED_ENVIRONMENT
     "SDL_JOYSTICK_DJI_REMOTE_TCP_HOSTS=unset:"
     "SDL_JOYSTICK_ICADE=unset:"
     "SDL_JOYSTICK_ICADE_RAWINPUT=unset:"
-    "SDL_JOYSTICK_ICADE_DEVICES=unset:")
+    "SDL_JOYSTICK_ICADE_DEVICES=unset:"
+    "SDL_JOYSTICK_BLACKLIST_DEVICES=unset:"
+    "SDL_GAMECONTROLLER_IGNORE_DEVICES=unset:"
+    "SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=unset:")
 
 add_test(NAME icade-driver.raw COMMAND testicade)
 set_tests_properties(icade-driver.raw PROPERTIES

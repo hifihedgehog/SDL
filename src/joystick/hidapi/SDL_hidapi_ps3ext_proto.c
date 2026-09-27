@@ -183,6 +183,12 @@ static int16_t Word(const uint8_t *bytes)
     return (int16_t)((int)(bytes[0] | (bytes[1] << 8)) - 0x200);
 }
 
+/* 0x200 less the little-endian word: the same axis, pointing the other way */
+static int16_t NegatedWord(const uint8_t *bytes)
+{
+    return (int16_t)(0x200 - (int)(bytes[0] | (bytes[1] << 8)));
+}
+
 static void DecodeUDraw(const uint8_t *report, SDL_PS3ExtOutput *out)
 {
     const uint8_t touch = report[11];
@@ -219,10 +225,15 @@ static void DecodeUDraw(const uint8_t *report, SDL_PS3ExtOutput *out)
     SetAxis(out, SDL_PS3EXT_UDRAW_AXIS_PRESSURE, ScalePositive(pressure, SDL_PS3EXT_UDRAW_MAX_PRESSURE), true);
     SetAxis(out, SDL_PS3EXT_UDRAW_AXIS_DISTANCE, two_fingers ? ScalePositive(report[12], 255) : 0, true);
 
+    /* The tablet counts X toward its right edge, Y toward its far edge and Z
+       into its face, around 0x200 (brandonw.net). SDL's frame for a
+       controller held in front of you, which the Steam Deck also uses, has
+       X right, Y out of the face and Z toward the player, so lying face up
+       reads +1 g on Y. */
     out->has_accel = true;
     out->accel[0] = Word(&report[19]);
-    out->accel[1] = Word(&report[21]);
-    out->accel[2] = Word(&report[23]);
+    out->accel[1] = NegatedWord(&report[23]);
+    out->accel[2] = NegatedWord(&report[21]);
 }
 
 /* A 10-bit LED coordinate: X in byte 0 and bits 7 and 6 of byte 1, Y in bits

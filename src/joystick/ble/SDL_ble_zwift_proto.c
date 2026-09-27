@@ -520,6 +520,7 @@ static void Zwift_Start(void *state, uint64_t now)
     if (zwift->variant != SDL_ZWIFT_PLAY_LEFT && zwift->variant != SDL_ZWIFT_PLAY_RIGHT &&
         zwift->variant != SDL_ZWIFT_CLICK && zwift->variant != SDL_ZWIFT_PLAY_FW2) {
         zwift->base.failed = true;
+        SDL_BLE_Log(&zwift->base, "unknown device type, giving up");
         return;
     }
     SDL_BLE_QueueWrite(&zwift->base, SDL_ZWIFT_SYNC_RX, zwift_ride_on, sizeof(zwift_ride_on), false);
@@ -546,6 +547,7 @@ static void Zwift_WriteDone(void *state, bool success, uint64_t now)
             if (!success) {
                 zwift->base.failed = true;
                 zwift->armed = false;
+                SDL_BLE_Log(&zwift->base, "the handshake write failed, giving up");
             } else {
                 zwift->deadline = now + SDL_ZWIFT_HANDSHAKE_MS;
             }
@@ -567,6 +569,7 @@ static void Zwift_SyncTx(SDL_ZwiftState *zwift, const uint8_t *data, size_t leng
             zwift->armed = false;
         } else {
             zwift->base.failed = true;
+            SDL_BLE_Log(&zwift->base, "the controller's key could not be used, giving up");
         }
     }
 }
@@ -631,6 +634,8 @@ static void Zwift_Tick(void *state, uint64_t now)
         key[7] = 0x02;
         if (!zwift->crypto || !zwift->crypto->MakeKey(zwift->crypto->userdata, &key[8])) {
             zwift->base.failed = true;
+            SDL_BLE_Log(&zwift->base, zwift->crypto ? "no message after RideOn, and no key pair could be made, giving up"
+                                                    : "no message after RideOn, and no key exchange is available, giving up");
             return;
         }
         /* 72 bytes exceed a default ATT payload, so the write asks for a
@@ -645,6 +650,7 @@ static void Zwift_Tick(void *state, uint64_t now)
     if (zwift->phase == SDL_ZWIFT_KEY_SENT) {
         /* No key came back */
         zwift->base.failed = true;
+        SDL_BLE_Log(&zwift->base, "no key reply, giving up");
     }
 }
 

@@ -750,7 +750,8 @@ static void TestGuitar(void)
     {
         SDL_WiiExtCaps caps;
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_GUITAR, &caps));
-        CHECK(caps.nbuttons == 26 && caps.naxes == 6 && caps.nhats == 1 && caps.accel && !caps.mono_led && caps.mapping);
+        CHECK(caps.nbuttons == 26 && caps.naxes == 6 && caps.nhats == 1 && caps.accel && !caps.mono_led);
+        CHECK(SDL_WiiExt_GetMapping(SDL_WII_EXT_GUITAR) != NULL);
     }
 }
 
@@ -789,6 +790,9 @@ static void TestDrums(void)
     for (i = 6; i <= 12; ++i) {
         CHECK(AxisPosted(&out, i) && out.axes[i] == AXIS_MIN);
     }
+    /* The velocities rest at the minimum, and a hard hit lands near the
+       middle: data axes, seeded past SDL's initial-value gate */
+    CHECK(out.data_axis_mask == 0x1FC0);
     CHECK(out.axes[SDL_WII_EXT_AXIS_RIGHTX] == 0 && out.axes[SDL_WII_EXT_AXIS_RIGHTY] == 0);
     CHECK(out.axes[SDL_WII_EXT_AXIS_LEFT_TRIGGER] == AXIS_MIN && out.axes[SDL_WII_EXT_AXIS_RIGHT_TRIGGER] == AXIS_MIN);
     CHECK(!out.has_hat);
@@ -894,7 +898,8 @@ static void TestDrums(void)
         CHECK(strcmp(SDL_WiiExt_TypeName(SDL_WII_EXT_DRUMS), "Nintendo Wii Remote with Drum Kit") == 0);
         CHECK(SDL_WiiExt_JoystickType(SDL_WII_EXT_DRUMS) == SDL_WII_EXT_JOYSTICK_TYPE_DRUM_KIT);
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_DRUMS, &caps));
-        CHECK(caps.nbuttons == 26 && caps.naxes == 13 && caps.nhats == 0 && !caps.accel && caps.mapping);
+        CHECK(caps.nbuttons == 26 && caps.naxes == 13 && caps.nhats == 0 && !caps.accel);
+        CHECK(SDL_WiiExt_GetMapping(SDL_WII_EXT_DRUMS) != NULL);
     }
 }
 
@@ -922,6 +927,8 @@ static void TestTurntable(void)
     CHECK(CountDown(&rest) == 0);
     CHECK(rest.axes[SDL_WII_EXT_AXIS_RIGHTX] == 0 && rest.axes[SDL_WII_EXT_AXIS_RIGHTY] == 0);
     CHECK(rest.axes[6] == 2184 && rest.axes[7] == 1056);
+    // The crossfader and the dial can rest at an end: data axes
+    CHECK(rest.data_axis_mask == 0x00C0);
     CHECK(rest.axes[SDL_WII_EXT_AXIS_LEFT_TRIGGER] == AXIS_MIN && rest.axes[SDL_WII_EXT_AXIS_RIGHT_TRIGGER] == AXIS_MIN);
 
     /* 2. Right platter */
@@ -992,7 +999,8 @@ static void TestTurntable(void)
         SDL_WiiExt_BuildLEDWrite(request, false, false);
         CHECK(IsWrite(request, 0xA400FB, 0x00));
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_TURNTABLE, &caps));
-        CHECK(caps.mono_led && caps.nbuttons == 32 && caps.naxes == 8 && caps.nhats == 0 && caps.mapping);
+        CHECK(caps.mono_led && caps.nbuttons == 32 && caps.naxes == 8 && caps.nhats == 0);
+        CHECK(SDL_WiiExt_GetMapping(SDL_WII_EXT_TURNTABLE) != NULL);
         CHECK(caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_GAMEPAD);
         CHECK(strcmp(caps.name, "Nintendo Wii Remote with DJ Turntable") == 0);
     }
@@ -1075,7 +1083,8 @@ static void TestTaiko(void)
         CHECK(ClassifyReply(id, true) == SDL_WII_EXT_TAIKO);
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_TAIKO, &caps));
         CHECK(strcmp(caps.name, "Nintendo Wii Remote with Taiko Drum") == 0);
-        CHECK(caps.nbuttons == 26 && caps.naxes == 6 && caps.nhats == 0 && caps.mapping);
+        CHECK(caps.nbuttons == 26 && caps.naxes == 6 && caps.nhats == 0);
+        CHECK(SDL_WiiExt_GetMapping(SDL_WII_EXT_TAIKO) != NULL);
         CHECK(caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_GAMEPAD);
     }
 }
@@ -1148,7 +1157,7 @@ static void TestUDraw(void)
         SDL_WiiExtCaps caps;
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_UDRAW, &caps));
         CHECK(strcmp(caps.name, "Nintendo Wii Remote with uDraw Tablet") == 0);
-        CHECK(!caps.mapping && caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN);
+        CHECK(!SDL_WiiExt_GetMapping(SDL_WII_EXT_UDRAW) && caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN);
         CHECK(caps.nbuttons == 26 && caps.naxes == 3 && caps.nhats == 0);
     }
 }
@@ -1282,7 +1291,7 @@ static void TestDrawsome(void)
         SDL_WiiExtCaps caps;
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_DRAWSOME, &caps));
         CHECK(strcmp(caps.name, "Nintendo Wii Remote with Drawsome Tablet") == 0);
-        CHECK(!caps.mapping && caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN);
+        CHECK(!SDL_WiiExt_GetMapping(SDL_WII_EXT_DRAWSOME) && caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN);
         CHECK(caps.nbuttons == 26 && caps.naxes == 3 && caps.nhats == 0);
     }
 }
@@ -1432,8 +1441,150 @@ static void TestShinkansen(void)
         SDL_WiiExtCaps caps;
         CHECK(SDL_WiiExt_GetCaps(SDL_WII_EXT_SHINKANSEN, &caps));
         CHECK(strcmp(caps.name, "Nintendo Wii Remote with Shinkansen Controller") == 0);
-        CHECK(caps.nbuttons == 26 && caps.naxes == 8 && caps.nhats == 1 && caps.mapping);
+        CHECK(caps.nbuttons == 26 && caps.naxes == 8 && caps.nhats == 1);
+        CHECK(SDL_WiiExt_GetMapping(SDL_WII_EXT_SHINKANSEN) != NULL);
         CHECK(caps.joystick_type == SDL_WII_EXT_JOYSTICK_TYPE_GAMEPAD);
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* The gamepad mappings */
+
+/* The gamepad control at each position a decoder posts to: buttons 0-10,
+   axes 0-5 and the four directions of hat 0 */
+static const char *const gamepad_buttons[11] = {
+    "a", "b", "x", "y", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder", "rightshoulder"
+};
+static const char *const gamepad_axes[6] = { "leftx", "lefty", "rightx", "righty", "lefttrigger", "righttrigger" };
+static const struct
+{
+    const char *name;
+    uint8_t bit;
+} gamepad_hat[4] = {
+    { "dpup", SDL_WII_EXT_HAT_UP }, { "dpright", SDL_WII_EXT_HAT_RIGHT },
+    { "dpdown", SDL_WII_EXT_HAT_DOWN }, { "dpleft", SDL_WII_EXT_HAT_LEFT }
+};
+
+/* Whether the mapping holds the field name:input */
+static bool HasBinding(const char *mapping, const char *name, const char *input)
+{
+    char field[40];
+    const size_t length = (size_t)snprintf(field, sizeof(field), "%s:%s,", name, input);
+    const char *at = mapping;
+
+    while (at && *at) {
+        if (strncmp(at, field, length) == 0) {
+            return true;
+        }
+        at = strchr(at, ',');
+        if (at) {
+            ++at;
+        }
+    }
+    return false;
+}
+
+/* The mapping binds exactly what the decoder posts at a gamepad position: the
+   buttons that go down, the axes posted and the hat directions reported, over
+   the rest report and every value of each span byte in turn. */
+static void CheckMapping(int type, const uint8_t rest[8])
+{
+    const char *mapping = SDL_WiiExt_GetMapping(type);
+    SDL_WiiExtState state;
+    SDL_WiiExtOutput out;
+    SDL_WiiExtCaps caps;
+    uint32_t buttons = 0;
+    uint16_t axes = 0;
+    uint8_t hat = 0;
+    char input[8];
+    int byte, value, i, fields = 0, expected = 0;
+    const char *at;
+
+    CHECK(mapping != NULL);
+    CHECK(SDL_WiiExt_GetCaps(type, &caps));
+    if (!mapping) {
+        return;
+    }
+    SDL_WiiExt_Reset(&state, type);
+    for (byte = 0; byte < 8; ++byte) {
+        for (value = 0; value < 256; ++value) {
+            uint8_t e[8];
+
+            memcpy(e, rest, sizeof(e));
+            e[byte] = (uint8_t)value;
+            if (DecodeFull(&state, e, &out)) {
+                buttons |= out.buttons;
+                axes = (uint16_t)(axes | out.axis_mask);
+                if (out.has_hat) {
+                    hat = (uint8_t)(hat | out.hat);
+                }
+            }
+        }
+    }
+
+    for (i = 0; i < 11; ++i) {
+        if (buttons & (1u << i)) {
+            ++expected;
+            snprintf(input, sizeof(input), "b%d", i);
+            CHECK(HasBinding(mapping, gamepad_buttons[i], input));
+        }
+    }
+    for (i = 0; i < 6; ++i) {
+        if (axes & (1u << i)) {
+            ++expected;
+            snprintf(input, sizeof(input), "a%d", i);
+            CHECK(HasBinding(mapping, gamepad_axes[i], input));
+        }
+    }
+    for (i = 0; i < 4; ++i) {
+        if (hat & gamepad_hat[i].bit) {
+            ++expected;
+            snprintf(input, sizeof(input), "h0.%d", gamepad_hat[i].bit);
+            CHECK(HasBinding(mapping, gamepad_hat[i].name, input));
+        }
+    }
+    CHECK(expected > 0 && (hat == 0 || caps.nhats == 1));
+    /* Nothing else: one field per control found above, each closed by a comma */
+    for (at = mapping; *at; ++at) {
+        fields += (*at == ',');
+    }
+    CHECK(fields == expected && mapping[strlen(mapping) - 1] == ',');
+    CHECK(!strstr(mapping, "guide:"));
+}
+
+static void TestMappings(void)
+{
+    static const uint8_t taiko_rest[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00 };
+    static const int undecoded[] = {
+        SDL_WII_EXT_UNKNOWN, SDL_WII_EXT_NONE, SDL_WII_EXT_NUNCHUK, SDL_WII_EXT_GAMEPAD,
+        SDL_WII_EXT_WIIUPRO, SDL_WII_EXT_BALANCEBOARD, SDL_WII_EXT_SHINKANSEN + 1, -1
+    };
+    size_t i;
+    int type;
+
+    CheckMapping(SDL_WII_EXT_GUITAR, guitar_rest);
+    CheckMapping(SDL_WII_EXT_DRUMS, drums_rest);
+    CheckMapping(SDL_WII_EXT_TURNTABLE, turntable_rest);
+    CheckMapping(SDL_WII_EXT_TAIKO, taiko_rest);
+    CheckMapping(SDL_WII_EXT_SHINKANSEN, shinkansen_rest);
+
+    /* The strum bar is the guitar's D-pad, the drum kit, turntable and TaTaCon
+       have none, and only the TaTaCon's faces are stick clicks */
+    CHECK(strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_GUITAR), "dpup:h0.1,") != NULL);
+    CHECK(!strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_GUITAR), "dpleft:"));
+    CHECK(!strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_DRUMS), ":h0."));
+    CHECK(!strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_TURNTABLE), ":h0."));
+    CHECK(!strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_TAIKO), ":h0."));
+    CHECK(strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_TAIKO), "leftstick:b7,") != NULL);
+    CHECK(!strstr(SDL_WiiExt_GetMapping(SDL_WII_EXT_SHINKANSEN), "stick:"));
+
+    /* Among the decoded types only the tablets have no mapping, and a type
+       this module does not decode has none from it */
+    for (type = SDL_WII_EXT_GUITAR; type <= SDL_WII_EXT_SHINKANSEN; ++type) {
+        CHECK((SDL_WiiExt_GetMapping(type) == NULL) == (type == SDL_WII_EXT_UDRAW || type == SDL_WII_EXT_DRAWSOME));
+    }
+    for (i = 0; i < sizeof(undecoded) / sizeof(undecoded[0]); ++i) {
+        CHECK(!SDL_WiiExt_IsDecodedType(undecoded[i]) && SDL_WiiExt_GetMapping(undecoded[i]) == NULL);
     }
 }
 
@@ -1480,6 +1631,7 @@ int main(void)
     TestUDraw();
     TestDrawsome();
     TestShinkansen();
+    TestMappings();
     TestStateless();
 
     if (failures) {

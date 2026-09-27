@@ -1450,7 +1450,7 @@ static void Test13(void)
     uint8_t device_key[SDL_ZWIFT_KEY_SIZE];
     uint8_t value[256], message[64];
     size_t i, k, length;
-    int indices[8];
+    int indices[8], logs;
     uint64_t deadline;
     FakeCrypto fake;
     BH_Harness *h;
@@ -1656,33 +1656,41 @@ static void Test13(void)
     BH_CHECK(fake.derive_calls == 1 && Zwift(h)->phase == SDL_ZWIFT_ENCRYPTED, "no second Derive");
     BH_Destroy(h);
 
-    /* The same with the NULL crypto of a build without CNG: the session backs off */
+    /* The same with the NULL crypto of a build without CNG: the session
+       backs off, with one line that gives the reason */
     h = Handshaken(RIGHT, NULL);
+    logs = bh_log_lines;
     BH_Advance(h, START_MS + SDL_ZWIFT_HANDSHAKE_MS);
     BH_CHECK(BH_Count(h, SDL_BLE_ACTION_WRITE) == 1, "no key write without crypto");
     BH_CHECK(BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1 && BH_LastKind(h) == SDL_BLE_ACTION_DISCONNECT && !h->published &&
                  SDL_BLESession_Ended(&h->session),
              "without crypto the session backs off");
+    BH_CHECK(bh_log_lines == logs + 1, "without crypto: %d log lines", bh_log_lines - logs);
     BH_Destroy(h);
 
     /* A key pair that cannot be made ends the same way */
     FakeInit(&fake);
     fake.make_result = false;
     h = Handshaken(CLICK, &fake);
+    logs = bh_log_lines;
     BH_Advance(h, START_MS + SDL_ZWIFT_HANDSHAKE_MS);
     BH_CHECK(fake.make_calls == 1 && BH_Count(h, SDL_BLE_ACTION_WRITE) == 1 && BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1,
              "a failed MakeKey backs off");
+    BH_CHECK(bh_log_lines == logs + 1, "a failed MakeKey: %d log lines", bh_log_lines - logs);
     BH_Destroy(h);
 
     /* No key reply within 10 s of the key write */
     FakeInit(&fake);
     h = Handshaken(RIGHT, &fake);
+    logs = bh_log_lines;
     BH_Advance(h, START_MS + SDL_ZWIFT_HANDSHAKE_MS);
     BH_Advance(h, START_MS + 2 * SDL_ZWIFT_HANDSHAKE_MS - 1);
     BH_CHECK(!SDL_BLESession_Ended(&h->session), "still waiting just before 10 s");
+    BH_CHECK(bh_log_lines == logs, "the key write: %d log lines", bh_log_lines - logs);
     BH_Advance(h, START_MS + 2 * SDL_ZWIFT_HANDSHAKE_MS);
     BH_CHECK(BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1 && SDL_BLESession_Ended(&h->session) && fake.derive_calls == 0,
              "no key reply in 10 s backs off");
+    BH_CHECK(bh_log_lines == logs + 1, "no key reply: %d log lines", bh_log_lines - logs);
     BH_Destroy(h);
 
     /* A handshake write that fails backs off at once, where waiting out the
@@ -1691,10 +1699,12 @@ static void Test13(void)
     FakeInit(&fake);
     h = Subscribed(RIGHT, &fake);
     h->now = START_MS + 20;
+    logs = bh_log_lines;
     BH_Written(h, false);
     BH_CHECK(BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1 && BH_LastKind(h) == SDL_BLE_ACTION_DISCONNECT &&
                  SDL_BLESession_Ended(&h->session) && ((const SDL_BLEBase *)h->state)->failed && !h->published,
              "a failed RideOn write backs off");
+    BH_CHECK(bh_log_lines == logs + 1, "a failed RideOn write: %d log lines", bh_log_lines - logs);
     BH_CHECK(h->nactions >= 2 && h->actions[h->nactions - 2].now == START_MS + 20, "at once");
     BH_CHECK(!SDL_BLEZwiftModule.GetDeadline(h->state, &deadline), "and leaves no timer");
     BH_Advance(h, START_MS + 3 * SDL_ZWIFT_HANDSHAKE_MS);
@@ -1708,9 +1718,11 @@ static void Test13(void)
     BH_Drain(h);
     BH_CHECK(BH_LastKind(h) == SDL_BLE_ACTION_WRITE && h->session.waiting && fake.make_calls == 1, "the key write is out");
     h->now += 30;
+    logs = bh_log_lines;
     BH_Written(h, false);
     BH_CHECK(BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1 && SDL_BLESession_Ended(&h->session) && fake.derive_calls == 0,
              "a failed key write backs off");
+    BH_CHECK(bh_log_lines == logs + 1, "a failed key write: %d log lines", bh_log_lines - logs);
     BH_CHECK(h->nactions >= 2 && h->actions[h->nactions - 2].now == START_MS + SDL_ZWIFT_HANDSHAKE_MS + 30, "at once");
     BH_CHECK(!SDL_BLEZwiftModule.GetDeadline(h->state, &deadline), "and leaves no timer");
     BH_Destroy(h);
@@ -1749,8 +1761,10 @@ static void Test13(void)
     value[6] = 0x00;
     value[7] = 0x09;
     memcpy(&value[8], device_key, SDL_ZWIFT_KEY_SIZE);
+    logs = bh_log_lines;
     SyncTx(h, value, 72);
     BH_CHECK(fake.derive_calls == 1 && BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1, "a rejected key backs off");
+    BH_CHECK(bh_log_lines == logs + 1, "a rejected key: %d log lines", bh_log_lines - logs);
     BH_Destroy(h);
 
     /* A longer key reply: the key is the 64 bytes after the header */
@@ -2024,12 +2038,14 @@ static void Test16(void)
 /* A variant the matcher never passes cannot start */
 static void TestUnknownVariant(void)
 {
+    const int logs = bh_log_lines;
     BH_Harness *h = Subscribed(0x07, NULL);
 
     printf("Unknown variant\n");
     BH_CHECK(BH_Count(h, SDL_BLE_ACTION_WRITE) == 0 && BH_Count(h, SDL_BLE_ACTION_BACKOFF) == 1 &&
                  SDL_BLESession_Ended(&h->session),
              "a Ride's type byte fails at the start-up");
+    BH_CHECK(bh_log_lines == logs + 1, "an unknown type byte: %d log lines", bh_log_lines - logs);
     BH_Destroy(h);
 }
 

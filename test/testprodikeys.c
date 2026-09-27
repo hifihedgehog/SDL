@@ -145,8 +145,29 @@ static void TestMask(void)
     CHECK(Handle(&state, (const uint8_t *)"\x04\x00\x00\x00", 4) && CountDown(&state) == 0);
     CHECK(Handle(&state, (const uint8_t *)"\x04\x00\x00\x10", 4));
     CHECK(SDL_Prodikeys_IsButtonDown(&state, 132) && CountDown(&state) == 1);
-    CHECK(!Handle(&state, (const uint8_t *)"\x04\x00\x00", 3));
-    CHECK(SDL_Prodikeys_IsButtonDown(&state, 132));
+    /* The descriptor declares 16 bits for report 4 where the keyboard sends
+       24, which Linux corrects. A report of the declared 3 bytes, as hid.dll
+       can hand it over, sets mask bits 8-23 and leaves bits 0-7, Fn lock
+       among them, as they were. */
+    CHECK(Handle(&state, (const uint8_t *)"\x04\x00\x00", 3));
+    CHECK(SDL_Prodikeys_IsButtonDown(&state, 132) && CountDown(&state) == 1);
+    CHECK(Handle(&state, (const uint8_t *)"\x04\x02\x00", 3));
+    CHECK(SDL_Prodikeys_IsButtonDown(&state, 145) && SDL_Prodikeys_IsButtonDown(&state, 132) && CountDown(&state) == 2);
+    CHECK(Handle(&state, (const uint8_t *)"\x04\x00\x01", 3));
+    CHECK(SDL_Prodikeys_IsButtonDown(&state, 136) && SDL_Prodikeys_IsButtonDown(&state, 132) && CountDown(&state) == 2);
+    CHECK(!Handle(&state, (const uint8_t *)"\x04\x00", 2) && !Handle(&state, (const uint8_t *)"\x04", 1));
+    CHECK(SDL_Prodikeys_IsButtonDown(&state, 136) && SDL_Prodikeys_IsButtonDown(&state, 132) && CountDown(&state) == 2);
+    /* Each of bits 8-23 alone in a report of the declared length */
+    for (bit = 8; bit < 24; ++bit) {
+        const uint32_t mask = 1u << bit;
+        SDL_Prodikeys_Init(&state);
+        memset(r, 0, sizeof(r));
+        r[0] = 0x04;
+        r[1] = (uint8_t)(mask >> 16);
+        r[2] = (uint8_t)(mask >> 8);
+        CHECK(Handle(&state, r, 3));
+        CHECK(SDL_Prodikeys_IsButtonDown(&state, 128 + bit) && CountDown(&state) == 1);
+    }
     /* Each mask bit alone, in a report padded as Windows pads it */
     for (bit = 0; bit < 24; ++bit) {
         const uint32_t mask = 1u << bit;

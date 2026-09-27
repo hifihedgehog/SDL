@@ -53,6 +53,9 @@ static void MDXF_Commit(SDL_MDXFState *s, int player, const uint8_t *payload)
     }
     SDL_Serial_SetIdentity(&identity, (player == 0) ? "Konami DDR Stage P1" : "Konami DDR Stage P2", SDL_SERIAL_TYPE_DANCE_PAD,
                            0, SDL_MDXF_BUTTONS, 0, 0);
+    /* The cabinet side decides, as for the P3IO's pads: P1 is player index
+       0 and P2 player index 1 */
+    identity.player_index = (int8_t)player;
     identity.has_mapping = true;
     identity.mapping.dpup = SDL_Serial_MapButton(SDL_MDXF_BUTTON_UP);
     identity.mapping.dpdown = SDL_Serial_MapButton(SDL_MDXF_BUTTON_DOWN);

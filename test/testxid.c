@@ -496,7 +496,7 @@ static void TestKnownDevices(void)
     CHECK(total == 63);
     CHECK(!SDL_XID_FindKnownDevice(0x0A7B, 0xD000)); // the Steel Battalion goes by its descriptor or kind
 
-    // The IDs whose HIDAPI GUIDs only the XID drivers make: the table and the Steel Battalion
+    // The IDs taken for XID devices while no device has the GUID: the table and the Steel Battalion
     for (i = 0; i < sizeof(flagged) / sizeof(flagged[0]); ++i) {
         CHECK(SDL_XID_IsKnownID(flagged[i].vendor, flagged[i].product));
     }
@@ -508,6 +508,26 @@ static void TestKnownDevices(void)
     CHECK(!SDL_XID_IsKnownID(0x045E, 0x028E)); // the Xbox 360 pad
     CHECK(!SDL_XID_IsKnownID(0x045E, 0x02A0)); // the Big Button receiver
     CHECK(!SDL_XID_IsKnownID(0x1234, 0x5678));
+}
+
+/* Which HIDAPI joysticks take the XID mapping. A connected device takes it
+   only through an XID interface, since other drivers serve products of some
+   of the table's vendors. Without the device, -1, the ID decides. */
+static void TestMappingChoice(void)
+{
+    // Connected through an XID interface, on any ID
+    CHECK(SDL_XID_IsXIDJoystick(SDL_XID_INTERFACE_CLASS, 0x045E, 0x0202));
+    CHECK(SDL_XID_IsXIDJoystick(SDL_XID_INTERFACE_CLASS, 0x1234, 0x5678));
+    CHECK(SDL_XID_IsXIDJoystick(SDL_XID_INTERFACE_CLASS, 0x0A7B, 0xD000));
+    // No device with the GUID: the identity table and the Steel Battalion's ID
+    CHECK(SDL_XID_IsXIDJoystick(-1, 0x045E, 0x0202));
+    CHECK(SDL_XID_IsXIDJoystick(-1, 0x0C12, 0x8809));
+    CHECK(SDL_XID_IsXIDJoystick(-1, 0x0A7B, 0xD000));
+    CHECK(!SDL_XID_IsXIDJoystick(-1, 0x1234, 0x5678));
+    // Connected through another interface on a table ID: another driver's device
+    CHECK(!SDL_XID_IsXIDJoystick(0x03, 0x0738, 0x4520)); // HID, which the PS3 and PS4 probes take by vendor
+    CHECK(!SDL_XID_IsXIDJoystick(0xFF, 0x0E6F, 0x0008)); // an Xbox 360 or One vendor interface
+    CHECK(!SDL_XID_IsXIDJoystick(0x00, 0x0C12, 0x8809)); // a platform backend that records no class
 }
 
 /* ------------------------------------------------------------------------ */
@@ -867,6 +887,9 @@ typedef struct TestDevice
     // How the device answers its two requests: bytes returned, or negative for a stall
     int descriptor_result;
     uint8_t descriptor[SDL_XID_READ_LENGTH];
+    // The GET_DESCRIPTOR requests that fail first, each returning failure_result
+    int descriptor_failures;
+    int failure_result;
     int report_result;
     uint8_t report[SDL_XID_READ_LENGTH];
     // Interrupt IN transfers waiting, and the result once they run out
@@ -912,6 +935,10 @@ static int TestControlIn(void *userdata, uint8_t request_type, uint8_t request, 
     if (request_type == 0xC1 && request == 0x06) {
         source = device->descriptor;
         result = device->descriptor_result;
+        if (device->descriptor_failures > 0) {
+            --device->descriptor_failures;
+            result = device->failure_result;
+        }
     } else if (request_type == 0xA1 && request == 0x01) {
         source = device->report;
         result = device->report_result;
@@ -1131,15 +1158,19 @@ static void TestOpenFallback(void)
     uint8_t bad[16];
     int length;
 
+    // Three stalled GET_DESCRIPTORs, then the GET_REPORT of the gamepad family
     NewDevice(&device, NULL, -1);
     CHECK(SDL_XID_Open(&session, 0x0738, 0x45FF, 0, NULL, &sink));
-    CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_DANCE_PAD && device.controls == 2);
+    CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_DANCE_PAD && device.controls == 4);
+    NewDevice(&device, NULL, -1);
     CHECK(SDL_XID_Open(&session, 0x045E, 0x0289, 0, NULL, &sink));
-    CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_GAMEPAD);
+    CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_GAMEPAD && device.controls == 4);
+    NewDevice(&device, NULL, -1);
     CHECK(SDL_XID_Open(&session, 0x1234, 0x5678, 0, NULL, &sink));
     CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_GAMEPAD && strcmp(session.identity.name, "Xbox Input Device") == 0);
+    NewDevice(&device, NULL, -1);
     CHECK(SDL_XID_Open(&session, 0x0A7B, 0xD000, 0, NULL, &sink));
-    CHECK(session.identity.kind == SDL_XID_KIND_STEEL_BATTALION);
+    CHECK(session.identity.kind == SDL_XID_KIND_STEEL_BATTALION && device.controls == 3);
 
     for (length = 0; length < 16; ++length) {
         // The Steel Battalion descriptor cut short: only 8 bytes or more with a fitting bLength count
@@ -1158,6 +1189,57 @@ static void TestOpenFallback(void)
     CHECK(session.identity.kind == SDL_XID_KIND_GAMEPAD && session.identity.dance);
     CHECK(!SDL_XID_Open(NULL, 0x0738, 0x45FF, 0, NULL, &sink));
     CHECK(!SDL_XID_Open(&session, 0x0738, 0x45FF, 0, NULL, NULL));
+}
+
+/* A GET_DESCRIPTOR without a usable reply is sent again, up to three
+   requests in all, so a reply that comes late picks the same decoder and
+   GUID byte as one that comes at once. Only then do the ID tables decide. */
+static void TestOpenRetry(void)
+{
+    // libusb's timeout and stall, a zero-length reply and a short one
+    static const int bad_replies[] = { -7, -9, 0, 4 };
+    TestDevice device;
+    SDL_XIDSink sink = Sink(&device);
+    SDL_XIDSession session;
+    uint8_t wheel[16];
+    size_t i;
+    int count, request;
+
+    memcpy(wheel, duke_descriptor, 16);
+    wheel[5] = SDL_XID_SUBTYPE_WHEEL;
+    for (i = 0; i < sizeof(bad_replies) / sizeof(bad_replies[0]); ++i) {
+        for (count = 1; count <= 2; ++count) {
+            NewDevice(&device, wheel, 16);
+            device.descriptor_failures = count;
+            device.failure_result = bad_replies[i];
+            CHECK(SDL_XID_Open(&session, 0x044F, 0x0F00, 2, NULL, &sink));
+            CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_WHEEL);
+            CHECK(session.identity.guid_byte == SDL_XID_SUBTYPE_WHEEL);
+            // The same request each time, then the one GET_REPORT
+            CHECK(device.controls == count + 2);
+            for (request = 0; request <= count && request < MAX_LOG; ++request) {
+                const ControlRequest *log = &device.control_log[request];
+
+                CHECK(log->request_type == 0xC1 && log->request == 0x06 && log->value == 0x4200);
+                CHECK(log->index == 2 && log->length == 16 && log->timeout_ms == 100);
+            }
+            CHECK(device.control_log[count + 1].request_type == 0xA1 && device.control_log[count + 1].request == 0x01);
+        }
+    }
+
+    // Three requests without a usable reply: the ID tables decide
+    NewDevice(&device, wheel, 16);
+    device.descriptor_failures = 3;
+    device.failure_result = -7;
+    CHECK(SDL_XID_Open(&session, 0x044F, 0x0F00, 2, NULL, &sink));
+    CHECK(session.identity.joystick_type == SDL_XID_JOYSTICK_GAMEPAD && session.identity.guid_byte == 0x00);
+    CHECK(device.controls == 4);
+    CHECK(device.control_log[2].request_type == 0xC1 && device.control_log[3].request_type == 0xA1);
+
+    // A reply that parses is never asked for again, even the DVD remote's
+    NewDevice(&device, dvd_descriptor, 8);
+    CHECK(!SDL_XID_Open(&session, 0x045E, 0x0284, 0, NULL, &sink));
+    CHECK(device.controls == 1);
 }
 
 /* G16 and SB8: the joystick gets the state when it opens and after each
@@ -1518,6 +1600,25 @@ static void TestMappings(void)
     CheckMapping(&gun, SDL_XID_GetMapping(gun.guid_byte));
 }
 
+/* bSubType 0xFF is in no source's list. A gamepad-family device that reports
+   it is a gamepad with the pad mapping, and never takes the Steel
+   Battalion's GUID byte, which has no mapping. */
+static void TestSubtypeFF(void)
+{
+    SDL_XIDIdentity id;
+    uint8_t desc[16];
+
+    memcpy(desc, duke_descriptor, 16);
+    desc[5] = 0xFF;
+    CHECK(IdentifyWith(0x1234, 0x5678, desc, 16, NULL, &id));
+    CHECK(id.kind == SDL_XID_KIND_GAMEPAD && id.joystick_type == SDL_XID_JOYSTICK_GAMEPAD);
+    CHECK(id.guid_byte != SDL_XID_GUID_STEEL_BATTALION);
+    CHECK(SDL_XID_GetMapping(id.guid_byte) != NULL);
+    CHECK(id.guid_byte == 0x00);
+    // A dance-pad ID still takes the dance-pad byte
+    CHECK(IdentifyWith(0x0738, 0x45FF, desc, 16, NULL, &id) && id.guid_byte == SDL_XID_GUID_DANCE_PAD);
+}
+
 /* ------------------------------------------------------------------------ */
 /* The Steel Battalion, SB1 to SB7 */
 
@@ -1714,16 +1815,19 @@ int main(void)
     TestDescriptor();
     TestIdentify();
     TestKnownDevices();
+    TestMappingChoice();
     TestGamepad();
     TestBeatPad();
     TestGamepadModes();
     TestRumble();
     TestOpenRequests();
     TestOpenFallback();
+    TestOpenRetry();
     TestSession();
     TestSessionSteelBattalion();
     TestSessionOutput();
     TestMappings();
+    TestSubtypeFF();
     TestSteelBattalion();
     TestLamps();
 

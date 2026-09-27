@@ -1896,9 +1896,13 @@ static void TestLimits(void)
     CHECK(Shows(state, true, -74, 29185, 662));
 
     /* 315 lines of 222 stripes across the sensor, one read a line: 221 a
-       line count, all in one blob of 30700215 pixels, whose size clamps */
+       line count, all in one blob of 30700215 pixels. Its sums stay in
+       range, and a blob that large is past the size bound, so the frame
+       shows no dot and the axes keep their last values. */
     {
+        const SDL_TrackIRBlob *whole = NULL;
         uint32_t line, k;
+        int slot;
 
         *state = *tir3;
         for (line = 0; line <= 314; ++line) {
@@ -1909,8 +1913,14 @@ static void TestLimits(void)
             }
             FeedStripes(state, SDL_TRACKIR_3, stripes, 222, line == 314);
         }
-        CHECK(state->frames == 1 && Shows(state, true, -74, -104, 32767));
-        CHECK(state->best.pixels == 30700215u && state->best.sum_x == 6754047300ull && state->best.sum_y == 4819933755ull);
+        CHECK(state->frames == 1 && Shows(state, false, 0, 0, 0));
+        /* The frame's closed blobs keep their sums in their slots */
+        for (slot = 0; slot < SDL_TRACKIR_OPEN_BLOBS; ++slot) {
+            if (state->blobs[slot].pixels == 30700215u) {
+                whole = &state->blobs[slot];
+            }
+        }
+        CHECK(whole && whole->sum_x == 6754047300ull && whole->sum_y == 4819933755ull);
     }
 
     free(stripes);
@@ -1918,9 +1928,84 @@ static void TestLimits(void)
     free(tir3);
 }
 
+/* A side x side square, one stripe a line from line top and x left */
+static size_t Square(Stripe *stripes, size_t n, uint32_t top, uint32_t left, uint32_t side)
+{
+    uint32_t i;
+
+    for (i = 0; i < side; ++i) {
+        stripes[n].line = top + i;
+        stripes[n].first = left;
+        stripes[n].last = left + side - 1;
+        ++n;
+    }
+    return n;
+}
+
+/* A blob of more than 1024 pixels, linuxtrack's upper bound for the TrackIR
+   (tir_driver_prefs.c:31, image_process.c:480), is never the dot. The dot
+   is 8 x 8 = 64 pixels at lines and x 150 to 157, and the bright area
+   starts at line and x 20. Blobs under linuxtrack's lower bound of 4 still
+   count, as test 4 requires. */
+static void TestSizeWindow(void)
+{
+    SDL_TrackIRState *tir2 = NewState();
+    SDL_TrackIRState *state = NewState();
+    Stripe stripes[64];
+    size_t n;
+
+    StartRunning(tir2, SDL_TRACKIR_2);
+
+    /* The dot alone */
+    n = Square(stripes, 0, 150, 150, 8);
+    *state = *tir2;
+    FeedStripes(state, SDL_TRACKIR_2, stripes, n, true);
+    CHECK(Shows(state, true, -6656, -6656, 64));
+
+    /* A 40 x 40 = 1600-pixel area and the dot: the dot drives the axes */
+    n = Square(stripes, 0, 20, 20, 40);
+    n = Square(stripes, n, 150, 150, 8);
+    *state = *tir2;
+    FeedStripes(state, SDL_TRACKIR_2, stripes, n, true);
+    CHECK(Shows(state, true, -6656, -6656, 64));
+
+    /* A 32 x 32 = 1024-pixel area is inside the window, and outweighs the
+       dot */
+    n = Square(stripes, 0, 20, 20, 32);
+    n = Square(stripes, n, 150, 150, 8);
+    *state = *tir2;
+    FeedStripes(state, SDL_TRACKIR_2, stripes, n, true);
+    CHECK(Shows(state, true, 23552, 23552, 1024));
+
+    /* One pixel more, on the line below, is past it. After a frame with the
+       dot, a frame with that area alone shows no dot, and the axes keep the
+       dot's values. With the dot, the dot wins. */
+    n = Square(stripes, 0, 150, 150, 8);
+    *state = *tir2;
+    FeedStripes(state, SDL_TRACKIR_2, stripes, n, true);
+    CHECK(state->frames == 1 && Shows(state, true, -6656, -6656, 64));
+    n = Square(stripes, 0, 20, 20, 32);
+    stripes[n].line = 52;
+    stripes[n].first = 20;
+    stripes[n].last = 20;
+    ++n;
+    FeedStripes(state, SDL_TRACKIR_2, stripes, n, true);
+    CHECK(state->frames == 2 && Shows(state, false, -6656, -6656, 64));
+    n = Square(stripes, n, 150, 150, 8);
+    *state = *tir2;
+    FeedStripes(state, SDL_TRACKIR_2, stripes, n, true);
+    CHECK(Shows(state, true, -6656, -6656, 64));
+
+    free(state);
+    free(tir2);
+}
+
 /* An oracle that shares no code with the module: union-find over the
    stripes of one frame, joining stripes on consecutive lines that overlap
-   or touch */
+   or touch. The dot is the largest set of at most 1024 pixels, linuxtrack's
+   upper bound for the TrackIR (tir_driver_prefs.c:31). */
+
+#define ORACLE_MAX_PIXELS 1024
 
 static uint32_t random_state = 0x2026u;
 
@@ -2059,7 +2144,7 @@ static void TestOracle(SDL_TrackIRModel model)
             }
         }
         for (i = 0; i < made; ++i) {
-            if (pixels[i] > best) {
+            if (pixels[i] > best && pixels[i] <= ORACLE_MAX_PIXELS) {
                 best = pixels[i];
             }
         }
@@ -2075,7 +2160,7 @@ static void TestOracle(SDL_TrackIRModel model)
                 matched = true;
             }
         }
-        CHECK(state->in_view && matched && state->axes[2] == (int16_t)((best > 32767) ? 32767 : best));
+        CHECK(state->in_view && matched && state->axes[2] == (int16_t)best);
     }
     /* Most frames show a dot */
     CHECK(shown > 2000);
@@ -2289,6 +2374,7 @@ int main(void)
     TestFrames();
     TestBounds();
     TestLimits();
+    TestSizeWindow();
     TestOracle(SDL_TRACKIR_2);
     TestOracle(SDL_TRACKIR_3);
     TestClose();

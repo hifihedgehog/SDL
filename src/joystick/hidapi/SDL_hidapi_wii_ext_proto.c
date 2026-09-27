@@ -267,7 +267,6 @@ bool SDL_WiiExt_GetCaps(int type, SDL_WiiExtCaps *caps)
     }
     memset(caps, 0, sizeof(*caps));
     caps->nbuttons = 26; /* The remote's own buttons stay at 15-25 */
-    caps->mapping = true;
     caps->joystick_type = SDL_WII_EXT_JOYSTICK_TYPE_GAMEPAD;
     switch (type) {
     case SDL_WII_EXT_GUITAR:
@@ -296,13 +295,11 @@ bool SDL_WiiExt_GetCaps(int type, SDL_WiiExtCaps *caps)
         caps->name = "Nintendo Wii Remote with uDraw Tablet";
         caps->joystick_type = SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN;
         caps->naxes = 3;
-        caps->mapping = false;
         return true;
     case SDL_WII_EXT_DRAWSOME:
         caps->name = "Nintendo Wii Remote with Drawsome Tablet";
         caps->joystick_type = SDL_WII_EXT_JOYSTICK_TYPE_UNKNOWN;
         caps->naxes = 3;
-        caps->mapping = false;
         return true;
     case SDL_WII_EXT_SHINKANSEN:
         caps->name = "Nintendo Wii Remote with Shinkansen Controller";
@@ -345,6 +342,33 @@ int SDL_WiiExt_JoystickType(int type)
         return caps.joystick_type;
     }
     return SDL_WII_EXT_JOYSTICK_TYPE_GAMEPAD;
+}
+
+const char *SDL_WiiExt_GetMapping(int type)
+{
+    /* Each string binds what the type's decoder below posts at a gamepad
+       position, the axes it holds constant included. The remote's own
+       buttons stay unbound at 15-25. */
+    switch (type) {
+    case SDL_WII_EXT_GUITAR:
+        /* Strum is hat 0 up and down */
+        return "a:b0,b:b1,back:b4,dpdown:h0.4,dpup:h0.1,leftshoulder:b9,lefttrigger:a4,leftx:a0,lefty:a1,"
+               "rightshoulder:b10,righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,";
+    case SDL_WII_EXT_DRUMS:
+        return "a:b0,b:b1,back:b4,leftshoulder:b9,lefttrigger:a4,leftx:a0,lefty:a1,"
+               "rightshoulder:b10,righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,";
+    case SDL_WII_EXT_TURNTABLE:
+        return "a:b0,b:b1,back:b4,lefttrigger:a4,leftx:a0,lefty:a1,"
+               "righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,";
+    case SDL_WII_EXT_TAIKO:
+        return "leftstick:b7,lefttrigger:a4,leftx:a0,lefty:a1,rightstick:b8,righttrigger:a5,rightx:a2,righty:a3,";
+    case SDL_WII_EXT_SHINKANSEN:
+        return "a:b0,b:b1,back:b4,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,lefttrigger:a4,leftx:a0,lefty:a1,"
+               "rightshoulder:b10,righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,";
+    default:
+        /* The tablets: a pen has no gamepad shape */
+        return NULL;
+    }
 }
 
 void SDL_WiiExt_Reset(SDL_WiiExtState *state, int type)
@@ -567,13 +591,15 @@ static void DecodeDrums(SDL_WiiExtState *state, const uint8_t *e, SDL_WiiExtOutp
             state->pad_axis[i] = WII_EXT_AXIS_MIN;
         }
         SetButton(out, buttons[i], down);
-        SetAxis(out, 6 + i, state->pad_axis[i], false);
+        /* Data: a velocity rests at the minimum and a hard hit lands near the
+           middle, which SDL's initial-value gate would take for the rest */
+        SetAxis(out, 6 + i, state->pad_axis[i], true);
     }
     if (message && note == 100) {
         /* The hi-hat pedal: the latest value holds */
         state->hihat_axis = (int16_t)(velocity * 257 - 32768);
     }
-    SetAxis(out, 12, state->hihat_axis, false);
+    SetAxis(out, 12, state->hihat_axis, true);
 
     SetButton(out, SDL_WII_EXT_BUTTON_BACK, !(e[4] & 0x10));  /* minus */
     SetButton(out, SDL_WII_EXT_BUTTON_START, !(e[4] & 0x04)); /* plus */
@@ -624,8 +650,10 @@ static void DecodeTurntable(SDL_WiiExtState *state, const uint8_t *e, SDL_WiiExt
     SetAxis(out, SDL_WII_EXT_AXIS_RIGHTY, PlatterRate(right) * 1024, false);
     SetAxis(out, SDL_WII_EXT_AXIS_LEFT_TRIGGER, WII_EXT_AXIS_MIN, false);
     SetAxis(out, SDL_WII_EXT_AXIS_RIGHT_TRIGGER, WII_EXT_AXIS_MIN, false);
-    SetAxis(out, 6, (int)crossfader * 4369 - 32768, false);
-    SetAxis(out, 7, (int)(dial * 65535 / 31) - 32768, false);
+    /* Data, as the drum velocities are: either control can rest at an end
+       and move to the middle in one report */
+    SetAxis(out, 6, (int)crossfader * 4369 - 32768, true);
+    SetAxis(out, 7, (int)(dial * 65535 / 31) - 32768, true);
 }
 
 static void DecodeTaiko(const uint8_t *e, SDL_WiiExtOutput *out)

@@ -225,6 +225,10 @@ typedef unsigned int uintptr_t;
 #define SDL_JOYSTICK_GAMEINPUT 1
 #define SDL_JOYSTICK_HIDAPI 1
 #define SDL_JOYSTICK_VIRTUAL 1
+// PadForge fork: the fork's drivers build only with CMake, which generates
+// its own configuration header from SDL_build_config.h.cmake. The VisualC
+// projects do not list the drivers' sources. The fork's defines below match
+// that configuration.
 // PadForge fork: WinRT BLE-GATT driver for the Switch 2 controllers (issue #5)
 #define SDL_JOYSTICK_BLE 1
 // PadForge fork: joysticks on COM ports (hifihedgehog/SDL#33 Part 5)

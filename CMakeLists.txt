@@ -1400,6 +1400,12 @@ if(SDL_HAPTIC)
     message(FATAL_ERROR "SDL_HAPTIC requires SDL_JOYSTICK, which is not enabled")
   endif()
 endif()
+if(SDL_JOYSTICK AND NOT SDL_LIBC)
+  # PadForge fork: the fork's joystick protocol modules call the C library
+  # directly, because the SDL-free replay tests compile them. An MSVC build
+  # without the C library leaves those calls unresolved at link.
+  message(FATAL_ERROR "SDL_JOYSTICK requires SDL_LIBC, which is not enabled. The PadForge fork's joystick protocol modules call the C library.")
+endif()
 
 
 # General SDL subsystem options, valid for all platforms

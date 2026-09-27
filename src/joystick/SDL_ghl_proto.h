@@ -45,7 +45,7 @@
 extern int SDL_GHL_GetDongle(uint16_t vendor, uint16_t product);
 extern const char *SDL_GHL_DongleName(int dongle);
 
-/* Buttons and axes in SDL gamepad order, so the default mapping applies */
+/* Buttons and axes in SDL gamepad order, which SDL_GHL_MAPPING binds */
 #define SDL_GHL_BUTTON_SOUTH          0 /* Black 1 */
 #define SDL_GHL_BUTTON_EAST           1 /* Black 2 */
 #define SDL_GHL_BUTTON_WEST           2 /* White 1 */
@@ -73,6 +73,13 @@ extern const char *SDL_GHL_DongleName(int dongle);
 #define SDL_GHL_HAT_RIGHT    0x02
 #define SDL_GHL_HAT_DOWN     0x04
 #define SDL_GHL_HAT_LEFT     0x08
+
+/* The SDL gamepad mapping: the default mapping's bindings, which fit the
+ * layout above, without the extras a gamepad type adds. SDL_gamepad.c gives
+ * it to the three dongles by ID, because the default mapping of the PS4
+ * dongle's type adds a touchpad and that of the Xbox One dongle's type a
+ * Share button, both as button 11, which the guitars lack. */
+#define SDL_GHL_MAPPING "a:b0,b:b1,back:b4,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b5,leftshoulder:b9,leftstick:b7,lefttrigger:a4,leftx:a0,lefty:a1,rightshoulder:b10,rightstick:b8,righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,"
 
 typedef struct SDL_GHLOutput
 {
@@ -103,8 +110,11 @@ extern bool SDL_GHL_DecodeFrameB(const uint8_t *report, size_t length, SDL_GHLOu
 #define SDL_GHL_XBOX_MESSAGE_OUTPUT     0x22
 extern bool SDL_GHL_DecodeXboxMessage(uint8_t message, const uint8_t *payload, size_t length, SDL_GHLOutput *out);
 
-/* The keep-alive. Without it the strum bar cuts out held frets. */
+/* The keep-alive. Without it the strum bar cuts out held frets. A failed send
+ * goes again after the retry interval, the one the Top Shot request retry
+ * uses. Linux, RB4InstrumentMapper and GHLtarUtility all limit retries. */
 #define SDL_GHL_KEEPALIVE_INTERVAL_MS 8000
+#define SDL_GHL_KEEPALIVE_RETRY_MS    1000
 
 /* The buffer for hid_send_output_report: the report ID, then 8 data bytes.
  * Returns the length, 9, or 0 for a dongle that is not HID. */
@@ -116,8 +126,9 @@ extern size_t SDL_GHL_BuildHIDKeepAlive(int dongle, uint8_t out[SDL_GHL_HID_KEEP
 extern size_t SDL_GHL_BuildXboxKeepAlive(uint8_t out[SDL_GHL_XBOX_KEEPALIVE_LENGTH]);
 
 /* The schedule, on a millisecond clock the caller supplies. Start makes one
- * due at once. A success sets the next one 8000 ms after the send. A failed
- * send leaves it due, so the next update retries it. */
+ * due at once. A success sets the next one 8000 ms after the send, and a
+ * failure 1000 ms after the failed send. A zeroed schedule is never due. The
+ * drivers keep it in zero-filled device data and free it with that data. */
 typedef struct SDL_GHLKeepAlive
 {
     bool active;
@@ -125,7 +136,6 @@ typedef struct SDL_GHLKeepAlive
 } SDL_GHLKeepAlive;
 
 extern void SDL_GHL_KeepAliveStart(SDL_GHLKeepAlive *keepalive, uint64_t now_ms);
-extern void SDL_GHL_KeepAliveStop(SDL_GHLKeepAlive *keepalive);
 extern bool SDL_GHL_KeepAliveDue(const SDL_GHLKeepAlive *keepalive, uint64_t now_ms);
 extern void SDL_GHL_KeepAliveSent(SDL_GHLKeepAlive *keepalive, uint64_t now_ms, bool success);
 

@@ -15,7 +15,9 @@
    the retry schedule, the DCB fields and timeouts, action order, presence
    cleared on loss and restored as a new instance after the port returns,
    snapshot order, the 64-entry queue, the hint list and its changes, the
-   axis scaling rules and the helpers every module shares. */
+   axis scaling rules and the helpers every module shares. Then the Windows
+   port layer's decisions: the output hand-off, the effect check, the port
+   thread's wait, the GUID key of a named port and event stamps. */
 
 #include "testserialharness.h"
 
@@ -27,7 +29,8 @@
    ends it. C asks for a close sequence, which writes "BYE" and ends 100 ms
    later, H asks for one that never ends, L for one that queues "LATE" as it
    ends, U for one of writes that each queue the next and that ends on the
-   256th, and c asks for none. z says closed with no sequence running. */
+   256th, and c asks for none. z says closed with no sequence running. G
+   arms a deadline at 0 that Tick never moves, and g drops it. */
 typedef struct ProbeState
 {
     SDL_SerialBase base;
@@ -46,6 +49,7 @@ typedef struct ProbeState
     bool close_started;
     bool close_timer;
     uint64_t close_at;
+    bool stuck;
 } ProbeState;
 
 static void Probe_Reset(void *state, const SDL_SerialSink *sink, uint64_t now)
@@ -67,6 +71,7 @@ static void Probe_Reset(void *state, const SDL_SerialSink *sink, uint64_t now)
     s->runaway_dones = 0;
     s->close_started = false;
     s->close_timer = false;
+    s->stuck = false;
     SDL_Serial_QueueLine(&s->base, 1, &line);
     SDL_Serial_QueueWrite(&s->base, 2, (const uint8_t *)"HI", 2);
 }
@@ -162,6 +167,12 @@ static void Probe_Feed(void *state, const uint8_t *data, size_t length, uint64_t
         case 'z':
             s->base.closed = true;
             break;
+        case 'G':
+            s->stuck = true;
+            break;
+        case 'g':
+            s->stuck = false;
+            break;
         default:
             if (c >= '0' && c <= '9') {
                 controls = s->base.snapshots[0].controls;
@@ -241,6 +252,9 @@ static bool Probe_GetDeadline(void *state, uint64_t *deadline)
     }
     if (s->close_timer) {
         SDL_Serial_EarlierDeadline(&have, deadline, s->close_at);
+    }
+    if (s->stuck) {
+        SDL_Serial_EarlierDeadline(&have, deadline, 0);
     }
     SDL_Serial_PulseDeadline(&s->base, &have, deadline);
     return have;
@@ -446,6 +460,8 @@ static void TestPresence(void)
     CHECK(h->npresence == 1 && h->presence_log[0].sub == 0 && h->presence_log[0].generation == 1);
     CHECK(strcmp(h->presence_log[0].identity.name, "Probe") == 0);
     CHECK(h->identity[0].type == SDL_SERIAL_TYPE_GAMEPAD && h->identity[0].naxes == 2 && h->identity[0].nbuttons == 4);
+    /* SDL_Serial_SetIdentity gives no player index */
+    CHECK(h->identity[0].player_index == -1);
     CHECK(h->npublished == 1 && h->published[0].controls.axes[0] == 0);
 
     /* Snapshot order */
@@ -705,8 +721,8 @@ static void TestAutoRules(void)
     CHECK(SDL_Serial_MatchAuto(NULL, 3, "USB") == NULL && SDL_Serial_MatchAuto(rules, 3, NULL) == NULL);
 }
 
-/* Part 6: ? in a rule matches any one character, as the DJI rule matches
- * any PID on interface 2 */
+/* Part 6: ? in a rule matches any one character. The rule below takes any
+ * PID on interface 2 of vendor 2CA3. */
 static void TestAutoWildcard(void)
 {
     static const SDL_SerialAutoRule rules[1] = {
@@ -849,16 +865,23 @@ static void TestBreak(void)
     CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 0) && Probe(h)->failed_dones == 0 && Probe(h)->last_tag == 10);
     H_Destroy(h);
 
-    /* A break that fails is port loss */
+    /* A break the port refuses, as a USB serial device without break support
+       can, finishes as failed on an open port */
     h = H_Create(&probe_module);
     SDL_SerialEngine_Init(&h->engine, &failing_escape_ops, h, h->module, h->state, 0);
     H_Start(h);
     H_SkipCalls(h);
     escape_fails = true;
     FeedText(h, "K");
-    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 0) && H_IsCall(H_NextCall(h), 'C', 0) && H_NextCall(h) == NULL);
-    CHECK(h->engine.losses == 1 && !h->engine.breaking && Probe(h)->dones == 2);
-    /* An end of break that fails is port loss, and the close tries once more */
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_SETBREAK, 0) && H_NextCall(h) == NULL);
+    CHECK(h->engine.losses == 0 && h->engine.open && !h->engine.breaking);
+    CHECK(Probe(h)->dones == 3 && Probe(h)->failed_dones == 1 && Probe(h)->last_tag == 9);
+    /* So does an end of break while no break is held */
+    FeedText(h, "k");
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 0) && H_NextCall(h) == NULL);
+    CHECK(h->engine.losses == 0 && h->engine.open && Probe(h)->failed_dones == 2 && Probe(h)->last_tag == 10);
+    /* An end of break that fails while a break is held is port loss, and the
+       close tries once more */
     escape_fails = false;
     H_Advance(h, 1000);
     H_SkipCalls(h);
@@ -867,7 +890,7 @@ static void TestBreak(void)
     escape_fails = true;
     FeedText(h, "k");
     CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1000) && H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1000));
-    CHECK(H_IsCall(H_NextCall(h), 'C', 1000) && h->engine.losses == 2 && !h->engine.breaking);
+    CHECK(H_IsCall(H_NextCall(h), 'C', 1000) && h->engine.losses == 1 && !h->engine.breaking);
     escape_fails = false;
     H_Destroy(h);
 
@@ -1128,6 +1151,385 @@ static void TestBase(void)
     free(s);
 }
 
+/* A module deadline that Tick never moves: each call still ends after 256
+   steps, and the next deadline is 1 ms after the call, so the port thread
+   waits between calls */
+static void TestStall(void)
+{
+    Harness *h = H_Create(&probe_module);
+    uint64_t deadline = 0;
+    int logs;
+
+    H_Start(h);
+    H_SkipCalls(h);
+    h->now = 100;
+    logs = h->nlogs;
+    FeedText(h, "G");
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 101);
+    CHECK(h->nlogs == logs + 1 && strstr(h->last_log, "256") != NULL);
+    /* Every call runs out of steps again, and the log line comes once */
+    h->now = 105;
+    SDL_SerialEngine_Run(&h->engine, H_NS(h->now));
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 106);
+    CHECK(h->nlogs == logs + 1);
+    /* Once the module lets go, its own deadlines count again */
+    FeedText(h, "g");
+    CHECK(!SDL_SerialEngine_GetDeadline(&h->engine, &deadline));
+    FeedText(h, "S");
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 155);
+    FeedText(h, "G");
+    CHECK(h->nlogs == logs + 2);
+    CHECK(SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline == 106);
+    H_Destroy(h);
+}
+
+/* A module whose effects are commands the device takes one by one, as the
+   I-Force and VRinsight modules' are. Each effect is one write. */
+static void Queue_Output(void *state, const SDL_SerialOutput *request, uint64_t now)
+{
+    ProbeState *s = (ProbeState *)state;
+
+    Probe_Output(state, request, now);
+    if (request->kind == SDL_SERIAL_OUTPUT_EFFECT) {
+        (void)SDL_Serial_QueueWrite(&s->base, 20, request->data, request->length);
+    }
+}
+
+static const SDL_SerialModule queue_module = {
+    "queue", sizeof(ProbeState), false, 1, 8,
+    Probe_Reset, Probe_Feed, Probe_Tick, SDL_Serial_NextAction, Probe_ActionDone, Queue_Output, Probe_GetDeadline, SDL_Serial_GetSnapshot,
+    true, NULL
+};
+
+static SDL_SerialOutput Effect(int sub, uint8_t byte)
+{
+    SDL_SerialOutput request;
+
+    memset(&request, 0, sizeof(request));
+    request.kind = SDL_SERIAL_OUTPUT_EFFECT;
+    request.sub = sub;
+    request.length = 1;
+    request.data[0] = byte;
+    return request;
+}
+
+/* What the port thread does with its outbox on every pass */
+static int TakeAll(SDL_SerialOutbox *outbox, Harness *h)
+{
+    SDL_SerialOutput request;
+    int taken = 0;
+
+    while (SDL_Serial_TakeOutput(outbox, &h->engine, &request)) {
+        SDL_SerialEngine_Output(&h->engine, &request, H_NS(h->now));
+        ++taken;
+    }
+    return taken;
+}
+
+/* The hand-off of output requests from the joystick thread */
+static void TestOutbox(void)
+{
+    SDL_SerialOutbox *outbox = (SDL_SerialOutbox *)calloc(1, sizeof(*outbox));
+    Harness *h = H_Create(&queue_module); /* Never started, so its port does not read */
+    SDL_SerialOutput request;
+    int i;
+
+    SDL_Serial_ClearOutbox(outbox);
+    /* Effects posted back to back come out in order */
+    for (i = 0; i < 3; ++i) {
+        request = Effect(0, (uint8_t)('A' + i));
+        CHECK(SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    }
+    for (i = 0; i < 3; ++i) {
+        CHECK(SDL_Serial_TakeOutput(outbox, &h->engine, &request) && request.data[0] == 'A' + i);
+    }
+    CHECK(!SDL_Serial_TakeOutput(outbox, &h->engine, &request));
+
+    /* SDL_SERIAL_OUTPUT_QUEUE of them wait, for any sub-devices, and one more
+       is refused */
+    for (i = 0; i < SDL_SERIAL_OUTPUT_QUEUE; ++i) {
+        request = Effect(i % SDL_SERIAL_MAX_SUBDEVICES, (uint8_t)i);
+        CHECK(SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    }
+    request = Effect(0, 0xFF);
+    CHECK(!SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    for (i = 0; i < SDL_SERIAL_OUTPUT_QUEUE; ++i) {
+        CHECK(SDL_Serial_TakeOutput(outbox, &h->engine, &request) && request.data[0] == i && request.sub == i % SDL_SERIAL_MAX_SUBDEVICES);
+    }
+    CHECK(!SDL_Serial_TakeOutput(outbox, &h->engine, &request));
+
+    /* A rumble, and an effect of a module that does not queue them, keep the
+       latest request of each sub-device */
+    request = Effect(1, 'X');
+    CHECK(SDL_Serial_PostOutput(outbox, &probe_module, &request));
+    request = Effect(1, 'Y');
+    CHECK(SDL_Serial_PostOutput(outbox, &probe_module, &request));
+    memset(&request, 0, sizeof(request));
+    request.kind = SDL_SERIAL_OUTPUT_RUMBLE;
+    request.sub = 2;
+    request.low_frequency_rumble = 0x1111;
+    CHECK(SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    request.low_frequency_rumble = 0x2222;
+    CHECK(SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    CHECK(SDL_Serial_TakeOutput(outbox, &h->engine, &request) && request.sub == 1 && request.data[0] == 'Y');
+    CHECK(SDL_Serial_TakeOutput(outbox, &h->engine, &request) && request.sub == 2 && request.low_frequency_rumble == 0x2222);
+    CHECK(!SDL_Serial_TakeOutput(outbox, &h->engine, &request));
+    /* A request for no sub-device is refused */
+    request = Effect(SDL_SERIAL_MAX_SUBDEVICES, 'Z');
+    CHECK(!SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    CHECK(!SDL_Serial_TakeOutput(outbox, &h->engine, &request));
+    H_Destroy(h);
+    free(outbox);
+}
+
+/* Queued effects reach the module one at a time, each once the one before it
+   has left, however many wait */
+static void TestOutboxTurns(void)
+{
+    SDL_SerialOutbox *outbox = (SDL_SerialOutbox *)calloc(1, sizeof(*outbox));
+    Harness *h = H_Create(&queue_module);
+    SDL_SerialOutput request;
+    int i;
+
+    SDL_Serial_ClearOutbox(outbox);
+    h->pend_writes = true;
+    H_Start(h);
+    CHECK(H_ExpectOpened(h, 9600, 8, SDL_SERIAL_NOPARITY, 1, 0) && H_IsWriteText(H_NextCall(h), "HI", 0));
+    /* "W" waits behind "HI" */
+    FeedText(h, "W");
+    for (i = 0; i < SDL_SERIAL_OUTPUT_QUEUE; ++i) {
+        request = Effect(0, (uint8_t)('a' + i));
+        CHECK(SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    }
+    /* The module has an action queued, so every effect waits */
+    CHECK(TakeAll(outbox, h) == 0 && Probe(h)->outputs == 0);
+    H_CompleteWrite(h, true);
+    CHECK(H_IsWriteText(H_NextCall(h), "W", 0));
+    CHECK(TakeAll(outbox, h) == 1 && Probe(h)->outputs == 1 && outbox->count == SDL_SERIAL_OUTPUT_QUEUE - 1);
+    /* Each write that leaves lets the next effect in */
+    for (i = 0; i < SDL_SERIAL_OUTPUT_QUEUE; ++i) {
+        const uint8_t expected = (uint8_t)('a' + i);
+
+        H_CompleteWrite(h, true);
+        CHECK(H_IsWrite(H_NextCall(h), &expected, 1, 0));
+        (void)TakeAll(outbox, h);
+    }
+    H_CompleteWrite(h, true);
+    CHECK(H_NextCall(h) == NULL && Probe(h)->outputs == SDL_SERIAL_OUTPUT_QUEUE && outbox->count == 0);
+
+    /* A port that stops reading drops what waits, so none of it reaches the
+       device after the port opens again */
+    for (i = 0; i < 3; ++i) {
+        request = Effect(0, 'x');
+        CHECK(SDL_Serial_PostOutput(outbox, &queue_module, &request));
+    }
+    H_LosePort(h);
+    CHECK(TakeAll(outbox, h) == 3 && outbox->count == 0 && Probe(h)->outputs == SDL_SERIAL_OUTPUT_QUEUE);
+    H_Destroy(h);
+    free(outbox);
+}
+
+/* Effects the driver accepts */
+static bool Valid_V(const uint8_t *data, size_t length)
+{
+    return length > 0 && data[0] == 'V';
+}
+
+static const SDL_SerialModule wide_module = {
+    "wide", sizeof(ProbeState), false, 2, SDL_SERIAL_MAX_EFFECT + 4,
+    Probe_Reset, Probe_Feed, Probe_Tick, SDL_Serial_NextAction, Probe_ActionDone, Probe_Output, Probe_GetDeadline, SDL_Serial_GetSnapshot,
+    false, NULL
+};
+
+static const SDL_SerialModule command_module = {
+    "command", sizeof(ProbeState), false, 1, 8,
+    Probe_Reset, Probe_Feed, Probe_Tick, SDL_Serial_NextAction, Probe_ActionDone, Queue_Output, Probe_GetDeadline, SDL_Serial_GetSnapshot,
+    true, Valid_V
+};
+
+static void TestEffectCheck(void)
+{
+    uint8_t data[SDL_SERIAL_MAX_EFFECT + 8];
+
+    memset(data, 'V', sizeof(data));
+    CHECK(SDL_Serial_CheckEffect(&other_module, data, 1) == SDL_SERIAL_EFFECT_UNSUPPORTED);
+    CHECK(SDL_Serial_CheckEffect(&probe_module, data, 1) == SDL_SERIAL_EFFECT_OK);
+    CHECK(SDL_Serial_CheckEffect(&probe_module, data, 8) == SDL_SERIAL_EFFECT_OK);
+    CHECK(SDL_Serial_CheckEffect(&probe_module, data, 0) == SDL_SERIAL_EFFECT_BAD_SIZE);
+    CHECK(SDL_Serial_CheckEffect(&probe_module, data, 9) == SDL_SERIAL_EFFECT_BAD_SIZE);
+    CHECK(SDL_Serial_CheckEffect(&probe_module, NULL, 1) == SDL_SERIAL_EFFECT_BAD_SIZE);
+    /* A range longer than a request holds stops at SDL_SERIAL_MAX_EFFECT */
+    CHECK(SDL_Serial_CheckEffect(&wide_module, data, SDL_SERIAL_MAX_EFFECT) == SDL_SERIAL_EFFECT_OK);
+    CHECK(SDL_Serial_CheckEffect(&wide_module, data, SDL_SERIAL_MAX_EFFECT + 1) == SDL_SERIAL_EFFECT_BAD_SIZE);
+    /* ValidEffect decides within the range */
+    CHECK(SDL_Serial_CheckEffect(&command_module, data, 4) == SDL_SERIAL_EFFECT_OK);
+    data[0] = 'X';
+    CHECK(SDL_Serial_CheckEffect(&command_module, data, 4) == SDL_SERIAL_EFFECT_INVALID);
+    CHECK(SDL_Serial_CheckEffect(&command_module, data, 9) == SDL_SERIAL_EFFECT_BAD_SIZE);
+}
+
+/* The port thread's wait */
+static void TestWait(void)
+{
+    Harness *h = H_Create(&probe_module);
+
+    h->open_failures = 1;
+    H_Start(h);
+    /* Closed: the retry, and no read to post */
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 0, false, false) == 1000u);
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 400, false, false) == 600u);
+    H_Advance(h, 1000);
+    CHECK(SDL_SerialEngine_IsReading(&h->engine));
+    /* A read is out and no deadline runs: until an event */
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1000, true, false) == SDL_SERIAL_WAIT_FOREVER);
+    /* Reads brought bytes and none is out: read again at once */
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1000, false, false) == 0u);
+    /* The last read brought nothing: read again within 10 ms */
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1000, false, true) == (uint32_t)SDL_SERIAL_IDLE_POLL_MS);
+    /* A module deadline 50 ms away */
+    FeedText(h, "S");
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1000, true, false) == 50u);
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1045, false, true) == 5u);
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1000, false, false) == 0u);
+    CHECK(SDL_SerialEngine_GetWait(&h->engine, 1060, true, false) == 0u);
+    H_Destroy(h);
+}
+
+/* SDL_crc16 of src/stdlib/SDL_crc16.c, the reflected polynomial 0xA001 from
+   0, which the driver passes to SDL_Serial_GUIDKey */
+static uint16_t Crc16(const char *text)
+{
+    uint16_t crc = 0;
+    size_t i;
+    int bit;
+
+    for (i = 0; text[i]; ++i) {
+        crc ^= (uint8_t)text[i];
+        for (bit = 0; bit < 8; ++bit) {
+            crc = (uint16_t)((crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1));
+        }
+    }
+    return crc;
+}
+
+/* Every fixed name a module presents on a port the hint names, with its
+   sub-device and joystick type */
+static const struct
+{
+    const char *name;
+    int sub;
+    uint8_t type;
+} serial_identities[] = {
+    { "Spaceball 1003/2003", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 2003B", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 2003C", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 3003C", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 3003/3003C", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 4000 FLX", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 4000 FLX Lefty", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "SpaceTec SpaceOrb 360", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Magellan SpaceMouse", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Spaceball 5000", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "CadMan", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Gravis Stinger", 0, SDL_SERIAL_TYPE_GAMEPAD },
+    { "Logitech WingMan Warrior", 0, SDL_SERIAL_TYPE_FLIGHT_STICK },
+    { "Logitech CyberMan", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Zhen Hua RC transmitter", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "FlySky FS-iA6B", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "JVS I/O Player 1", 0, SDL_SERIAL_TYPE_ARCADE_STICK },
+    { "JVS I/O Player 2", 1, SDL_SERIAL_TYPE_ARCADE_STICK },
+    { "JVS I/O Player 3", 2, SDL_SERIAL_TYPE_ARCADE_STICK },
+    { "JVS I/O Player 4", 3, SDL_SERIAL_TYPE_ARCADE_STICK },
+    { "VRinsight CDU II", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "VRinsight MCP Combo", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Kettler Ergometer", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Logitech WingMan Force", 0, SDL_SERIAL_TYPE_FLIGHT_STICK },
+    { "Logitech WingMan Formula Force", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "AVB Mag Turbo Force", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "AVB Top Shot Force Feedback Racing Wheel", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "ACT LABS Force RS", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "Saitek R440 Force Wheel", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "Guillemot Race Leader Force Feedback", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "Guillemot Jet Leader Force Feedback", 0, SDL_SERIAL_TYPE_FLIGHT_STICK },
+    { "Guillemot Force Feedback Racing Wheel", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "Boeder Force Feedback Wheel", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "Trust Force Feedback Race Master", 0, SDL_SERIAL_TYPE_WHEEL },
+    { "Pony Canyon Master Controller", 0, SDL_SERIAL_TYPE_GAMEPAD },
+    { "DJI RC-N1", 0, SDL_SERIAL_TYPE_GAMEPAD },
+    { "DJI Mavic Mini Remote", 0, SDL_SERIAL_TYPE_GAMEPAD },
+    { "DJI Phantom 3 Remote", 0, SDL_SERIAL_TYPE_GAMEPAD },
+    { "DJI Phantom 2 Remote", 0, SDL_SERIAL_TYPE_GAMEPAD },
+    { "Konami BIO2 IIDX", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Konami SOUND VOLTEX", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Konami Nostalgia Panel", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Konami MUSECA", 0, SDL_SERIAL_TYPE_UNKNOWN },
+    { "Konami DDR Stage P1", 0, SDL_SERIAL_TYPE_DANCE_PAD },
+    { "Konami DDR Stage P2", 1, SDL_SERIAL_TYPE_DANCE_PAD }
+};
+
+/* SDL_CreateJoystickGUID keeps this many bytes of the product name in a
+   vendor-0 GUID with a driver signature (src/joystick/SDL_joystick.c), and
+   SDL's stored automatic mapping keeps nothing else of the name */
+#define GUID_NAME_BYTES 9
+
+/* The product name in the GUID of a port the hint names */
+static void TestGUIDKey(void)
+{
+    char key[SDL_SERIAL_GUID_KEY_LENGTH], other[SDL_SERIAL_GUID_KEY_LENGTH], small[8];
+    char longest[SDL_SERIAL_NAME_LENGTH];
+    size_t i, j;
+
+    /* 0xBB3D is this CRC's check value, and the names' values are what
+       SDL_crc16 of the SDL3.dll of 075962b764 returns for them */
+    CHECK(Crc16("123456789") == 0xBB3D);
+    CHECK(Crc16("JVS I/O Player 1") == 0xCA3A && Crc16("JVS I/O Player 2") == 0xCB7A);
+    CHECK(Crc16("Konami DDR Stage P2") == 0x0DE5 && Crc16("DJI Phantom 3 Remote") == 0x8390);
+
+    SDL_Serial_GUIDKey(key, sizeof(key), 0xCA3A, 0, "JVS I/O Player 1");
+    CHECK(strcmp(key, "CA3A0 JVS I/O Player 1") == 0);
+    SDL_Serial_GUIDKey(key, sizeof(key), 0x0DE5, 1, "Konami DDR Stage P2");
+    CHECK(strcmp(key, "0DE51 Konami DDR Stage P2") == 0);
+    SDL_Serial_GUIDKey(small, sizeof(small), 0xCA3A, 0, "JVS I/O Player 1");
+    CHECK(strcmp(small, "CA3A0 J") == 0);
+    memset(longest, 'L', sizeof(longest) - 1);
+    longest[sizeof(longest) - 1] = '\0';
+    SDL_Serial_GUIDKey(key, sizeof(key), 0x0001, 3, longest);
+    CHECK(strncmp(key, "00013 LLL", 9) == 0 && strlen(key) == 6 + strlen(longest));
+
+    /* Two identities of one type share a stored mapping when the kept bytes
+       match, so only the same name on the same sub-device may share them */
+    for (i = 0; i < sizeof(serial_identities) / sizeof(serial_identities[0]); ++i) {
+        SDL_Serial_GUIDKey(key, sizeof(key), Crc16(serial_identities[i].name), serial_identities[i].sub, serial_identities[i].name);
+        for (j = i + 1; j < sizeof(serial_identities) / sizeof(serial_identities[0]); ++j) {
+            const bool same = serial_identities[i].sub == serial_identities[j].sub &&
+                              strcmp(serial_identities[i].name, serial_identities[j].name) == 0;
+
+            if (serial_identities[i].type != serial_identities[j].type) {
+                continue;
+            }
+            SDL_Serial_GUIDKey(other, sizeof(other), Crc16(serial_identities[j].name), serial_identities[j].sub, serial_identities[j].name);
+            if (same != (strncmp(key, other, GUID_NAME_BYTES) == 0)) {
+                printf("  \"%s\" sub %d and \"%s\" sub %d\n", serial_identities[i].name, serial_identities[i].sub,
+                       serial_identities[j].name, serial_identities[j].sub);
+                H_Fail("a GUID key shared by different identities");
+            }
+        }
+    }
+}
+
+/* One joystick's events never go back in time */
+static void TestEventStamp(void)
+{
+    uint64_t last = 0;
+
+    CHECK(SDL_Serial_EventStamp(&last, 100) == 100 && last == 100);
+    /* A change the port thread stamped before the state the joystick opened with */
+    CHECK(SDL_Serial_EventStamp(&last, 90) == 100 && last == 100);
+    CHECK(SDL_Serial_EventStamp(&last, 100) == 100 && last == 100);
+    CHECK(SDL_Serial_EventStamp(&last, 150) == 150 && last == 150);
+}
+
 int main(void)
 {
     TestRetry();
@@ -1144,5 +1546,12 @@ int main(void)
     TestBase();
     TestBreak();
     TestCloseSequence();
+    TestStall();
+    TestOutbox();
+    TestOutboxTurns();
+    TestEffectCheck();
+    TestWait();
+    TestGUIDKey();
+    TestEventStamp();
     return H_Finish();
 }

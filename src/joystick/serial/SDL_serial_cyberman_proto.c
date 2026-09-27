@@ -101,10 +101,13 @@ static void CyberMan_Fail(SDL_CyberManState *s, uint64_t now)
 {
     SDL_Serial_ClearActions(&s->base);
     s->waiting_seq = 0;
+    s->switch_seq = 0;
     s->step = SDL_CYBERMAN_STEP_RETRY;
     CyberMan_SetTimer(s, now + SDL_CYBERMAN_RETRY_MS);
 }
 
+/* The static report answered !S, so a completion of !S still to come
+   changes nothing */
 static void CyberMan_Present(SDL_CyberManState *s)
 {
     SDL_SerialIdentity identity;
@@ -112,6 +115,7 @@ static void CyberMan_Present(SDL_CyberManState *s)
     SDL_Serial_SetIdentity(&identity, "Logitech CyberMan", SDL_SERIAL_TYPE_UNKNOWN, SDL_CYBERMAN_AXES, SDL_CYBERMAN_BUTTONS, 0, 0);
     s->step = SDL_CYBERMAN_STEP_PRESENT;
     s->deadline_set = false;
+    s->waiting_seq = 0;
     SDL_Serial_Present(&s->base, 0, &identity);
 }
 
@@ -141,10 +145,11 @@ static void CyberMan_HandleReport(SDL_CyberManState *s)
         }
         break;
     case 1:
-        /* The static report: bytes 2 and 3 are the version */
+        /* The static report: bytes 2 and 3 are the version. A port thread
+           that runs late can read it before it handles the !S completion. */
         s->version_major = r[1] & 0x7F;
         s->version_minor = r[2] & 0x7F;
-        if (s->step == SDL_CYBERMAN_STEP_STATIC) {
+        if (s->step == SDL_CYBERMAN_STEP_RATE || s->step == SDL_CYBERMAN_STEP_STATIC) {
             CyberMan_Present(s);
         }
         break;
@@ -219,7 +224,8 @@ static void CyberMan_Feed(void *state, const uint8_t *data, size_t length, uint6
             if (byte == '3') {
                 static const uint8_t swift[2] = { '*', 'S' };
 
-                SDL_Serial_QueueWrite(&s->base, 0, swift, sizeof(swift));
+                s->switch_seq = CyberMan_NextSeq(s);
+                SDL_Serial_QueueWrite(&s->base, s->switch_seq, swift, sizeof(swift));
                 s->waiting_seq = CyberMan_NextSeq(s);
                 SDL_Serial_QueueDrain(&s->base, s->waiting_seq);
                 s->step = SDL_CYBERMAN_STEP_SWITCH;
@@ -228,6 +234,9 @@ static void CyberMan_Feed(void *state, const uint8_t *data, size_t length, uint6
                 CyberMan_Fail(s, now);
             }
             break;
+        /* The new rate is set before !S goes out, so bytes read in the rate
+           step are at 4800 */
+        case SDL_CYBERMAN_STEP_RATE:
         case SDL_CYBERMAN_STEP_STATIC:
         case SDL_CYBERMAN_STEP_PRESENT:
             CyberMan_ReportByte(s, byte);
@@ -284,7 +293,18 @@ static void CyberMan_ActionDone(void *state, bool success, uint64_t now)
     SDL_CyberManState *s = (SDL_CyberManState *)state;
     uint8_t tag;
 
-    if (!SDL_Serial_FinishAction(&s->base, &tag) || tag == 0 || tag != s->waiting_seq) {
+    if (!SDL_Serial_FinishAction(&s->base, &tag) || tag == 0) {
+        return;
+    }
+    if (tag == s->switch_seq) {
+        /* *S cut short can leave the device a mouse */
+        s->switch_seq = 0;
+        if (!success) {
+            CyberMan_Fail(s, now);
+        }
+        return;
+    }
+    if (tag != s->waiting_seq) {
         return;
     }
     s->waiting_seq = 0;

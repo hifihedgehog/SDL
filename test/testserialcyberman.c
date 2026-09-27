@@ -171,6 +171,52 @@ static void TestStartupFailures(void)
     H_FeedAt(h, 330, (const uint8_t *)"\x80\x00\x00\x00\x00", 5);
     CHECK(h->npresence == 0 && State(h)->step == SDL_CYBERMAN_STEP_STATIC);
     H_Destroy(h);
+
+    /* *S cut short, as the port reports a write that ran into its write
+       timeout: the device may still be a mouse, so the start-up fails at
+       once */
+    h = H_Create(&SDL_SerialCyberManModule);
+    h->pend_writes = true;
+    H_Start(h);
+    H_Advance(h, 200);
+    H_FeedAt(h, 260, (const uint8_t *)"M3", 2);
+    H_Advance(h, 262);
+    H_CompleteWrite(h, false);
+    CHECK(State(h)->step == SDL_CYBERMAN_STEP_RETRY && h->npresence == 0);
+    H_Destroy(h);
+}
+
+/* A port thread that runs late can handle the static report before the !S
+   completion. The report still presents the device. */
+static void TestReportBeforeCompletion(void)
+{
+    Harness *h = H_Create(&SDL_SerialCyberManModule);
+
+    h->defer_writes = H_DEFER_BYTES_FIRST;
+    H_Start(h);
+    BringUp(h);
+    CHECK(h->presence[0] == 1 && State(h)->step == SDL_CYBERMAN_STEP_PRESENT);
+    H_Advance(h, 2000);
+    CHECK(h->presence[0] == 1 && h->npresence == 1 && State(h)->step == SDL_CYBERMAN_STEP_PRESENT);
+    H_Destroy(h);
+
+    /* The same with the writes held by the test, and a short !S reported
+       after the report: the device stays */
+    h = H_Create(&SDL_SerialCyberManModule);
+    h->pend_writes = true;
+    H_Start(h);
+    H_Advance(h, 200);
+    H_FeedAt(h, 260, (const uint8_t *)"M3", 2);
+    H_Advance(h, 262);
+    H_CompleteWrite(h, true);
+    H_Advance(h, 282);
+    CHECK(State(h)->step == SDL_CYBERMAN_STEP_RATE);
+    H_Feed(h, static_report, sizeof(static_report));
+    CHECK(h->presence[0] == 1 && State(h)->step == SDL_CYBERMAN_STEP_PRESENT);
+    H_CompleteWrite(h, false);
+    H_Advance(h, 2000);
+    CHECK(h->presence[0] == 1 && h->npresence == 1 && State(h)->step == SDL_CYBERMAN_STEP_PRESENT);
+    H_Destroy(h);
 }
 
 static const uint8_t r_rest[5] = { 0x80, 0x00, 0x00, 0x00, 0x00 };
@@ -401,6 +447,7 @@ int main(void)
 {
     TestStartup();
     TestStartupFailures();
+    TestReportBeforeCompletion();
     TestReports();
     TestRumble();
     TestBatteryB();

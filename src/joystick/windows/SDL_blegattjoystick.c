@@ -96,6 +96,17 @@
    subsystem from its window's thread. */
 #define BLEGATT_QUIT_WAIT_MS 3000
 
+/* How long an ended session waits for its executor to release the link
+   outside SDL_Quit before it gives the address back. Once the session has
+   ended, the call out ends within one 50 ms slice of the cancel, but a
+   closing write watches only the abandon flag and runs to its 3 s ceiling
+   on a lost link, and the close then pauses 100 ms. A link still closing
+   after that is taken to hang, as GattDeviceService.Close sometimes does
+   (bleak backends/winrt/client.py:488-491), and its address would
+   otherwise stay reserved until SDL_Quit. The executor still ends on its
+   own, and the record is freed once it has. */
+#define BLEGATT_CLOSE_WAIT_MS 5000
+
 /* The pure layer carries SDL's values */
 SDL_COMPILE_TIME_ASSERT(blegatt_type_unknown, SDL_BLE_TYPE_UNKNOWN == SDL_JOYSTICK_TYPE_UNKNOWN);
 SDL_COMPILE_TIME_ASSERT(blegatt_type_gamepad, SDL_BLE_TYPE_GAMEPAD == SDL_JOYSTICK_TYPE_GAMEPAD);
@@ -212,7 +223,7 @@ typedef struct BLEGATT_Connection
 
     /* The executor's */
     SDL_BLEGATTLink *link;
-    bool inbox_shared; /* The transport has pointers into the inbox */
+    bool inbox_shared; /* The transport has kept pointers into the inbox */
 
     /* Under the mutex */
     SDL_BLEValueQueue values;
@@ -239,8 +250,9 @@ typedef struct BLEGATT_Connection
     Uint32 samples_dropped;
     bool sensors; /* The opened joystick has a sensor enabled */
 
-    /* Under blegatt_lock. SDL_Quit gave up waiting for the threads. */
-    bool abandoned;
+    /* Under blegatt_lock */
+    bool abandoned; /* SDL_Quit gave up waiting for the threads */
+    bool finishing; /* The session thread gave the host its end and only frees and logs from there */
 
     /* The joystick thread's */
     bool stopping;
@@ -261,6 +273,7 @@ struct joystick_hwdata
     int battery;       /* The last percent sent, -1 before one */
     bool send_initial; /* The state Open took is not sent yet */
     Uint64 initial_stamp;
+    Uint64 last_stamp; /* The time of the last event sent, see BLEGATT_Stamp */
     SDL_BLEControls initial;
 };
 
@@ -395,7 +408,9 @@ static void BLEGATT_Log(void *userdata, const char *text)
 
 /* A characteristic value, on a WinRT thread-pool thread. It only queues the
    value and wakes the session thread. Its count in callbacks keeps the
-   connection alive until it returns. */
+   connection alive until it returns. A connection SDL_Quit left to end on
+   its own takes no value, so no clock is read after SDL_Quit
+   (BLEGATT_TakeEnds). */
 static void BLEGATT_ValueReceived(void *userdata, int characteristic, const Uint8 *data, size_t length)
 {
     BLEGATT_Inbox *inbox = (BLEGATT_Inbox *)userdata;
@@ -403,7 +418,7 @@ static void BLEGATT_ValueReceived(void *userdata, int characteristic, const Uint
 
     SDL_AddAtomicInt(&inbox->callbacks, 1);
     connection = (BLEGATT_Connection *)SDL_GetAtomicPointer(&inbox->connection);
-    if (connection) {
+    if (connection && !SDL_GetAtomicInt(&connection->quiet)) {
         const Uint64 now = SDL_GetTicksNS();
 
         SDL_LockMutex(connection->mutex);
@@ -501,10 +516,18 @@ static void BLEGATT_Execute(BLEGATT_Connection *connection, const SDL_BLEAction 
 
     SDL_zero(result);
     result.kind = action->kind;
-    /* A connection stopped before its connect keeps the inbox to itself */
+    /* The transport keeps pointers into the inbox once Open has registered
+       its status delegate, which every link it returns carries, and in the
+       value delegates that subscriptions on a link register. A connection
+       stopped before its connect, or one whose open failed before that
+       registration, keeps the inbox to itself. */
     if (action->kind == SDL_BLE_ACTION_CONNECT && !connection->link && !SDL_GetAtomicInt(&inbox->cancel)) {
-        connection->inbox_shared = true;
-        connection->link = SDL_BLEGATT_Open(connection->address, &inbox->lost, &inbox->cancel, &result.bonded);
+        bool retained = false;
+
+        connection->link = SDL_BLEGATT_Open(connection->address, &inbox->lost, &inbox->cancel, &result.bonded, &retained);
+        if (retained || connection->link) {
+            connection->inbox_shared = true;
+        }
     }
     link = connection->link;
     switch (action->kind) {
@@ -648,17 +671,37 @@ static void BLEGATT_RunActions(BLEGATT_Connection *connection)
     }
 }
 
-/* Answers the session from the executor's results, in order */
+/* True when the oldest result waiting is a pairing that succeeded */
+static bool BLEGATT_PairingSucceeded(BLEGATT_Connection *connection)
+{
+    bool paired;
+
+    SDL_LockMutex(connection->mutex);
+    paired = connection->result_count > 0 && connection->results[connection->result_head].kind == SDL_BLE_ACTION_PAIR &&
+             connection->results[connection->result_head].success;
+    SDL_UnlockMutex(connection->mutex);
+    return paired;
+}
+
 /* A lost link, then a stop, as the session thread takes them. It runs again
    before every result, so a failure the stop's cancel caused reaches a
-   session that is already closing and counts for nothing. */
+   session that is already closing and counts for nothing. An ended session
+   takes neither, and no clock is read for it: after SDL_Quit has left a
+   connection to end on its own, SDL_GetTicks here would start SDL's tick
+   base and timer resolution again (SDL_timer.c). */
 static void BLEGATT_TakeEnds(BLEGATT_Connection *connection, bool *stopped)
 {
     SDL_BLESession *session = &connection->session;
 
+    if (SDL_BLESession_Ended(session)) {
+        return;
+    }
     /* The loss goes first, so a stop that comes with it queues no closing
-       write to a link that is gone */
-    if (SDL_GetAtomicInt(&connection->inbox->lost)) {
+       write to a link that is gone. A pairing that succeeded as the link
+       dropped is answered first (BLEGATT_TakeResults): its answer came, so
+       the loss is no failed pairing, and the session ends on it as for a
+       loss during the discovery that the pairing queues. */
+    if (SDL_GetAtomicInt(&connection->inbox->lost) && !BLEGATT_PairingSucceeded(connection)) {
         SDL_BLESession_Lost(session, SDL_GetTicks());
     }
     if (!*stopped && SDL_GetAtomicInt(&connection->stop)) {
@@ -667,16 +710,22 @@ static void BLEGATT_TakeEnds(BLEGATT_Connection *connection, bool *stopped)
     }
 }
 
+/* Answers the session from the executor's results, in order */
 static void BLEGATT_TakeResults(BLEGATT_Connection *connection, bool *stopped)
 {
     SDL_BLESession *session = &connection->session;
     BLEGATT_Result result;
 
     while (BLEGATT_TakeResult(connection, &result)) {
+        const bool paired = (result.kind == SDL_BLE_ACTION_PAIR && result.success);
         Uint64 now;
 
-        BLEGATT_TakeEnds(connection, stopped);
-        now = SDL_GetTicks();
+        if (!paired) {
+            BLEGATT_TakeEnds(connection, stopped);
+        }
+        /* An ended session drops every answer (SDL_ble_session.h), so it
+           gets no clock */
+        now = SDL_BLESession_Ended(session) ? 0 : SDL_GetTicks();
         switch (result.kind) {
         case SDL_BLE_ACTION_CONNECT:
             SDL_BLESession_Connected(session, result.success, result.bonded, now);
@@ -701,6 +750,9 @@ static void BLEGATT_TakeResults(BLEGATT_Connection *connection, bool *stopped)
             break;
         default:
             break;
+        }
+        if (paired) {
+            BLEGATT_TakeEnds(connection, stopped);
         }
     }
 }
@@ -741,8 +793,10 @@ static bool BLEGATT_IsClosed(BLEGATT_Connection *connection)
 }
 
 /* Owns the session and the module. It ends once the session has ended and
-   the executor has released the link, and then gives the address back to
-   the host, unless SDL_Quit abandoned the connection. */
+   the executor has released the link, or BLEGATT_CLOSE_WAIT_MS after the
+   end when the link does not close, and then gives the address back to the
+   host, unless SDL_Quit abandoned the connection. The executor ends on its
+   own in that case, and the record is freed once both have ended. */
 static int SDLCALL BLEGATT_SessionThread(void *data)
 {
     BLEGATT_Connection *connection = (BLEGATT_Connection *)data;
@@ -752,6 +806,9 @@ static int SDLCALL BLEGATT_SessionThread(void *data)
     SDL_BLEOutcome outcome;
     SDL_BLESink sink;
     bool stopped = false;
+    bool closing = false;
+    bool close_hung = false;
+    Uint64 closing_since = 0;
     bool abandoned;
     Uint32 full, too_long, empty, changes_dropped, samples_dropped;
 
@@ -783,12 +840,28 @@ static int SDLCALL BLEGATT_SessionThread(void *data)
         }
         BLEGATT_RunActions(connection);
         if (SDL_BLESession_Ended(session)) {
+            /* The wait runs on the performance counter, which reads
+               QueryPerformanceCounter and keeps no state, since after
+               SDL_Quit has left the connection SDL_GetTicks would start
+               SDL's tick base again (BLEGATT_TakeEnds) */
+            const Uint64 counter = SDL_GetPerformanceCounter();
+            Uint64 waited_ms;
+
             /* No answer counts now, so the call out ends early */
             SDL_SetAtomicInt(&connection->inbox->cancel, 1);
             if (BLEGATT_IsClosed(connection)) {
                 break;
             }
-            WaitForSingleObject(connection->wake_event, INFINITE);
+            if (!closing) {
+                closing = true;
+                closing_since = counter;
+            }
+            waited_ms = (counter - closing_since) * 1000 / SDL_GetPerformanceFrequency();
+            if (waited_ms >= BLEGATT_CLOSE_WAIT_MS) {
+                close_hung = true;
+                break;
+            }
+            WaitForSingleObject(connection->wake_event, (DWORD)(BLEGATT_CLOSE_WAIT_MS - waited_ms));
             continue;
         }
         if (SDL_BLESession_GetDeadline(session, &deadline)) {
@@ -805,11 +878,15 @@ static int SDLCALL BLEGATT_SessionThread(void *data)
 
     /* An abandoned connection leaves the host alone. SDL_Quit has cleared
        the host, and after the next Init the host can hold a new session for
-       this address. */
+       this address. Otherwise the end is decided here, under the same lock
+       as the abandonment: from here the thread only frees and logs, and
+       SDL_Quit waits for such a thread instead of leaving it
+       (BLEGATT_AbandonConnection). */
     SDL_BLESession_GetOutcome(session, &outcome);
     SDL_LockMutex(blegatt_lock);
     abandoned = connection->abandoned;
     if (!abandoned) {
+        connection->finishing = true;
         SDL_BLEHost_SessionEnded(&blegatt_host, connection->address, &outcome, SDL_GetTicks());
     }
     SDL_UnlockMutex(blegatt_lock);
@@ -820,6 +897,10 @@ static int SDLCALL BLEGATT_SessionThread(void *data)
 
     /* Nothing is logged after SDL_Quit has given up on the thread */
     if (!abandoned) {
+        if (close_hung) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE GATT %s (%s): still closing after %d ms, the address is free for a new connection",
+                         connection->path, family->name, BLEGATT_CLOSE_WAIT_MS);
+        }
         SDL_LockMutex(connection->mutex);
         full = connection->values.full;
         too_long = connection->values.too_long;
@@ -1043,13 +1124,34 @@ static void BLEGATT_WaitConnections(Uint64 start, Uint64 timeout_ms)
    a flag under a lock before it touches the driver's state
    (SDL_ble_switch2joystick.c:717-719, :911-918). Here the flag is
    abandoned. The record and inbox are never freed, since those threads and
-   the transport's callbacks still use them. */
+   the transport's callbacks still use them. A session thread that has
+   already given the host its end (finishing) is decided under the same
+   lock and only frees and logs from there, so it is waited for instead:
+   left alone, it could log after SDL_Quit has shut the log down. Its
+   executor is left to end on its own when it still closes the link, as
+   after a session that stopped waiting for its close
+   (BLEGATT_CLOSE_WAIT_MS). */
 static void BLEGATT_AbandonConnection(BLEGATT_Connection *connection)
 {
-    SDL_SetAtomicInt(&connection->quiet, 1);
+    bool finishing;
+
     SDL_LockMutex(blegatt_lock);
-    connection->abandoned = true;
+    finishing = connection->finishing;
+    if (!finishing) {
+        SDL_SetAtomicInt(&connection->quiet, 1);
+        connection->abandoned = true;
+    }
     SDL_UnlockMutex(blegatt_lock);
+    if (finishing) {
+        SDL_WaitThread(connection->session_thread, NULL);
+        connection->session_thread = NULL;
+        if (SDL_GetAtomicInt(&connection->executor_exited)) {
+            SDL_WaitThread(connection->executor_thread, NULL);
+            BLEGATT_FreeConnection(connection);
+            return;
+        }
+        SDL_SetAtomicInt(&connection->quiet, 1);
+    }
     SDL_DetachThread(connection->session_thread);
     SDL_DetachThread(connection->executor_thread);
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE GATT %s (%s): still closing after %d ms, left to end on its own",
@@ -1057,7 +1159,9 @@ static void BLEGATT_AbandonConnection(BLEGATT_Connection *connection)
 }
 
 /* Frees the connections whose threads have ended. At Quit it takes every
-   connection, and one whose threads still run is abandoned. */
+   connection, and one whose threads still run is abandoned, or freed once
+   a finishing session thread and its executor have ended
+   (BLEGATT_AbandonConnection). */
 static void BLEGATT_ReapConnections(bool quitting)
 {
     BLEGATT_Connection *connection, *next;
@@ -1135,7 +1239,9 @@ static void BLEGATT_ApplyHints(void)
     if (pairing != blegatt_pairing) {
         /* A wait earned under the old pairing setting says nothing under the
            new one. An unbonded Daydream that backed off with pairing off can
-           pair now, so it is tried at its next advertisement. */
+           pair now, so it is tried at its next advertisement. A session that
+           runs now began with the old setting, so its address starts over
+           when that session ends. */
         SDL_BLEHost_ClearBackoff(&blegatt_host);
     }
     blegatt_pairing = pairing;
@@ -1205,6 +1311,20 @@ static void BLEGATT_CheckPresence(BLEGATT_Connection *connection)
         BLEGATT_RemoveJoystick(connection, true);
     }
     if (!connection->registered && generation) {
+        /* SDL's ignore lists, SDL_HINT_JOYSTICK_BLACKLIST_DEVICES and
+           SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES and its _EXCEPT, by the
+           identity's vendor, product and name, checked here in Detect under
+           the joystick lock, as the WGI driver checks them
+           (SDL_windows_gaming_input.c:457). Only the Daydream reports IDs,
+           so a list of IDs names no other family, and an allow list leaves
+           out every family it does not name. An ignored device keeps its
+           connection and gets no joystick. Presence changes only with a
+           publish or a removal, so the lists are read once per publish. */
+        if (SDL_ShouldIgnoreJoystick(identity.vendor, identity.product, 0, identity.name)) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE GATT %s (%s): ignored by SDL's device lists", connection->path,
+                         BLEGATT_Family(connection)->name);
+            return;
+        }
         connection->registered = generation;
         connection->joystick_identity = identity;
         connection->instance_id = SDL_GetNextObjectID();
@@ -1409,7 +1529,8 @@ static void BLEGATT_SendControls(SDL_Joystick *joystick, struct joystick_hwdata 
     }
 }
 
-static void BLEGATT_SendSensor(SDL_Joystick *joystick, const BLEGATT_Sample *sample)
+/* A sample keeps the device's own time, sensor_ns, as it is */
+static void BLEGATT_SendSensor(SDL_Joystick *joystick, const BLEGATT_Sample *sample, Uint64 timestamp)
 {
     SDL_SensorType type;
 
@@ -1423,7 +1544,21 @@ static void BLEGATT_SendSensor(SDL_Joystick *joystick, const BLEGATT_Sample *sam
     default:
         return;
     }
-    SDL_SendJoystickSensor(sample->time_ns, joystick, type, sample->sensor_ns, sample->data, 3);
+    SDL_SendJoystickSensor(timestamp, joystick, type, sample->sensor_ns, sample->data, 3);
+}
+
+/* The time for an event: the later of its own and the last one sent, so
+   one joystick's events never go back in time, as SDL_BLE_Commit keeps the
+   module's. The state Open took is stamped at the Open, and a value that
+   arrived before the Open but was decoded after it carries an earlier
+   receive time. */
+static Uint64 BLEGATT_Stamp(struct joystick_hwdata *hwdata, Uint64 time)
+{
+    if (time < hwdata->last_stamp) {
+        return hwdata->last_stamp;
+    }
+    hwdata->last_stamp = time;
+    return time;
 }
 
 static bool BLEGATT_JoystickOpen(SDL_Joystick *joystick, int device_index)
@@ -1560,7 +1695,7 @@ static void BLEGATT_JoystickUpdate(SDL_Joystick *joystick)
         for (i = 0; i < joystick->naxes; ++i) {
             SDL_SeedJoystickDataAxis(joystick, (Uint8)i, rest.axes[i]);
         }
-        BLEGATT_SendControls(joystick, hwdata, &hwdata->initial, hwdata->initial_stamp);
+        BLEGATT_SendControls(joystick, hwdata, &hwdata->initial, BLEGATT_Stamp(hwdata, hwdata->initial_stamp));
     }
     /* A batch per lock, at most both queues' worth per update */
     for (rounds = 0; rounds < (BLEGATT_CHANGE_CAPACITY + BLEGATT_SAMPLE_CAPACITY) / BLEGATT_UPDATE_BATCH; ++rounds) {
@@ -1579,9 +1714,9 @@ static void BLEGATT_JoystickUpdate(SDL_Joystick *joystick)
             }
             hwdata->sequence = sequence;
             if (event->sensor) {
-                BLEGATT_SendSensor(joystick, &event->sample);
+                BLEGATT_SendSensor(joystick, &event->sample, BLEGATT_Stamp(hwdata, event->sample.time_ns));
             } else {
-                BLEGATT_SendControls(joystick, hwdata, &event->change.controls, event->change.time_ns);
+                BLEGATT_SendControls(joystick, hwdata, &event->change.controls, BLEGATT_Stamp(hwdata, event->change.time_ns));
             }
         }
         if (count < BLEGATT_UPDATE_BATCH) {
@@ -1603,7 +1738,7 @@ static void BLEGATT_JoystickUpdate(SDL_Joystick *joystick)
     }
     SDL_UnlockMutex(connection->mutex);
     if (resend) {
-        BLEGATT_SendControls(joystick, hwdata, &latest, latest_ns);
+        BLEGATT_SendControls(joystick, hwdata, &latest, BLEGATT_Stamp(hwdata, latest_ns));
     }
 }
 

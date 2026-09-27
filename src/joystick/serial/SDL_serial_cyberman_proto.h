@@ -68,6 +68,7 @@ typedef struct SDL_CyberManState
     uint64_t deadline;
     uint8_t action_seq;
     uint8_t waiting_seq;
+    uint8_t switch_seq; /* The *S write, 0 when none is out */
     uint8_t report[SDL_CYBERMAN_MAX_REPORT];
     int report_length;
     int report_expected; /* 0 while no report is open */

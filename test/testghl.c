@@ -199,6 +199,66 @@ static void TestIdentity(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* The gamepad mapping SDL_gamepad.c gives the dongles. Every binding names an
+   input the guitar has: a button below SDL_GHL_NUM_BUTTONS, an axis below
+   SDL_GHL_NUM_AXES or hat 0. So it has no touchpad or Share button, which the
+   default mappings of the PS4 and Xbox One gamepad types add as button 11. */
+
+static void TestMapping(void)
+{
+    const char *field = SDL_GHL_MAPPING;
+    int buttons[SDL_GHL_NUM_BUTTONS] = { 0 };
+    int axes[SDL_GHL_NUM_AXES] = { 0 };
+    int hat_bits = 0;
+    int fields = 0;
+    int i;
+
+    while (*field) {
+        const char *colon = strchr(field, ':');
+        const char *comma = strchr(field, ',');
+        char *end = NULL;
+        long index;
+
+        CHECK(colon && comma && colon < comma);
+        if (!colon || !comma || colon > comma) {
+            break;
+        }
+        ++fields;
+        CHECK(strncmp(field, "touchpad:", 9) != 0);
+        index = strtol(colon + 2, &end, 10);
+        if (colon[1] == 'b') {
+            CHECK(end == comma && index >= 0 && index < SDL_GHL_NUM_BUTTONS);
+            if (end == comma && index >= 0 && index < SDL_GHL_NUM_BUTTONS) {
+                ++buttons[index];
+            }
+        } else if (colon[1] == 'a') {
+            CHECK(end == comma && index >= 0 && index < SDL_GHL_NUM_AXES);
+            if (end == comma && index >= 0 && index < SDL_GHL_NUM_AXES) {
+                ++axes[index];
+            }
+        } else {
+            /* The only other input is hat 0 */
+            CHECK(colon[1] == 'h' && index == 0 && end && *end == '.');
+            if (colon[1] == 'h' && end && *end == '.') {
+                hat_bits |= (int)strtol(end + 1, NULL, 10);
+            }
+        }
+        field = comma + 1;
+    }
+
+    /* Each of the guitar's buttons and axes is bound once, and the hat's
+       four directions */
+    CHECK(fields == SDL_GHL_NUM_BUTTONS + SDL_GHL_NUM_AXES + 4);
+    for (i = 0; i < SDL_GHL_NUM_BUTTONS; ++i) {
+        CHECK(buttons[i] == 1);
+    }
+    for (i = 0; i < SDL_GHL_NUM_AXES; ++i) {
+        CHECK(axes[i] == 1);
+    }
+    CHECK(hat_bits == (SDL_GHL_HAT_UP | SDL_GHL_HAT_RIGHT | SDL_GHL_HAT_DOWN | SDL_GHL_HAT_LEFT));
+}
+
+/* ------------------------------------------------------------------------ */
 /* Frame A, tests 1 to 6 */
 
 static void TestFrameA(void)
@@ -611,7 +671,9 @@ static void TestTruncations(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Keep-alive, tests 11 and 13 */
+/* Keep-alive, tests 11 and 13. Test 11 retries a failed send 1000 ms later,
+   the interval of the Top Shot request retry, where the part retried on the
+   next update. */
 
 typedef struct
 {
@@ -708,23 +770,48 @@ static void TestKeepAlive(void)
         SimUpdate(&sim, 68000);
         CHECK(sim.sends == 5);
 
-        /* A failed send is retried on the next update */
+        /* A failed send is retried 1000 ms after the failure, and a send
+           that succeeds sets the next one 8000 ms later */
         sim.fail = true;
         SimUpdate(&sim, 76000);
         CHECK(sim.sends == 5 && sim.attempts == 6);
-        SimUpdate(&sim, 76001);
-        CHECK(sim.attempts == 7);
+        CHECK(sim.keepalive.next_due_ms == 77000);
+        for (t = 76001; t < 77000; t += 3) {
+            SimUpdate(&sim, t);
+        }
+        SimUpdate(&sim, 76999);
+        CHECK(sim.attempts == 6);
+        SimUpdate(&sim, 77000);
+        CHECK(sim.sends == 5 && sim.attempts == 7);
         sim.fail = false;
-        SimUpdate(&sim, 76002);
-        CHECK(sim.sends == 6 && sim.last_send == 76002);
-        CHECK(sim.keepalive.next_due_ms == 84002);
-        SimUpdate(&sim, 84001);
+        SimUpdate(&sim, 77999);
+        CHECK(sim.attempts == 7);
+        SimUpdate(&sim, 78000);
+        CHECK(sim.sends == 6 && sim.last_send == 78000 && sim.attempts == 8);
+        CHECK(sim.keepalive.next_due_ms == 86000);
+        SimUpdate(&sim, 85999);
         CHECK(sim.sends == 6);
-        SimUpdate(&sim, 84002);
+        SimUpdate(&sim, 86000);
         CHECK(sim.sends == 7);
 
-        /* 13. Closing stops it, and reopening restarts at the reopen time */
-        SDL_GHL_KeepAliveStop(&sim.keepalive);
+        /* A dongle that refuses every keep-alive costs one attempt a second,
+           not one per update: 1 ms updates for 10 s from the due time */
+        sim.fail = true;
+        {
+            const int before = sim.attempts;
+
+            for (t = 94000; t <= 104000; ++t) {
+                SimUpdate(&sim, t);
+            }
+            CHECK(sim.attempts - before == 11);
+            CHECK(sim.sends == 7);
+        }
+        sim.fail = false;
+
+        /* 13. Closing stops it, and reopening restarts at the reopen time.
+           The drivers free the schedule with their zero-filled device data,
+           so a zeroed schedule stands for a closed one. */
+        memset(&sim.keepalive, 0, sizeof(sim.keepalive));
         SimUpdate(&sim, 200000);
         CHECK(sim.sends == 7);
         CHECK(!SDL_GHL_KeepAliveDue(&sim.keepalive, 1000000));
@@ -775,6 +862,7 @@ static void TestGameInputRawType(void)
 int main(void)
 {
     TestIdentity();
+    TestMapping();
     TestFrameA();
     TestFrameB();
     TestXbox();

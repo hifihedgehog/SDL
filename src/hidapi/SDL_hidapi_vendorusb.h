@@ -75,7 +75,8 @@ typedef struct SDL_VendorUSBRule
     /* Bytes read per transfer on a bulk IN endpoint, or 0 to read
      * wMaxPacketSize as every other interface is read. A bulk transfer ends
      * at a short packet or a full buffer (USB 2.0 section 5.8.3), so one read
-     * returns what the device sent up to its next short packet. The size must
+     * returns what the device sent up to its next short packet, or up to
+     * in_timeout when the rule sets it. The size must
      * be a whole number of packets, or the device's last packet can overrun
      * the read, which libusb reports as an overflow (libusb io.c, "Packets
      * and overflows") and WinUSB carries into the next read. Nothing is
@@ -84,6 +85,15 @@ typedef struct SDL_VendorUSBRule
      * interval (USB 2.0 section 5.7.3), so a longer read would hold each
      * full-size report back and return several at once. */
     uint16_t read_size;
+    /* Milliseconds an IN transfer waits before it times out, or 0 for the
+     * backend's 5000 ms. With 0 the backend drops the bytes a transfer holds
+     * when it times out, and with a timeout set here it returns them as one
+     * read. A reply that ends on a full packet without filling the buffer
+     * ends no bulk transfer, so it waits in the transfer for the device's
+     * next reply. A timeout shorter than the gap between replies returns it
+     * alone, unless the timeout lands while its packets arrive, which splits
+     * that one reply. */
+    uint16_t in_timeout;
 } SDL_VendorUSBRule;
 
 /* The rule for this interface, or NULL. */
@@ -149,6 +159,17 @@ extern bool SDL_VendorUSB_IsXIDInterface(uint8_t interface_class, uint8_t interf
  * device, so while this process holds an interface of a device open on a
  * handle that still reads, every interface of that device counts as opened. */
 extern bool SDL_VendorUSB_SkipUnopened(SDL_VendorUSBPlatform platform, bool xbox, bool opened);
+
+/* Whether another backend of the platform can list the interface a HIDAPI
+ * device reads, so that the device can be the one that backend asks about.
+ * libusb says whether the device's handle came from the libusb backend. On
+ * Windows an interface libusb opened, other than a HID interface, is bound to
+ * WinUSB, libusbK or libusb0. Windows serves an interface through one driver,
+ * and none of those feeds XInput, RawInput, Windows.Gaming.Input,
+ * DirectInput or GameInput, so such a device is never the pad they ask
+ * about. A HID interface, which libusb reaches through the Windows HID
+ * driver, and every device on other platforms can be. */
+extern bool SDL_VendorUSB_ListedElsewhere(SDL_VendorUSBPlatform platform, bool libusb, uint8_t interface_class);
 
 /* Whether the libusb backend claims interface 0 before it opens a later
  * Xbox interface on a handle no other interface uses yet. On Windows libusb

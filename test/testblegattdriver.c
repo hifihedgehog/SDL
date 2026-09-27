@@ -18,19 +18,21 @@
    device through SDL's joystick and gamepad API, and quits SDL.
 
    The driver in this file calls the fake, not SDL's transport. Every
-   function of SDL_ble_gatt.h is renamed below before the driver source is
-   included, so the driver here calls Fake_BLEGATT_* while SDL_ble_gatt.c in
-   the static SDL keeps SDL_BLEGATT_* for the Switch 2 driver, and the names
-   never clash. This object defines SDL_BLEGATT_JoystickDriver. The linker
-   takes every object on its command line and searches a library only for a
-   symbol still undefined, so the driver table in SDL_joystick.c binds to
-   this copy and the library's copy of the driver is never linked. Were that
-   copy pulled in for some other symbol, its SDL_BLEGATT_JoystickDriver would
-   collide with this one and the link would fail with LNK2005, so a test that
-   links runs this copy only. Before the link,
-   test/ble-driver/CheckTransport.cmake reads this object's symbols and
-   fails the build when anything in it still calls an SDL_BLEGATT_ function,
-   a WinRT entry point or a function that resolves one at run time.
+   function of SDL_ble_gatt.h is renamed (testblegattfake.h) before the
+   driver source is included, so the driver here calls Fake_BLEGATT_*, and
+   so does the Switch 2 driver, which testblegattswitch2.c compiles the same
+   way into the test. This object defines SDL_BLEGATT_JoystickDriver, and
+   that one SDL_BLE_JoystickDriver. The linker takes every object on its
+   command line and searches a library only for a symbol still undefined,
+   so the driver table in SDL_joystick.c binds to these copies, and the
+   library's copies of both drivers, and with them SDL_ble_gatt.c, are never
+   linked. Were a library copy pulled in for some other symbol, its driver
+   would collide with the test's and the link would fail with LNK2005, so a
+   test that links runs the test's copies only. Before the link,
+   test/ble-driver/CheckTransport.cmake reads both objects' symbols and
+   fails the build when anything in them still calls an SDL_BLEGATT_
+   function, a WinRT entry point or a function that resolves one at run
+   time.
 
    Arguments: the gearvr-controller clone, whose tests_fixtures.json holds
    the Gear VR packets, then optionally the letters of the scenarios to run. */
@@ -39,24 +41,18 @@
 #include "SDL_internal.h"
 
 /* Every transport function, renamed to the fake below */
-#define SDL_BLEGATT_Init           Fake_BLEGATT_Init
-#define SDL_BLEGATT_Quit           Fake_BLEGATT_Quit
-#define SDL_BLEGATT_InitThread     Fake_BLEGATT_InitThread
-#define SDL_BLEGATT_QuitThread     Fake_BLEGATT_QuitThread
-#define SDL_BLEGATT_AddListener    Fake_BLEGATT_AddListener
-#define SDL_BLEGATT_RemoveListener Fake_BLEGATT_RemoveListener
-#define SDL_BLEGATT_CheckWatcher   Fake_BLEGATT_CheckWatcher
-#define SDL_BLEGATT_Open           Fake_BLEGATT_Open
-#define SDL_BLEGATT_Pair           Fake_BLEGATT_Pair
-#define SDL_BLEGATT_RemoveBond     Fake_BLEGATT_RemoveBond
-#define SDL_BLEGATT_Discover       Fake_BLEGATT_Discover
-#define SDL_BLEGATT_Subscribe      Fake_BLEGATT_Subscribe
-#define SDL_BLEGATT_Read           Fake_BLEGATT_Read
-#define SDL_BLEGATT_Write          Fake_BLEGATT_Write
-#define SDL_BLEGATT_Close          Fake_BLEGATT_Close
+#include "testblegattfake.h"
+
+/* The Zwift keys' destruction, renamed to a fake that can hold a session
+   thread between the end it gave the host and its last log line, and then
+   calls SDL's (scenario B) */
+#define SDL_ZwiftCrypto_Destroy Fake_ZwiftCrypto_Destroy
 
 /* Always the tree's driver, by its path from this file */
 #include "../src/joystick/windows/SDL_blegattjoystick.c"
+
+#undef SDL_ZwiftCrypto_Destroy
+extern void SDL_ZwiftCrypto_Destroy(SDL_ZwiftKeys *keys);
 
 #include "core/windows/SDL_windows.h"
 #include "joystick/SDL_joystick_c.h"
@@ -281,6 +277,7 @@ typedef struct FakeConfig
     bool pair_blocks;        /* Pair runs until the driver cancels it */
     bool write_holds;        /* A write is held until the scenario releases it, whatever its flag says */
     bool subscribe_holds;    /* The same for a subscription */
+    bool pair_then_lose;     /* Pair succeeds, and sets the lost flag before it returns */
 } FakeConfig;
 
 typedef struct FakeTransport
@@ -316,6 +313,10 @@ typedef struct FakeTransport
     SDL_AtomicInt close_release; /* Ends every hanging Close */
     int calls_held;       /* Writes and subscriptions held now */
     SDL_AtomicInt hold_release; /* Ends every hold */
+    SDL_AtomicInt switch2_helpers; /* Calls of the Switch 2 driver's own helpers */
+    SDL_AtomicInt hold_destroy;    /* Fake_ZwiftCrypto_Destroy waits while set */
+    SDL_AtomicInt destroys_entered;
+    SDL_AtomicInt destroys_left;
 } FakeTransport;
 
 static FakeTransport fake;
@@ -577,7 +578,10 @@ void Fake_BLEGATT_RemoveListener(SDL_BLEGATT_Listener listener, void *userdata)
     SDL_UnlockMutex(fake.mutex);
 }
 
-SDL_BLEGATTLink *Fake_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_AtomicInt *cancel, bool *bonded)
+/* The fake keeps lost only in a link it returns, so *retained is whether
+   one came back */
+SDL_BLEGATTLink *Fake_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_AtomicInt *cancel, bool *bonded,
+                                   bool *retained)
 {
     SDL_BLEGATTLink *link = NULL;
     FakeConfig config;
@@ -622,6 +626,9 @@ SDL_BLEGATTLink *Fake_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_Atom
     if (bonded) {
         *bonded = link ? config.bonded : false;
     }
+    if (retained) {
+        *retained = (link != NULL);
+    }
     return link;
 }
 
@@ -648,6 +655,10 @@ bool Fake_BLEGATT_Pair(SDL_BLEGATTLink *link, SDL_AtomicInt *cancel)
     Fake_Call(&call, FAKE_PAIR, Fake_Index(link));
     call.result = Fake_Live(link) && !Fake_Canceled(cancel);
     Fake_Record(&call);
+    if (call.result && config.pair_then_lose && link->lost) {
+        /* The link drops as the pairing completes */
+        SDL_SetAtomicInt(link->lost, 1);
+    }
     SDL_UnlockMutex(fake.mutex);
     return call.result;
 }
@@ -826,6 +837,103 @@ void Fake_BLEGATT_Close(SDL_BLEGATTLink *link)
         --fake.closes_hanging;
         SDL_UnlockMutex(fake.mutex);
     }
+}
+
+/* The Switch 2 driver's own helpers. No scenario sends it an advertisement
+   of a Switch 2, so no connect thread calls these. Each is counted and
+   fails at once. */
+SDL_BLEGATTDevice *Fake_BLEGATT_OpenDevice(Uint64 address, SDL_AtomicInt *cancel)
+{
+    (void)address;
+    (void)cancel;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return NULL;
+}
+
+SDL_BLEGATTService *Fake_BLEGATT_FindService(SDL_BLEGATTDevice3 *device3, const struct _GUID *uuids, int nuuids,
+                                             int attempts, const char *label, SDL_AtomicInt *cancel)
+{
+    (void)device3;
+    (void)uuids;
+    (void)nuuids;
+    (void)attempts;
+    (void)label;
+    (void)cancel;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return NULL;
+}
+
+void Fake_BLEGATT_RequestThroughput(SDL_BLEGATTDevice *device)
+{
+    (void)device;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+}
+
+SDL_BLEGATTCharacteristic *Fake_BLEGATT_FindCharacteristic(SDL_BLEGATTService *service3, const struct _GUID *uuid,
+                                                           SDL_AtomicInt *cancel)
+{
+    (void)service3;
+    (void)uuid;
+    (void)cancel;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return NULL;
+}
+
+bool Fake_BLEGATT_WriteCharacteristic(SDL_BLEGATTCharacteristic *characteristic, const Uint8 *bytes, int length,
+                                      bool prefer_response)
+{
+    (void)characteristic;
+    (void)bytes;
+    (void)length;
+    (void)prefer_response;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return false;
+}
+
+bool Fake_BLEGATT_EnableNotifications(SDL_BLEGATTCharacteristic *characteristic)
+{
+    (void)characteristic;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return false;
+}
+
+void *Fake_BLEGATT_AddValueHandler(SDL_BLEGATTCharacteristic *characteristic, SDL_BLEGATT_ValueCallback callback,
+                                   void *userdata, int index, struct EventRegistrationToken *token)
+{
+    (void)characteristic;
+    (void)callback;
+    (void)userdata;
+    (void)index;
+    (void)token;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return NULL;
+}
+
+void *Fake_BLEGATT_AddStatusHandler(SDL_BLEGATTDevice *device, SDL_AtomicInt *lost, struct EventRegistrationToken *token)
+{
+    (void)device;
+    (void)lost;
+    (void)token;
+    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
+    return NULL;
+}
+
+/* The Zwift keys of a session thread that ends. While hold_destroy is set,
+   this waits, as a slow destruction would, until the scenario clears it or
+   DT_DESTROY_CEILING_MS pass. The ceiling runs on GetTickCount64, since the
+   wait can outlast SDL_Quit, which starts SDL's ticks over. */
+#define DT_DESTROY_CEILING_MS (BLEGATT_QUIT_WAIT_MS + 1000)
+
+void Fake_ZwiftCrypto_Destroy(SDL_ZwiftKeys *keys)
+{
+    const ULONGLONG start = GetTickCount64();
+
+    SDL_AddAtomicInt(&fake.destroys_entered, 1);
+    while (SDL_GetAtomicInt(&fake.hold_destroy) && GetTickCount64() - start < DT_DESTROY_CEILING_MS) {
+        Sleep(1);
+    }
+    SDL_ZwiftCrypto_Destroy(keys);
+    SDL_AddAtomicInt(&fake.destroys_left, 1);
 }
 
 /* What the test reads from the fake */
@@ -1661,9 +1769,12 @@ static void DT_CheckMapping(int line, SDL_Gamepad *gamepad, const char *const *e
 }
 
 /* The driver's log. Every line still reaches SDL's default output. The line
-   the driver writes when it stops watching is kept for scenario (j), and the
+   the driver writes when it stops watching is kept for scenario (j), the
    one it writes when SDL_Quit leaves a connection to end on its own for
-   scenario (s). SDL_Quit's report of a thread still joinable is counted. */
+   scenario (s), and the one it writes when it gives up waiting for a close
+   for scenario (v). SDL_Quit's report of a thread still joinable is
+   counted, and so are the lines of an ended session and of a device SDL's
+   lists ignore. */
 
 static SDL_Mutex *dt_log_lock;
 static char dt_log_watch[256];
@@ -1672,6 +1783,9 @@ static char dt_log_abandon[256];
 static int dt_log_abandon_lines;
 static int dt_log_leaked_threads;
 static int dt_log_ended_lines;
+static char dt_log_close_wait[256];
+static int dt_log_close_wait_lines;
+static int dt_log_ignored_lines;
 
 static void SDLCALL DT_LogOutput(void *userdata, int category, SDL_LogPriority priority, const char *message)
 {
@@ -1693,6 +1807,13 @@ static void SDLCALL DT_LogOutput(void *userdata, int category, SDL_LogPriority p
         }
         if (SDL_strstr(message, "): ended, ")) {
             ++dt_log_ended_lines;
+        }
+        if (SDL_strstr(message, "the address is free for a new connection")) {
+            SDL_strlcpy(dt_log_close_wait, message, sizeof(dt_log_close_wait));
+            ++dt_log_close_wait_lines;
+        }
+        if (SDL_strstr(message, "ignored by SDL's device lists")) {
+            ++dt_log_ignored_lines;
         }
         SDL_UnlockMutex(dt_log_lock);
     }
@@ -1753,12 +1874,42 @@ static int DT_EndedLines(void)
     return count;
 }
 
+/* The number of lines for a session that stopped waiting for its close,
+   and the last one in line */
+static int DT_CloseWaitLog(char *line, size_t size)
+{
+    int count;
+
+    SDL_LockMutex(dt_log_lock);
+    count = dt_log_close_wait_lines;
+    if (line) {
+        SDL_strlcpy(line, dt_log_close_wait, size);
+    }
+    SDL_UnlockMutex(dt_log_lock);
+    return count;
+}
+
+/* The lines for a device SDL's lists ignore */
+static int DT_IgnoredLines(void)
+{
+    int count;
+
+    SDL_LockMutex(dt_log_lock);
+    count = dt_log_ignored_lines;
+    SDL_UnlockMutex(dt_log_lock);
+    return count;
+}
+
 /* Starting and stopping SDL */
 
 static void DT_SetHint(const char *name, const char *value)
 {
     SDL_SetHintWithPriority(name, value, SDL_HINT_OVERRIDE);
 }
+
+/* The Switch 2 driver is on in the SDL_Init of DT_Start while this is set
+   (scenario D) */
+static bool dt_switch2;
 
 /* SDL_Init with every other driver off. ble and pairing are the values of
    SDL_JOYSTICK_BLE and SDL_JOYSTICK_BLE_PAIRING, NULL to leave one unset. */
@@ -1768,6 +1919,9 @@ static bool DT_Start(const char *ble, const char *pairing)
 
     for (i = 0; i < SDL_arraysize(dt_other_drivers); ++i) {
         DT_SetHint(dt_other_drivers[i][0], dt_other_drivers[i][1]);
+    }
+    if (dt_switch2) {
+        DT_SetHint("SDL_JOYSTICK_BLE_SWITCH2", "1");
     }
     if (ble) {
         DT_SetHint(DT_HINT_BLE, ble);
@@ -3301,9 +3455,10 @@ static void ScenarioExecutorQueue(void)
     DT_End();
 }
 
-/* SDL's allocator, with one calloc size that can be made to fail. It is in
-   place before SDL allocates anything and passes every call on to the
-   functions SDL had, so every block keeps one allocator. */
+/* SDL's allocator, with one calloc size that can be made to fail and two
+   blocks whose frees are counted. It is in place before SDL allocates
+   anything and passes every call on to the functions SDL had, so every
+   block keeps one allocator. */
 static SDL_malloc_func dt_real_malloc;
 static SDL_calloc_func dt_real_calloc;
 static SDL_realloc_func dt_real_realloc;
@@ -3320,10 +3475,29 @@ static void *SDLCALL DT_Calloc(size_t count, size_t size)
     return dt_real_calloc(count, size);
 }
 
+/* Two blocks whose frees are counted, for scenario (x) */
+static void *dt_watch_inbox;
+static void *dt_watch_state;
+static SDL_AtomicInt dt_inbox_frees;
+static SDL_AtomicInt dt_state_frees;
+
+static void SDLCALL DT_Free(void *mem)
+{
+    if (mem) {
+        if (mem == SDL_GetAtomicPointer(&dt_watch_inbox)) {
+            SDL_AddAtomicInt(&dt_inbox_frees, 1);
+        }
+        if (mem == SDL_GetAtomicPointer(&dt_watch_state)) {
+            SDL_AddAtomicInt(&dt_state_frees, 1);
+        }
+    }
+    dt_real_free(mem);
+}
+
 static void DT_InstallAllocator(void)
 {
     SDL_GetMemoryFunctions(&dt_real_malloc, &dt_real_calloc, &dt_real_realloc, &dt_real_free);
-    SDL_SetMemoryFunctions(dt_real_malloc, DT_Calloc, dt_real_realloc, dt_real_free);
+    SDL_SetMemoryFunctions(dt_real_malloc, DT_Calloc, dt_real_realloc, DT_Free);
 }
 
 /* The time before which the driver's host starts no session for the
@@ -3868,6 +4042,23 @@ done:
     DT_End();
 }
 
+/* Waits until the session thread of a connection SDL_Quit left to end on
+   its own has ended */
+static bool DT_WaitAbandonedSession(BLEGATT_Connection *connection, int timeout_ms)
+{
+    const Uint64 start = SDL_GetTicks();
+
+    for (;;) {
+        if (SDL_GetAtomicInt(&connection->session_exited)) {
+            return true;
+        }
+        if (DT_Expired(start, timeout_ms)) {
+            return false;
+        }
+        SDL_Delay(1);
+    }
+}
+
 /* Waits until both threads of a connection SDL_Quit left to end on its own
    have ended */
 static bool DT_WaitAbandoned(BLEGATT_Connection *connection, int timeout_ms)
@@ -3890,8 +4081,10 @@ static bool DT_WaitAbandoned(BLEGATT_Connection *connection, int timeout_ms)
    backends/winrt/client.py:488-491). SDL_Quit returns once
    BLEGATT_QUIT_WAIT_MS has passed and leaves the connection to end on its
    own, with one line in the log and no thread left joinable. A new SDL
-   session connects the same address, and when the old Close returns, the
-   old session leaves the new session's hold on the address alone. */
+   session connects the same address. The old session thread stops waiting
+   for the close after BLEGATT_CLOSE_WAIT_MS, and when the old Close
+   returns, the old executor ends too. Neither logs, and the new session's
+   hold on the address stays. */
 static void ScenarioHungClose(void)
 {
     static const Uint64 address = 0xA4C138F1E2F5;
@@ -3944,8 +4137,7 @@ static void ScenarioHungClose(void)
         DT_CHECK(SDL_strcmp(line, expected) == 0, "the driver logged \"%s\", expected \"%s\"", line, expected);
     }
     DT_CHECK(DT_LeakedThreads() == leaked, "SDL_Quit found %d threads still joinable", DT_LeakedThreads() - leaked);
-    DT_CHECK(!SDL_GetAtomicInt(&old->session_exited) && !SDL_GetAtomicInt(&old->executor_exited),
-             "the connection's threads ended while its Close hung");
+    DT_CHECK(!SDL_GetAtomicInt(&old->executor_exited), "the connection's executor ended while its Close hung");
 
     /* A new SDL session connects the same address while the old Close
        still hangs */
@@ -3962,10 +4154,19 @@ static void ScenarioHungClose(void)
     DT_CHECK(DT_Link(address) != link, "the new session reused link %d", link);
     DT_CHECK(DT_HostActive(address), "the new session's host holds no session for the address");
 
-    /* The old Close returns, and the old threads end without a word */
-    DT_CHECK(!SDL_GetAtomicInt(&old->session_exited) && !SDL_GetAtomicInt(&old->executor_exited),
-             "the old connection's threads ended before its Close returned");
+    /* The old session thread stops waiting for the close after
+       BLEGATT_CLOSE_WAIT_MS, and ends without a word and without touching
+       the new session's hold on the address */
     ended = DT_EndedLines();
+    lines = DT_CloseWaitLog(NULL, 0);
+    DT_CHECK(DT_WaitAbandonedSession(old, BLEGATT_CLOSE_WAIT_MS + DT_WAIT_MS), "the old session thread still waits for the close");
+    DT_CHECK(!SDL_GetAtomicInt(&old->executor_exited), "the old connection's executor ended before its Close returned");
+    DT_CHECK(DT_EndedLines() == ended && DT_CloseWaitLog(NULL, 0) == lines,
+             "the old session logged %d end lines and %d close lines after SDL_Quit had left it", DT_EndedLines() - ended,
+             DT_CloseWaitLog(NULL, 0) - lines);
+    DT_CHECK(DT_HostActive(address), "the old session thread ended the new session's hold on the address");
+
+    /* The old Close returns, and the old executor ends without a word */
     SDL_SetAtomicInt(&fake.close_release, 1);
     DT_CHECK(DT_WaitAbandoned(old, DT_WAIT_MS), "the connection's threads did not end once its Close returned");
     DT_CHECK(DT_EndedLines() == ended, "the old session logged its end after SDL_Quit had left it");
@@ -4171,6 +4372,627 @@ done:
     DT_End();
 }
 
+/* The driver's connections to the address, the ones still closing included */
+static int DT_Connections(Uint64 address)
+{
+    BLEGATT_Connection *connection;
+    int count = 0;
+
+    SDL_LockJoysticks();
+    for (connection = blegatt_connections; connection; connection = connection->next) {
+        if (connection->address == address) {
+            ++count;
+        }
+    }
+    SDL_UnlockJoysticks();
+    return count;
+}
+
+/* True when the driver's newest connection to the address has published its
+   joystick, whether or not a joystick was added for it */
+static bool DT_Published(Uint64 address)
+{
+    BLEGATT_Connection *connection;
+    bool published = false;
+
+    SDL_LockJoysticks();
+    for (connection = blegatt_connections; connection; connection = connection->next) {
+        if (connection->address == address) {
+            SDL_LockMutex(connection->mutex);
+            published = (connection->generation != 0);
+            SDL_UnlockMutex(connection->mutex);
+        }
+    }
+    SDL_UnlockJoysticks();
+    return published;
+}
+
+/* The failed pairings the driver's host counts for the address, -1 when it
+   holds no entry for it */
+static int DT_HostPairingFailures(Uint64 address)
+{
+    int value = -1, i;
+
+    SDL_LockMutex(blegatt_lock);
+    for (i = 0; i < blegatt_host.count; ++i) {
+        if (blegatt_host.entries[i].address == address) {
+            value = blegatt_host.entries[i].pairing_failures;
+        }
+    }
+    SDL_UnlockMutex(blegatt_lock);
+    return value;
+}
+
+/* Scenario (v): a Close that hangs after a link loss, outside SDL_Quit, as
+   GattDeviceService.Close sometimes does (bleak
+   backends/winrt/client.py:488-491). The session thread waits
+   BLEGATT_CLOSE_WAIT_MS for the executor, then gives the address back with
+   one line in the log, so an advertisement every 20 ms connects again then,
+   while the old Close still hangs. Once that Close returns, the old record
+   is freed and the new connection streams. */
+static void ScenarioHungCloseOutsideQuit(void)
+{
+    static const Uint64 address = 0xA4C138F1E301;
+    static const Uint8 rest[SDL_POKEBALL_REPORT_SIZE] = { 0x00, 0x00, 0x00, 0x07, 0x6C };
+    char line[256], expected[256];
+    SDL_BLEAdvertisement ad;
+    FakeConfig config;
+    FakeCall close, second;
+    Uint64 start;
+    int link, hanging, lines;
+
+    DT_Begin("v", "a Close that hangs outside SDL_Quit frees the address after the wait");
+    if (!DT_StartListening(NULL)) {
+        goto done;
+    }
+    DT_Ad(&ad, address, SDL_BLE_AD_ADVERTISEMENT, "Pokemon PBP");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the advertisement");
+    if (!DT_CHECK(DT_WaitCalls(FAKE_READ, -1, 1, DT_WAIT_MS), "no battery read followed the advertisement")) {
+        goto done;
+    }
+    link = DT_Link(address);
+    if (!DT_CHECK(DT_StreamUntilJoystick(link, SDL_POKEBALL_INPUT, rest, sizeof(rest)) != 0, "no joystick")) {
+        goto done;
+    }
+    DT_GetConfig(&config);
+    config.close_blocks = true;
+    DT_SetConfig(&config);
+    lines = DT_CloseWaitLog(NULL, 0);
+    DT_CHECK(DT_LoseLink(link), "Open received no atomic for link loss");
+    DT_CHECK(DT_WaitNoJoystick(DT_WAIT_MS), "the joystick stayed after the loss");
+    if (!DT_CHECK(DT_WaitCalls(FAKE_CLOSE, link, 1, DT_WAIT_MS), "no Close followed the loss") ||
+        !DT_CHECK(DT_Position(FAKE_CLOSE, link, 0, &close) >= 0, "the Close was not recorded")) {
+        goto done;
+    }
+
+    /* An advertisement every 20 ms, as the watcher reports the device */
+    start = SDL_GetTicks();
+    while (DT_Count(FAKE_OPEN, -1) < 2 && !DT_Expired(start, BLEGATT_CLOSE_WAIT_MS + DT_WAIT_MS)) {
+        (void)DT_Advertise(&ad);
+        DT_PumpFor(20);
+    }
+    SDL_LockMutex(fake.mutex);
+    hanging = fake.closes_hanging;
+    SDL_UnlockMutex(fake.mutex);
+    if (DT_CHECK(DT_Position(FAKE_OPEN, -1, 1, &second) >= 0, "%d opens in %d ms while the Close hung, expected a second",
+                 DT_Count(FAKE_OPEN, -1), BLEGATT_CLOSE_WAIT_MS + DT_WAIT_MS)) {
+        const Uint64 gap = (second.time_ns - close.time_ns) / SDL_NS_PER_MS;
+
+        printf("scenario (v): the second connect came %" SDL_PRIu64 " ms after the Close began to hang\n", gap);
+        DT_CHECK(gap + DT_TICK_SLACK_MS >= BLEGATT_CLOSE_WAIT_MS && gap < BLEGATT_CLOSE_WAIT_MS + DT_WAIT_MS,
+                 "the second connect came %" SDL_PRIu64 " ms after the Close began to hang, expected %d", gap,
+                 BLEGATT_CLOSE_WAIT_MS);
+    }
+    DT_CHECK(hanging == 1, "%d Close calls hang, expected the first", hanging);
+    DT_CHECK(DT_HostActive(address), "the host holds no session for the new connection");
+    DT_CHECK(DT_Connections(address) == 2, "%d connections to the address, expected the closing one and the new one",
+             DT_Connections(address));
+    (void)SDL_snprintf(expected, sizeof(expected),
+                       "BLE GATT A4:C1:38:F1:E3:01 (Poke Ball Plus): still closing after %d ms, the address is free for a new connection",
+                       BLEGATT_CLOSE_WAIT_MS);
+    if (DT_CHECK(DT_CloseWaitLog(line, sizeof(line)) == lines + 1, "%d lines for a session that stopped waiting for its close, expected 1",
+                 DT_CloseWaitLog(NULL, 0) - lines)) {
+        DT_CHECK(SDL_strcmp(line, expected) == 0, "the driver logged \"%s\", expected \"%s\"", line, expected);
+    }
+
+    /* The old Close returns: its record goes, and the new connection streams */
+    config.close_blocks = false;
+    DT_SetConfig(&config);
+    SDL_SetAtomicInt(&fake.close_release, 1);
+    start = SDL_GetTicks();
+    while (DT_Connections(address) != 1 && !DT_Expired(start, DT_WAIT_MS)) {
+        DT_Pump();
+    }
+    DT_CHECK(DT_Connections(address) == 1, "the closed connection's record stayed");
+    if (DT_CHECK(DT_WaitCalls(FAKE_READ, -1, 2, DT_WAIT_MS), "the new connection did not start up")) {
+        DT_CHECK(DT_StreamUntilJoystick(DT_Link(address), SDL_POKEBALL_INPUT, rest, sizeof(rest)) != 0,
+                 "no joystick for the new connection");
+    }
+
+done:
+    SDL_SetAtomicInt(&fake.close_release, 1);
+    DT_Stop();
+    DT_End();
+}
+
+/* Scenario (x): a connection whose Open fails before the transport keeps a
+   pointer into its inbox frees the inbox with the record. The module state,
+   which the same BLEGATT_FreeConnection frees, is the positive control. */
+static void ScenarioFailedOpenInbox(void)
+{
+    static const Uint64 address = 0xA4C138F1E302;
+    SDL_BLEAdvertisement ad;
+    BLEGATT_Connection *connection;
+    FakeConfig config;
+    FakeCall open;
+    Uint64 start;
+    bool reaped = false;
+
+    DT_Begin("x", "the inbox of a connection whose Open failed");
+    SDL_SetAtomicInt(&dt_inbox_frees, 0);
+    SDL_SetAtomicInt(&dt_state_frees, 0);
+    DT_GetConfig(&config);
+    config.open_fails = true;
+    DT_SetConfig(&config);
+    if (!DT_StartListening(NULL)) {
+        goto done;
+    }
+    DT_Ad(&ad, address, SDL_BLE_AD_ADVERTISEMENT, "Pokemon PBP");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the advertisement");
+    /* No SDL update has run since, so the record is still in blegatt_new */
+    SDL_LockMutex(blegatt_lock);
+    connection = blegatt_new;
+    if (connection) {
+        SDL_SetAtomicPointer(&dt_watch_inbox, connection->inbox);
+        SDL_SetAtomicPointer(&dt_watch_state, connection->state);
+    }
+    SDL_UnlockMutex(blegatt_lock);
+    if (!DT_CHECK(connection != NULL, "the listener made no connection")) {
+        goto done;
+    }
+    DT_CHECK(DT_WaitCalls(FAKE_OPEN, -1, 1, DT_WAIT_MS), "no Open");
+    DT_CHECK(DT_Position(FAKE_OPEN, -1, 0, &open) >= 0 && !open.result, "the Open did not fail");
+    DT_CHECK(DT_WaitHostIdle(address, DT_WAIT_MS), "the session did not end");
+    start = SDL_GetTicks();
+    while (!DT_Expired(start, DT_WAIT_MS)) {
+        DT_Pump();
+        if (SDL_GetAtomicInt(&dt_state_frees) > 0 && DT_FindConnection(address) == NULL) {
+            reaped = true;
+            break;
+        }
+    }
+    DT_CHECK(reaped, "the record of the failed connect was not reaped");
+    DT_CHECK(SDL_GetAtomicInt(&dt_state_frees) == 1, "the module state was freed %d times", SDL_GetAtomicInt(&dt_state_frees));
+    DT_CHECK(SDL_GetAtomicInt(&dt_inbox_frees) == 1, "the inbox was freed %d times, expected once with the record",
+             SDL_GetAtomicInt(&dt_inbox_frees));
+
+done:
+    SDL_SetAtomicPointer(&dt_watch_inbox, NULL);
+    SDL_SetAtomicPointer(&dt_watch_state, NULL);
+    DT_Stop();
+    DT_End();
+}
+
+/* Suspends the session thread where it holds the connection's mutex free */
+static bool DT_SuspendQuiet(BLEGATT_Connection *connection, HANDLE thread)
+{
+    int tries;
+
+    for (tries = 0; tries < 1000; ++tries) {
+        if (SuspendThread(thread) == (DWORD)-1) {
+            return false;
+        }
+        if (SDL_TryLockMutex(connection->mutex)) {
+            SDL_UnlockMutex(connection->mutex);
+            return true;
+        }
+        ResumeThread(thread);
+        SDL_Delay(1);
+    }
+    return false;
+}
+
+/* Scenario (y): a value that arrived before an Open and was decoded after
+   it. The first update sends the state Open took, stamped at the Open, and
+   then the change, which may not be stamped before it: one joystick's
+   events never go back in time. The session thread is suspended to hold
+   the decode past the Open. */
+static void ScenarioOpenTimestamps(void)
+{
+    static const Uint64 address = 0xA4C138F1E303;
+    static const Uint8 rest[SDL_POKEBALL_REPORT_SIZE] = { 0x00, 0x00, 0x00, 0x07, 0x6C };
+    Uint8 pressed[SDL_POKEBALL_REPORT_SIZE];
+    SDL_BLEAdvertisement ad;
+    BLEGATT_Connection *connection;
+    SDL_Joystick *joystick = NULL;
+    SDL_JoystickID id;
+    HANDLE thread = NULL;
+    SDL_Event events[64];
+    Uint64 pushed_ns = 0, open_ns = 0, down_ts = 0, up_ts = 0;
+    int count, i, link, order = 0, down_order = -1, up_order = -1;
+    bool suspended = false;
+
+    DT_Begin("y", "event times after Open");
+    SDL_memcpy(pressed, rest, sizeof(pressed));
+    pressed[1] = 0x01; /* The top button */
+    if (!DT_StartListening(NULL)) {
+        goto done;
+    }
+    DT_Ad(&ad, address, SDL_BLE_AD_ADVERTISEMENT, "Pokemon PBP");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the advertisement");
+    if (!DT_CHECK(DT_WaitCalls(FAKE_READ, -1, 1, DT_WAIT_MS), "no battery read followed the advertisement")) {
+        goto done;
+    }
+    link = DT_Link(address);
+    id = DT_StreamUntilJoystick(link, SDL_POKEBALL_INPUT, pressed, sizeof(pressed));
+    if (!DT_CHECK(id != 0, "no joystick")) {
+        goto done;
+    }
+    DT_PumpFor(100);
+    connection = DT_FindConnection(address);
+    if (!DT_CHECK(connection != NULL, "no connection")) {
+        goto done;
+    }
+    thread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, (DWORD)SDL_GetThreadID(connection->session_thread));
+    if (!DT_CHECK(thread != NULL, "OpenThread failed")) {
+        goto done;
+    }
+    suspended = DT_SuspendQuiet(connection, thread);
+    if (!DT_CHECK(suspended, "the session thread could not be suspended")) {
+        goto done;
+    }
+    /* The release arrives while the session thread cannot decode it */
+    pushed_ns = SDL_GetTicksNS();
+    DT_CHECK(DT_Push(link, SDL_POKEBALL_INPUT, rest, sizeof(rest)), "the input characteristic has no callback");
+    SDL_Delay(5);
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    open_ns = SDL_GetTicksNS();
+    joystick = SDL_OpenJoystick(id);
+    ResumeThread(thread);
+    suspended = false;
+    if (!DT_CHECK(joystick != NULL, "SDL_OpenJoystick failed: %s", SDL_GetError())) {
+        goto done;
+    }
+    SDL_Delay(20); /* The session thread decodes the release */
+    DT_PumpFor(100);
+    count = SDL_PeepEvents(events, DT_COUNT(events), SDL_PEEKEVENT, SDL_EVENT_JOYSTICK_BUTTON_DOWN, SDL_EVENT_JOYSTICK_BUTTON_UP);
+    for (i = 0; i < count; ++i) {
+        if (events[i].jbutton.which != id) {
+            continue;
+        }
+        if (events[i].type == SDL_EVENT_JOYSTICK_BUTTON_DOWN && down_order < 0) {
+            down_order = order;
+            down_ts = events[i].common.timestamp;
+        } else if (events[i].type == SDL_EVENT_JOYSTICK_BUTTON_UP && up_order < 0) {
+            up_order = order;
+            up_ts = events[i].common.timestamp;
+        }
+        ++order;
+    }
+    printf("scenario (y): value pushed at %" SDL_PRIu64 " ns, joystick opened at %" SDL_PRIu64 " ns, press stamped %" SDL_PRIu64
+           " ns, release stamped %" SDL_PRIu64 " ns\n",
+           pushed_ns, open_ns, down_ts, up_ts);
+    DT_CHECK(down_order == 0 && up_order == 1, "expected the Open-time press first and the release second, got orders %d and %d",
+             down_order, up_order);
+    DT_CHECK(down_ts >= open_ns, "the press is stamped %" SDL_PRIu64 ", before the Open at %" SDL_PRIu64, down_ts, open_ns);
+    DT_CHECK(up_ts >= down_ts, "the release is stamped %" SDL_PRIu64 ", %" SDL_PRIu64 " ns before the press queued ahead of it",
+             up_ts, (up_ts < down_ts) ? down_ts - up_ts : 0);
+
+done:
+    if (thread) {
+        if (suspended) {
+            ResumeThread(thread);
+        }
+        CloseHandle(thread);
+    }
+    if (joystick) {
+        SDL_CloseJoystick(joystick);
+    }
+    DT_Stop();
+    DT_End();
+}
+
+/* Waits on the connection's exit flags with Windows' clock, so no SDL tick
+   function runs */
+static bool DT_WaitThreadsRaw(BLEGATT_Connection *connection, ULONGLONG timeout_ms)
+{
+    const ULONGLONG start = GetTickCount64();
+
+    while (GetTickCount64() - start < timeout_ms) {
+        if (SDL_GetAtomicInt(&connection->session_exited) && SDL_GetAtomicInt(&connection->executor_exited)) {
+            return true;
+        }
+        Sleep(1);
+    }
+    return false;
+}
+
+/* One part of scenario (z): SDL_Quit while a Close hangs, with or without a
+   lost link. After SDL_Quit returns, no SDL tick function runs on this
+   thread until the final SDL_GetTicks, which reports how long ago SDL's
+   tick base was set. 0 on a setup failure. */
+static Uint64 DT_QuitThenRelease(Uint64 address, bool lose, bool *ended)
+{
+    static const Uint8 rest[SDL_POKEBALL_REPORT_SIZE] = { 0x00, 0x00, 0x00, 0x07, 0x6C };
+    SDL_BLEAdvertisement ad;
+    BLEGATT_Connection *old;
+    FakeConfig config;
+    int link;
+
+    *ended = false;
+    Fake_Reset();
+    if (!DT_StartListening(NULL)) {
+        return 0;
+    }
+    DT_Ad(&ad, address, SDL_BLE_AD_ADVERTISEMENT, "Pokemon PBP");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the advertisement");
+    if (!DT_CHECK(DT_WaitCalls(FAKE_READ, -1, 1, DT_WAIT_MS), "no battery read followed the advertisement")) {
+        SDL_Quit();
+        return 0;
+    }
+    link = DT_Link(address);
+    if (!DT_CHECK(DT_StreamUntilJoystick(link, SDL_POKEBALL_INPUT, rest, sizeof(rest)) != 0, "no joystick")) {
+        SDL_Quit();
+        return 0;
+    }
+    old = DT_FindConnection(address);
+    DT_GetConfig(&config);
+    config.close_blocks = true;
+    DT_SetConfig(&config);
+    if (lose) {
+        DT_CHECK(DT_LoseLink(link), "Open received no atomic for link loss");
+        DT_CHECK(DT_WaitNoJoystick(DT_WAIT_MS), "the joystick stayed after the loss");
+        DT_CHECK(DT_WaitCalls(FAKE_CLOSE, link, 1, DT_WAIT_MS), "no Close followed the loss");
+    }
+    SDL_Quit();
+    /* From here on, no SDL tick function on this thread */
+    SDL_SetAtomicInt(&fake.close_release, 1);
+    *ended = DT_WaitThreadsRaw(old, 5000);
+    Sleep(1500);
+    return SDL_GetTicks();
+}
+
+/* Scenario (z): the threads of a connection SDL_Quit left to end on its
+   own read no SDL clock once its session has ended, since SDL_GetTicks
+   after SDL_Quit starts SDL's tick base and timer resolution again
+   (SDL_timer.c). With the link lost before SDL_Quit, and without, as the
+   control, SDL's tick base 1500 ms after the threads ended is still unset. */
+static void ScenarioNoClockAfterQuit(void)
+{
+    Uint64 control, lost;
+    bool control_ended, lost_ended;
+
+    DT_Begin("z", "no SDL clock from a connection SDL_Quit left");
+    control = DT_QuitThenRelease(0xA4C138F1E304, false, &control_ended);
+    lost = DT_QuitThenRelease(0xA4C138F1E305, true, &lost_ended);
+    printf("scenario (z): SDL_GetTicks 1500 ms after the abandoned threads ended: %" SDL_PRIu64 " ms without a lost link, %" SDL_PRIu64
+           " ms with one\n",
+           control, lost);
+    DT_CHECK(control_ended && lost_ended, "the abandoned threads did not end once the Close returned");
+    DT_CHECK(control < 500, "without a lost link the tick base was set %" SDL_PRIu64 " ms before the check", control);
+    DT_CHECK(lost < 500, "with a lost link the tick base was set %" SDL_PRIu64 " ms before the check", lost);
+    Fake_Reset();
+    DT_End();
+}
+
+/* Scenario (A): a pairing that succeeds as the link drops. The fake sets the
+   lost flag inside Pair, before the executor posts the success. The
+   session takes the success first, queues its discovery and ends on the
+   loss as for a loss during discovery, so the host counts no failed
+   pairing. A second Daydream that pairs without the drop and loses its link
+   later counts none either. */
+static void ScenarioPairThenLoss(void)
+{
+    static const Uint64 first = 0xD0B5C27A4E31, second = 0xD0B5C27A4E32;
+    SDL_BLEAdvertisement ad;
+    FakeConfig config;
+    FakeCall pair;
+    Uint64 until = 0;
+    int failures, control;
+
+    DT_Begin("A", "a pairing that succeeds as the link drops");
+    DT_GetConfig(&config);
+    config.pair_then_lose = true;
+    DT_SetConfig(&config);
+    if (!DT_StartListening("1")) {
+        goto done;
+    }
+    DT_Ad(&ad, first, SDL_BLE_AD_ADVERTISEMENT, "Daydream controller");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the advertisement");
+    DT_CHECK(DT_WaitCalls(FAKE_PAIR, -1, 1, DT_WAIT_MS), "no pairing");
+    DT_CHECK(DT_WaitHostIdle(first, DT_WAIT_MS), "the session did not end");
+    DT_CHECK(DT_Position(FAKE_PAIR, -1, 0, &pair) >= 0 && pair.result, "the pairing did not succeed");
+    failures = DT_HostPairingFailures(first);
+    printf("scenario (A): the pairing succeeded, then the host counts %d failed pairings and %d discoveries ran\n", failures,
+           DT_Count(FAKE_DISCOVER, -1));
+    DT_CHECK(failures == 0, "the host counts %d failed pairings after a pairing that succeeded", failures);
+    DT_CHECK(DT_Count(FAKE_DISCOVER, -1) == 1, "%d discoveries after the pairing, expected the one it queued", DT_Count(FAKE_DISCOVER, -1));
+    if (DT_CHECK(DT_HostUntil(first, &until), "the host holds no entry for the address")) {
+        DT_CHECK(until > SDL_GetTicks(), "the address waits no time after a loss before the joystick appeared");
+    }
+
+    /* Positive control */
+    DT_GetConfig(&config);
+    config.pair_then_lose = false;
+    DT_SetConfig(&config);
+    DT_Ad(&ad, second, SDL_BLE_AD_ADVERTISEMENT, "Daydream controller");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the advertisement");
+    if (DT_CHECK(DT_WaitCalls(FAKE_READ, -1, 1, DT_WAIT_MS), "the second Daydream did not start")) {
+        DT_CHECK(DT_LoseLink(DT_Link(second)), "no lost atomic");
+        DT_CHECK(DT_WaitHostIdle(second, DT_WAIT_MS), "the second session did not end");
+        control = DT_HostPairingFailures(second);
+        DT_CHECK(control == 0, "the control counts %d failed pairings", control);
+    }
+
+done:
+    DT_Stop();
+    DT_End();
+}
+
+/* Scenario (B): SDL_Quit while a session thread that has given the host its
+   end is held before its last log line, here in the destruction of a Zwift
+   Play half's keys. SDL_Quit waits for that thread instead of leaving it,
+   so its line comes before SDL_Quit returns and nothing is logged after. */
+static void ScenarioQuitWhileFinishing(void)
+{
+    static const Uint64 address = 0xF1D7329A4C81;
+    static const char idle[] = "07 08 00 10 01 18 01 20 01 28 01 30 01 38 01 40 00 48 00";
+    Uint8 message[32];
+    size_t length;
+    Uint64 start;
+    int link, ended, abandoned, after, elapsed;
+
+    DT_Begin("B", "SDL_Quit while a session thread finishes");
+    length = DT_Hex(idle, message, sizeof(message));
+    if (!DT_StartListening(NULL)) {
+        goto done;
+    }
+    if (!DT_CHECK(DT_ConnectZwiftHalf(address, SDL_ZWIFT_PLAY_RIGHT, message, length, 1, 0, &link) != 0, "no Zwift joystick")) {
+        goto done;
+    }
+    SDL_SetAtomicInt(&fake.hold_destroy, 1);
+    ended = DT_EndedLines();
+    abandoned = DT_AbandonLog(NULL, 0);
+    start = SDL_GetPerformanceCounter();
+    SDL_Quit();
+    elapsed = (int)((SDL_GetPerformanceCounter() - start) * 1000 / SDL_GetPerformanceFrequency());
+    after = DT_EndedLines();
+    SDL_SetAtomicInt(&fake.hold_destroy, 0);
+    printf("scenario (B): SDL_Quit took %d ms with the session thread held\n", elapsed);
+    DT_CHECK(SDL_GetAtomicInt(&fake.destroys_entered) == 1, "the keys were destroyed %d times before SDL_Quit returned",
+             SDL_GetAtomicInt(&fake.destroys_entered));
+    DT_CHECK(after == ended + 1, "the session logged %d end lines before SDL_Quit returned, expected 1", after - ended);
+    DT_CHECK(DT_AbandonLog(NULL, 0) == abandoned, "SDL_Quit left the finishing session to end on its own");
+    /* A thread still held would log once released */
+    {
+        const ULONGLONG wait = GetTickCount64();
+
+        while (SDL_GetAtomicInt(&fake.destroys_left) < 1 && GetTickCount64() - wait < DT_DESTROY_CEILING_MS + 1000) {
+            Sleep(1);
+        }
+        Sleep(200);
+    }
+    DT_CHECK(DT_EndedLines() == after, "the session logged its end %d times after SDL_Quit returned", DT_EndedLines() - after);
+
+done:
+    SDL_SetAtomicInt(&fake.hold_destroy, 0);
+    DT_Stop();
+    DT_End();
+}
+
+/* Scenario (C): SDL's ignore lists apply where the joystick is added, by
+   the identity's vendor, product and name.
+   SDL_HINT_JOYSTICK_BLACKLIST_DEVICES naming the Daydream's IDs leaves its
+   published connection without a joystick, while a Poke Ball, which no list
+   names, appears in the same run, and SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES
+   does the same. SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT naming only
+   the Daydream leaves the Poke Ball, whose IDs are 0, without one, and the
+   Daydream appears. */
+static void DT_IgnoreRun(const char *hint, const char *value, bool daydream_listed)
+{
+    static const Uint64 daydream = 0xD0B5C27A4E41, pokeball = 0xA4C138F1E311;
+    static const Uint8 rest[SDL_POKEBALL_REPORT_SIZE] = { 0x00, 0x00, 0x00, 0x07, 0x6C };
+    const bool daydream_shown = !daydream_listed;
+    Uint8 flat[20];
+    SDL_BLEAdvertisement ad;
+    SDL_JoystickID id = 0;
+    FakeConfig config;
+    const char *name;
+    Uint64 start;
+    int lines;
+
+    Fake_Reset();
+    (void)DT_Hex(dt_daydream_flat, flat, sizeof(flat));
+    DT_GetConfig(&config);
+    config.bonded = true;
+    DT_SetConfig(&config);
+    DT_SetHint(hint, value);
+    lines = DT_IgnoredLines();
+    if (!DT_StartListening(NULL)) {
+        goto done;
+    }
+    /* Both start up and stream */
+    DT_Ad(&ad, daydream, SDL_BLE_AD_ADVERTISEMENT, "Daydream controller");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the Daydream's advertisement");
+    DT_Ad(&ad, pokeball, SDL_BLE_AD_ADVERTISEMENT, "Pokemon PBP");
+    DT_CHECK(DT_Advertise(&ad), "no listener took the Poke Ball's advertisement");
+    if (!DT_CHECK(DT_WaitCalls(FAKE_READ, -1, 2, DT_WAIT_MS), "the devices did not start up")) {
+        goto done;
+    }
+    start = SDL_GetTicks();
+    while (!(DT_Published(daydream) && DT_Published(pokeball)) && !DT_Expired(start, DT_WAIT_MS)) {
+        (void)DT_Push(DT_Link(daydream), SDL_DAYDREAM_POSE, flat, sizeof(flat));
+        (void)DT_Push(DT_Link(pokeball), SDL_POKEBALL_INPUT, rest, sizeof(rest));
+        DT_PumpFor(20);
+    }
+    DT_CHECK(DT_Published(daydream) && DT_Published(pokeball), "the devices did not publish");
+    DT_PumpFor(DT_QUIET_MS);
+    DT_CHECK(DT_Joysticks(&id) == 1, "%d joysticks with %s set to %s, expected 1", DT_Joysticks(NULL), hint, value);
+    name = SDL_GetJoystickNameForID(id);
+    DT_CHECK(name && SDL_strcmp(name, daydream_shown ? "Google Daydream Controller" : "Poke Ball Plus") == 0,
+             "the joystick with %s set to %s is \"%s\"", hint, value, name ? name : "(null)");
+    DT_CHECK(DT_IgnoredLines() == lines + 1, "%d lines for an ignored device, expected 1", DT_IgnoredLines() - lines);
+    DT_CHECK(DT_Connections(daydream_shown ? pokeball : daydream) == 1, "the ignored device's connection went");
+
+done:
+    DT_Stop();
+}
+
+static void ScenarioIgnoreLists(void)
+{
+    DT_Begin("C", "SDL's ignore lists");
+    DT_IgnoreRun(SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, "0x18D1/0x9210", true);
+    DT_IgnoreRun(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, "0x18D1/0x9210", true);
+    DT_IgnoreRun(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, "0x18D1/0x9210", false);
+    DT_End();
+}
+
+/* Scenario (D): with the Switch 2 driver alone on, as PadForge runs it, its
+   Detect has the transport check the watcher every
+   BLEGATT_WATCHER_CHECK_MS, as the BLE GATT driver's Detect does, so a
+   watcher that did not start or that aborted runs again. */
+static void ScenarioSwitch2WatcherCheck(void)
+{
+    FakeCall added, call;
+    Uint64 start;
+    int restarts = 0;
+
+    DT_Begin("D", "the Switch 2 driver's watcher check");
+    dt_switch2 = true;
+    SDL_LockMutex(fake.mutex);
+    fake.watcher_aborted = true;
+    SDL_UnlockMutex(fake.mutex);
+    if (!DT_Start(NULL, NULL)) {
+        goto done;
+    }
+    if (!DT_CHECK(DT_Count(FAKE_ADD_LISTENER, -1) == 1 && DT_ListenerPresent(), "the Switch 2 driver added no listener")) {
+        goto done;
+    }
+    start = SDL_GetTicks();
+    for (;;) {
+        SDL_LockMutex(fake.mutex);
+        restarts = fake.watcher_restarts;
+        SDL_UnlockMutex(fake.mutex);
+        if (restarts != 0 || DT_Expired(start, 2 * BLEGATT_WATCHER_CHECK_MS)) {
+            break;
+        }
+        DT_Pump();
+    }
+    DT_CHECK(restarts == 1, "%d watcher restarts in %d ms with only the Switch 2 driver listening", restarts,
+             2 * BLEGATT_WATCHER_CHECK_MS);
+    if (DT_Position(FAKE_ADD_LISTENER, -1, 0, &added) >= 0 && DT_Position(FAKE_CHECK_WATCHER, -1, 0, &call) >= 0) {
+        DT_CHECK(call.time_ns - added.time_ns >= SDL_MS_TO_NS(BLEGATT_WATCHER_CHECK_MS - DT_TICK_SLACK_MS),
+                 "the first watcher check came %" SDL_PRIu64 " ms after the listener", SDL_NS_TO_MS(call.time_ns - added.time_ns));
+    }
+    DT_CHECK(SDL_GetAtomicInt(&fake.switch2_helpers) == 0, "the Switch 2 driver called %d helpers with no Switch 2 in range",
+             SDL_GetAtomicInt(&fake.switch2_helpers));
+
+done:
+    DT_Stop();
+    dt_switch2 = false;
+    DT_End();
+}
+
 static const struct
 {
     char id;
@@ -4197,7 +5019,15 @@ static const struct
     { 's', ScenarioHungClose },
     { 't', ScenarioPublishDuringWrite },
     { 'u', ScenarioEndDuringSubscribe },
-    { 'w', ScenarioStopDuringWrite }
+    { 'w', ScenarioStopDuringWrite },
+    { 'v', ScenarioHungCloseOutsideQuit },
+    { 'x', ScenarioFailedOpenInbox },
+    { 'y', ScenarioOpenTimestamps },
+    { 'z', ScenarioNoClockAfterQuit },
+    { 'A', ScenarioPairThenLoss },
+    { 'B', ScenarioQuitWhileFinishing },
+    { 'C', ScenarioIgnoreLists },
+    { 'D', ScenarioSwitch2WatcherCheck }
 };
 
 int main(int argc, char *argv[])

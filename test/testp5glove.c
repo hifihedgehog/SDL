@@ -189,6 +189,7 @@ static void TestFeatures(void)
     static const uint8_t feature6[6] = { 0x06, 0xED, 0xED, 0xB3, 0x1D, 0x4F };
     static const uint8_t mouse_off[2] = { 0x05, 0xFF };
     static const uint8_t mouse_on[2] = { 0x05, 0x01 };
+    uint8_t extreme[62];
     SDL_P5GloveLEDPositions leds;
     SDL_P5GloveTanCompensation tan;
     bool on;
@@ -199,6 +200,15 @@ static void TestFeatures(void)
     CHECK(leds.positions[0][0] == 255 && leds.positions[0][1] == 12 && leds.positions[0][2] == 173);
     CHECK(leds.positions[1][0] == 243 && leds.positions[1][1] == -27 && leds.positions[1][2] == -28);
     CHECK(!SDL_P5Glove_ParseLEDPositions(feature12, 61, &leds));
+    /* Raw 0x8000 negated is +32768, as libp5glove's negation in double
+       gives. The axes that are not negated keep -32768. */
+    memcpy(extreme, feature12, sizeof(extreme));
+    extreme[2] = 0x80;
+    extreme[3] = 0x00;
+    extreme[4] = 0x80;
+    extreme[5] = 0x00;
+    CHECK(SDL_P5Glove_ParseLEDPositions(extreme, sizeof(extreme), &leds));
+    CHECK(leds.positions[0][0] == 32768 && leds.positions[0][1] == -32768 && leds.positions[0][2] == 173);
 
     /* 6 */
     CHECK(SDL_P5Glove_ParseTanCompensation(feature6, 6, &tan));

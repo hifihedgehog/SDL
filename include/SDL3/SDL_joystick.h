@@ -1486,7 +1486,10 @@ extern SDL_DECLSPEC SDL_PowerState SDLCALL SDL_GetJoystickPowerInfo(SDL_Joystick
  * that registers keyboards itself sets SDL_HINT_JOYSTICK_ICADE_RAWINPUT to
  * "0" and passes each RAWKEYBOARD record its window receives here. The
  * driver decodes the records of the keyboards it identified as iCade
- * controllers and ignores the rest.
+ * controllers and ignores the rest. A keyboard that
+ * SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES
+ * or SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT rules out counts among
+ * the rest.
  *
  * The joystick path of an iCade controller, SDL_GetJoystickPathForID(), is
  * its keyboard's Raw Input device name (RIDI_DEVICENAME) in UTF-8. A record

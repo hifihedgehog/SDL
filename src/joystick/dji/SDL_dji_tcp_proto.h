@@ -26,13 +26,15 @@
  *
  * The DJI RC gets one link and a 00/01 keepalive at connect and after every
  * 40 ms without data, as dji-rc-linux sends one after two empty 20 ms reads.
- * The DJI RC 2, which announces "rc331", recycles its session and resets a
- * link it is sent anything on, so it gets five links started 500 ms apart
- * and no keepalive. Every request that asks for an acknowledgement gets an
- * empty response. A link closes when no link has brought a 06/AE frame for
- * 1000 ms, and redials at once if it had brought one since it connected,
- * else 100 ms later. The facts are from dji-rc-linux and dji-rc-joystick
- * by voluminor (LGPL, facts only). No code from them is copied.
+ * The DJI RC 2 gets the same until its "rc331" beacon names it, as
+ * dji-rc-joystick's automatic profile does. The RC 2 recycles its session and
+ * resets a link it is sent anything on, so after the beacon it gets no
+ * keepalive and five links started 500 ms apart. Every request that asks for
+ * an acknowledgment gets an empty response. A link closes when no link has
+ * brought a 06/AE frame for 1000 ms, and redials at once if it had brought
+ * one since it connected, else 100 ms later. The facts are from dji-rc-linux
+ * and dji-rc-joystick by voluminor (LGPL, facts only). No code from them is
+ * copied.
  */
 
 #ifndef SDL_dji_tcp_proto_h_
@@ -76,7 +78,7 @@ typedef enum SDL_DJITCPActionKind
 {
     SDL_DJI_TCP_CONNECT, /* Start a connect. Report it with SDL_DJITCP_Connected. */
     SDL_DJI_TCP_CLOSE,   /* Close the link's socket */
-    SDL_DJI_TCP_SEND     /* Send data. A failure is reported with SDL_DJITCP_Lost. */
+    SDL_DJI_TCP_SEND     /* Send data. A failed or short send, or one that would block, is reported with SDL_DJITCP_Lost. */
 } SDL_DJITCPActionKind;
 
 typedef struct SDL_DJITCPAction
@@ -97,6 +99,9 @@ typedef struct SDL_DJITCPState
     uint64_t last_frame; /* The last 06/AE frame on any link */
     char model[SDL_DJI_MODEL_LENGTH];
     int battery;         /* Percent from 06/1E, -1 until one comes */
+    /* Actions refused with the queue full, as responses to a burst of
+       requests asking for acknowledgment. The driver logs the count when
+       the host stops. */
     uint32_t dropped_actions;
     SDL_SerialControls controls;
     SDL_DJITCPAction actions[SDL_DJI_TCP_MAX_ACTIONS];
@@ -120,6 +125,11 @@ extern bool SDL_DJITCP_GetDeadline(const SDL_DJITCPState *s, uint64_t *deadline)
 /* A 06/AE payload of 17 bytes or more into the joystick's controls */
 extern bool SDL_DJITCP_DecodeControls(const uint8_t *payload, size_t length, SDL_SerialControls *controls);
 
+/* The time of the joystick's next event: stamp, or the time of the event
+ * before it when that is later, so the joystick's events never go back in
+ * time. last holds the time of the event before and moves to the result. */
+extern uint64_t SDL_DJITCP_EventStamp(uint64_t *last, uint64_t stamp);
+
 #define SDL_DJI_TCP_MAX_HOSTS  8
 #define SDL_DJI_TCP_KEY_LENGTH 24 /* "255.255.255.255:65535" */
 
@@ -135,8 +145,8 @@ typedef void (*SDL_DJITCPHostLog)(void *userdata, const char *entry, size_t leng
 /* SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS: comma-separated IPv4 addresses in
  * dotted decimal, each with an optional :port, 40007 when absent. Spaces
  * around entries are ignored. An entry that cannot be used is skipped with
- * one call to log, and an address named twice keeps one entry. Returns the
- * number of hosts. */
+ * one call to log, and an address and port named twice keep one entry.
+ * Returns the number of hosts. */
 extern int SDL_DJITCP_ParseHosts(const char *hint, SDL_DJITCPHost *hosts, int max, SDL_DJITCPHostLog log, void *userdata);
 
 #endif /* SDL_dji_tcp_proto_h_ */

@@ -117,26 +117,20 @@ DEFINE_GUID(IID_BleWatcher,       0xa6ac336f, 0xf3d3, 0x4297, 0x8d, 0x6c, 0xc8, 
 DEFINE_GUID(IID_BleWatcher2,      0x01bf26bc, 0xb164, 0x5805, 0x90, 0xa3, 0xe8, 0xa7, 0x99, 0x7f, 0xf2, 0x25); // adv.h:2567
 // ITypedEventHandler<BluetoothLEAdvertisementWatcher*, BluetoothLEAdvertisementReceivedEventArgs*>
 DEFINE_GUID(IID_BleRecvHandler,   0x90eb4eca, 0xd465, 0x5ea0, 0xa6, 0x1c, 0x03, 0x3c, 0x8c, 0x5e, 0xce, 0xf2); // adv.h:1151
-DEFINE_GUID(IID_BleRecvArgs,      0x27987ddf, 0xe596, 0x41be, 0x8d, 0x43, 0x9e, 0x67, 0x31, 0xd4, 0xa9, 0x13); // adv.h:2254
 DEFINE_GUID(IID_BleRecvArgs2,     0x12d9c87b, 0x0399, 0x5f0e, 0xa3, 0x48, 0x53, 0xb0, 0x2b, 0x6b, 0x16, 0x2e); // adv.h:2304
-DEFINE_GUID(IID_BleAdvertisement, 0x066fb2b7, 0x33d1, 0x4e7d, 0x83, 0x67, 0xcf, 0x81, 0xd0, 0xf7, 0x96, 0x53); // adv.h:1590
-DEFINE_GUID(IID_BleMfgData,       0x912dba18, 0x6963, 0x4533, 0xb0, 0x61, 0x46, 0x94, 0xda, 0xfb, 0x34, 0xe5); // adv.h:2744
 DEFINE_GUID(IID_BleDeviceStatics, 0xc8cf1a19, 0xf0b6, 0x4bf0, 0x86, 0x89, 0x41, 0x30, 0x3d, 0xe2, 0xd9, 0xf4); // bt.h:3657
-DEFINE_GUID(IID_BleDevice,        0xb5ee2f7b, 0x4ad8, 0x4642, 0xac, 0x48, 0x80, 0xa0, 0xb5, 0x00, 0xe8, 0x87); // bt.h:3352
 DEFINE_GUID(IID_BleDevice2,       0x26f062b3, 0x7aee, 0x4d31, 0xba, 0xba, 0xb1, 0xb9, 0x77, 0x5f, 0x59, 0x16); // bt.h:3431
 DEFINE_GUID(IID_BleDevice3,       0xaee9e493, 0x44ac, 0x40dc, 0xaf, 0x33, 0xb2, 0xc1, 0x3c, 0x01, 0xca, 0x46); // bt.h:3473
 DEFINE_GUID(IID_BleDevice4,       0x2b605031, 0x2248, 0x4b2f, 0xac, 0xf0, 0x7c, 0xee, 0x36, 0xfc, 0x58, 0x70); // bt.h:3528
 DEFINE_GUID(IID_BleDevice6,       0xca7190ef, 0x0cae, 0x573c, 0xa1, 0xca, 0xe1, 0xfc, 0x5b, 0xfc, 0x39, 0xe2); // bt.h:3600
 DEFINE_GUID(IID_BleConnParamStatics, 0x0e3e8edc, 0x2751, 0x55aa, 0xa8, 0x38, 0x8f, 0xae, 0xee, 0x81, 0x8d, 0x72); // bt.h:3845
 DEFINE_GUID(IID_GattService3,     0xb293a950, 0x0c53, 0x437c, 0xa9, 0xb3, 0x5c, 0x32, 0x10, 0xc6, 0xe5, 0x69); // gatt.h:5147
-DEFINE_GUID(IID_GattChar,         0x59cb50c1, 0x5934, 0x4f68, 0xa1, 0x98, 0xeb, 0x86, 0x4f, 0xa4, 0x4e, 0x6b); // gatt.h:4102
 DEFINE_GUID(IID_GattChar3,        0x3f3c663e, 0x93d4, 0x406b, 0xb8, 0x17, 0xdb, 0x81, 0xf8, 0xed, 0x53, 0xb3); // gatt.h:4242
 // ITypedEventHandler<GattCharacteristic*, GattValueChangedEventArgs*> (ValueChanged)
 DEFINE_GUID(IID_GattValueHandler, 0xc1f420f6, 0x6292, 0x5760, 0xa2, 0xc9, 0x9d, 0xdf, 0x98, 0x68, 0x3c, 0xfc); // gatt.h:3087
 // ITypedEventHandler<BluetoothLEDevice*, IInspectable*> (ConnectionStatusChanged),
 // declspec(uuid) on the specialization, windows.devices.bluetooth.h:1597.
 DEFINE_GUID(IID_BleStatusHandler, 0xa90661e2, 0x372e, 0x5d1e, 0xbb, 0xbb, 0xb8, 0xa2, 0xce, 0x0e, 0x7c, 0x4d);
-DEFINE_GUID(IID_GattValueArgs,    0xd21bdb54, 0x06e3, 0x4ed8, 0xa2, 0x63, 0xac, 0xfa, 0xc8, 0xba, 0x73, 0x13); // gatt.h:7192
 DEFINE_GUID(IID_GattSessionStatics, 0x2e65b95c, 0x539f, 0x4db7, 0x82, 0xa8, 0x73, 0xbd, 0xbb, 0xf7, 0x3e, 0xbf); // gatt.h:7064
 DEFINE_GUID(IID_DeviceInfo2,      0xf156a638, 0x7997, 0x48d9, 0xa1, 0x0c, 0x26, 0x9d, 0x46, 0x53, 0x3f, 0x48); // enum.h:3043
 DEFINE_GUID(IID_DevicePairing2,   0xf68612fd, 0x0aee, 0x4328, 0x85, 0xcc, 0x1c, 0x74, 0x2b, 0xb1, 0x79, 0x0d); // enum.h:3226
@@ -516,9 +510,13 @@ static bool SDL_BLEGATT_AwaitTimeout(void *async_op, Sint32 timeout_ms, const GU
     }
     // Diagnostic (hifihedgehog/SDL#5): pin candidate (b). A put_Completed failure,
     // or a completed=0 that returns far sooner than timeout_ms, means the await is
-    // not actually waiting on the async op.
-    SDL_BLEGATT_LOG("BLE await: put_Completed hr=0x%08lX wait(%dms) completed=%d",
-                 (unsigned long)hr, (int)timeout_ms, (int)completed);
+    // not actually waiting on the async op. An await that completed tells nothing,
+    // so only a failed one is logged, and a stream of GATT operations, such as the
+    // Switch 2 driver's rumble writes, adds no line to a host's log.
+    if (FAILED(hr) || !completed) {
+        SDL_BLEGATT_LOG("BLE await: put_Completed hr=0x%08lX wait(%dms) completed=%d",
+                     (unsigned long)hr, (int)timeout_ms, (int)completed);
+    }
     SDL_BLEGATT_Awaiter_Release(awaiter); // drop our reference. WinRT frees it when it is done
     return completed;
 }
@@ -1769,13 +1767,17 @@ static void SDL_BLEGATT_ArmStatus(SDL_BLEGATTLink *link)
     }
 }
 
-SDL_BLEGATTLink *SDL_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_AtomicInt *cancel, bool *bonded)
+SDL_BLEGATTLink *SDL_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_AtomicInt *cancel, bool *bonded,
+                                  bool *retained)
 {
     SDL_BLEGATTLink *link;
     BleDevice *device;
 
     if (bonded) {
         *bonded = false;
+    }
+    if (retained) {
+        *retained = false;
     }
     if (!gatt.RoGetActivationFactory || SDL_BLEGATT_Canceled(cancel)) {
         return NULL;
@@ -1805,6 +1807,10 @@ SDL_BLEGATTLink *SDL_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_Atomi
             if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_add_ConnectionStatusChanged(device, (void *)link->status_handler, &link->status_token))) {
                 enum __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothConnectionStatus status = BluetoothConnectionStatus_Disconnected;
                 link->status_registered = true;
+                // From here a callback can set *lost, even after the close below
+                if (retained) {
+                    *retained = true;
+                }
                 if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_get_ConnectionStatus(device, &status)) &&
                     status == BluetoothConnectionStatus_Connected) {
                     SDL_SetAtomicInt(&link->status_handler->armed, 1);

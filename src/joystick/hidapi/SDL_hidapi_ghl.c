@@ -32,11 +32,12 @@
 
 /* The Guitar Hero Live dongles for PS3 and Wii U (12BA:074B) and for PS4
  * (1430:07BB). Each wants a keep-alive every 8 s, or the strum bar cuts out
- * held frets. It goes out as an output report on the control pipe, the
- * SET_REPORT every source sends. The protocol lives in
- * SDL_ghl_proto.c, where the offline tests run it. This file only
- * moves bytes between it and SDL. The Xbox One dongle is read by the
- * GameInput backend and the GIP driver.
+ * held frets. It goes out as an output report, a SET_REPORT on the control
+ * pipe on Windows and through libusb, the form every source sends. On Linux
+ * and macOS the kernel sends it on the interrupt OUT endpoint when the dongle
+ * has one. The protocol lives in SDL_ghl_proto.c, where the offline tests run
+ * it. This file only moves bytes between it and SDL. The Xbox One dongle is
+ * read by the GameInput backend and the GIP driver.
  */
 
 SDL_COMPILE_TIME_ASSERT(ghl_hat_up, SDL_GHL_HAT_UP == SDL_HAT_UP);
@@ -92,8 +93,8 @@ static bool HIDAPI_DriverGHL_IsSupportedDevice(SDL_HIDAPI_Device *device, const 
     return dongle == SDL_GHL_DONGLE_PS3 || dongle == SDL_GHL_DONGLE_PS4;
 }
 
-/* Sends the keep-alive when it is due. A failed send stays due, so the next
-   update tries again. */
+/* Sends the keep-alive when it is due. A failed send goes again 1000 ms
+   later. */
 static void HIDAPI_DriverGHL_SendKeepAlive(SDL_DriverGHL_Context *ctx)
 {
     const Uint64 now = SDL_GetTicks();

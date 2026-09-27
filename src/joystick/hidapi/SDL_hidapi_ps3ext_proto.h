@@ -70,7 +70,8 @@ extern bool SDL_PS3Ext_GetDevice(uint16_t vendor, uint16_t product, SDL_PS3ExtDe
  *
  * Hat 0 is the d-pad on every variant.
  */
-/* The SDL gamepad mappings, also used where only the USB ID is known */
+/* The SDL gamepad mappings. SDL_gamepad.c reads them through the layout,
+ * where only the USB ID is known. */
 #define SDL_PS3EXT_MAPPING_BASE "a:b0,b:b1,back:b4,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b5,start:b6,x:b2,y:b3,"
 #define SDL_PS3EXT_MAPPING_TOPSHOT_ELITE SDL_PS3EXT_MAPPING_BASE "leftstick:b7,leftx:a0,lefty:a1,rightstick:b8,rightx:a2,righty:a3,"
 #define SDL_PS3EXT_MAPPING_TOPSHOT_FEARMASTER SDL_PS3EXT_MAPPING_BASE "leftstick:b7,leftx:a0,lefty:a1,"
@@ -134,7 +135,7 @@ typedef struct SDL_PS3ExtOutput
     uint16_t data_axis_mask; /* Raw data axes, seeded past the anti-jitter gate */
     uint8_t hat;
     bool has_accel;
-    int16_t accel[3]; /* uDraw: each little-endian word minus 0x200 */
+    int16_t accel[3]; /* uDraw: counts from 0x200 in SDL's frame, X right, Y out of the face, Z toward the player */
 } SDL_PS3ExtOutput;
 
 /* The report is 27 bytes with no report ID. A shorter read changes nothing.

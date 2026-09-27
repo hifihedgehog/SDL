@@ -34,7 +34,7 @@
 #include "SDL_serial_proto.h"
 
 #define SDL_MAGELLAN_RATE        9600
-#define SDL_MAGELLAN_LINE_LENGTH 64
+#define SDL_MAGELLAN_LINE_LENGTH 64   /* A longer line reads as empty, except a version line */
 #define SDL_MAGELLAN_OPEN_MS     1000 /* The device resets when the port opens */
 #define SDL_MAGELLAN_SHORT_MS    200  /* After mode off and each zero */
 #define SDL_MAGELLAN_ECHO_MS     1000

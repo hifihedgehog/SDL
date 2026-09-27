@@ -43,6 +43,7 @@ typedef struct
     SDL_HIDAPI_Device *device;
     SDL_SpeedForceBond bond;
     SDL_SpeedForceState state;
+    Uint64 rand_state; /* The bond address draws from this, not from the application's SDL_rand stream */
     bool post_pending; /* The joystick opened and has not had the state yet */
 } SDL_DriverSpeedForce_Context;
 
@@ -77,7 +78,9 @@ static bool HIDAPI_DriverSpeedForce_Output(void *userdata, const uint8_t *data, 
 
 static uint8_t HIDAPI_DriverSpeedForce_Random(void *userdata)
 {
-    return (uint8_t)SDL_rand_bits();
+    SDL_DriverSpeedForce_Context *ctx = (SDL_DriverSpeedForce_Context *)userdata;
+
+    return (uint8_t)SDL_rand_bits_r(&ctx->rand_state);
 }
 
 static void HIDAPI_DriverSpeedForce_GetSink(SDL_DriverSpeedForce_Context *ctx, SDL_SpeedForceSink *sink)
@@ -90,6 +93,10 @@ static void HIDAPI_DriverSpeedForce_GetSink(SDL_DriverSpeedForce_Context *ctx, S
 
 static bool HIDAPI_DriverSpeedForce_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
 {
+#ifdef SDL_PLATFORM_LINUX
+    // hid-lg bonds the wheel and lg4ff gives the evdev joystick force feedback
+    return false;
+#endif
     return vendor_id == USB_VENDOR_LOGITECH && product_id == USB_PRODUCT_LOGITECH_SPEED_FORCE_WIRELESS;
 }
 
@@ -103,6 +110,7 @@ static bool HIDAPI_DriverSpeedForce_InitDevice(SDL_HIDAPI_Device *device)
     }
     ctx->device = device;
     SDL_SpeedForce_RestState(&ctx->state);
+    ctx->rand_state = SDL_GetPerformanceCounter();
     device->context = ctx;
 
     HIDAPI_SetDeviceName(device, "Logitech Speed Force Wireless");

@@ -68,7 +68,10 @@
 #define SDL_DJI_BUTTON_RCN1_BIT2    16
 #define SDL_DJI_BUTTON_RCN1_BITS56  17
 #define SDL_DJI_BUTTON_RCN1_BIT7    18
-#define SDL_DJI_BUTTON_DIAL_UP      19 /* Phantom 3 right dial steps, pulsed */
+/* 19 and 20: the Phantom 3's right dial counter rising and falling, pulsed.
+ * The Phantom 3 mDjiController reports a rise as the dial turned left and a
+ * fall as the dial turned right. */
+#define SDL_DJI_BUTTON_DIAL_UP      19
 #define SDL_DJI_BUTTON_DIAL_DOWN    20
 
 /* Timing, in ms */
@@ -86,6 +89,10 @@
 
 #define SDL_DJI_PHANTOM2_REPLY_LENGTH 76
 #define SDL_DJI_MODEL_LENGTH          16
+/* The driver's read buffer for the DJI RC's bulk IN endpoint. The vendor
+ * rule reads one packet per transfer, 512 bytes at high speed and 1024 at
+ * SuperSpeed, and the buffer holds either. */
+#define SDL_DJI_BULK_READ_SIZE 1024
 
 typedef enum SDL_DJIRemoteKind
 {
@@ -113,6 +120,7 @@ typedef struct SDL_DJIRemoteState
     SDL_DJIParser parser;
     uint8_t write_seq;   /* Tag of the last start-up or poll write, kept across resets */
     uint8_t waiting_seq; /* The write whose completion starts the step timer, 0 when none */
+    bool poll_due;       /* A reply asked for the next poll while waiting_seq was on its way */
     bool timer;          /* The step timer: a wait, a poll resend or the ping loop */
     uint64_t deadline;
     bool silence_timer;
@@ -122,7 +130,7 @@ typedef struct SDL_DJIRemoteState
     bool simulator_waiting; /* Bulk: that 06/24 is written and not done */
     bool fallback_timer;    /* Bulk: 200 ms after the first 06/01 poll */
     uint64_t fallback_deadline;
-    bool fallback_armed;    /* Bulk: the first 06/01 poll of this start-up is out */
+    bool fallback_armed;    /* Bulk: the fallback timer was armed, or a 32-byte 06/01 answer came, in this start-up */
     bool test_stick;        /* Bulk: polling with 06/F5 */
     uint16_t test_sequence; /* Bulk: the 06/F5 sequence, from 1 */
     bool dropping;          /* RC-N1: input during the settle is dropped */

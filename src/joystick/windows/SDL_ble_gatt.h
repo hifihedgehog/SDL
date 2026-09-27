@@ -82,8 +82,13 @@ typedef void (*SDL_BLEGATT_ValueCallback)(void *userdata, int characteristic, co
    not yet connected right after the open is no loss. The link counts as up
    once a status says so or discovery finds the first service, and
    discovery then polls the status once. *bonded is true when Windows holds
-   a bond. NULL on failure. */
-extern SDL_BLEGATTLink *SDL_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_AtomicInt *cancel, bool *bonded);
+   a bond. NULL on failure. *retained gets true once the transport has
+   registered a delegate that holds lost, whose callback can still run after
+   the call and after the link has closed, so the memory behind lost must
+   then be kept. Every link returned for a lost flag has such a delegate,
+   and a failed open can leave *retained false. */
+extern SDL_BLEGATTLink *SDL_BLEGATT_Open(Uint64 address, SDL_AtomicInt *lost, SDL_AtomicInt *cancel, bool *bonded,
+                                         bool *retained);
 
 /* DeviceInformation.Pairing.Custom.PairAsync with ConfirmOnly and minimum
    protection Encryption, accepting from PairingRequested. True when paired
@@ -174,14 +179,15 @@ extern bool SDL_BLEGATT_EnableNotifications(SDL_BLEGATTCharacteristic *character
 
 /* Registers a ValueChanged delegate that calls callback with userdata and
    index. Returns the delegate, which is never freed, or NULL when it cannot
-   be allocated. */
+   be allocated. A delegate whose registration fails is returned too. */
 extern void *SDL_BLEGATT_AddValueHandler(SDL_BLEGATTCharacteristic *characteristic, SDL_BLEGATT_ValueCallback callback,
                                          void *userdata, int index, struct EventRegistrationToken *token);
 
 /* Registers a ConnectionStatusChanged delegate on a link that is already
    up, then polls the status once. *lost gets 1 whenever the status reads
    Disconnected. Returns the delegate, which is never freed, or NULL when it
-   cannot be allocated. */
+   cannot be allocated. A delegate whose registration fails is returned
+   too. */
 extern void *SDL_BLEGATT_AddStatusHandler(SDL_BLEGATTDevice *device, SDL_AtomicInt *lost,
                                           struct EventRegistrationToken *token);
 

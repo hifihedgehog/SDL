@@ -40,7 +40,11 @@ typedef struct SDL_HIDAPIAdmittedCollection
 
 /* Windows makes one device per top-level collection. A row with a usage
  * admits that collection. A row with any usage admits every collection of
- * the device, and the driver picks among them. */
+ * the device, and its driver opens only a collection whose descriptor
+ * declares the reports the driver uses: input 1 and features 2 and 8 for
+ * the Rift DK1, input 1 and output 6 for the Windows Mixed Reality
+ * controllers, input 3 or 4 for the Prodikeys, and any input report for
+ * the RC adapter, the drum kit and the Nimbus. */
 static const SDL_HIDAPIAdmittedCollection SDL_hidapi_admitted_collections[] = {
     /* The descriptor is broken and not recorded */
     { USB_VENDOR_MULTIPLE_1781, USB_PRODUCT_PHOENIXRC_ADAPTER, COLLECTIONS_ANY_USAGE, 0, 0 },
@@ -141,6 +145,21 @@ static void Collections_Mark(uint8_t ids[32], uint8_t id)
 bool SDL_HIDAPI_HasReportID(const uint8_t ids[32], uint8_t id)
 {
     return ids && (ids[id >> 3] & (1u << (id & 7))) != 0;
+}
+
+bool SDL_HIDAPI_DeclaresInput(const SDL_HIDAPIReportIDs *ids)
+{
+    size_t i;
+
+    if (!ids) {
+        return false;
+    }
+    for (i = 0; i < sizeof(ids->input); ++i) {
+        if (ids->input[i]) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool SDL_HIDAPI_ParseReportIDs(const uint8_t *descriptor, size_t length, SDL_HIDAPIReportIDs *out)

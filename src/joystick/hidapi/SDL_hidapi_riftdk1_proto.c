@@ -31,6 +31,19 @@ bool SDL_RiftDK1_IsManufacturer(const char *manufacturer)
     return manufacturer && strcmp(manufacturer, SDL_RIFTDK1_MANUFACTURER) == 0;
 }
 
+static bool RiftDK1_HasReportID(const uint8_t ids[32], uint8_t id)
+{
+    return (ids[id >> 3] >> (id & 7)) & 1;
+}
+
+bool SDL_RiftDK1_CarriesTracker(const uint8_t input_report_ids[32], const uint8_t feature_report_ids[32])
+{
+    return input_report_ids && feature_report_ids &&
+           RiftDK1_HasReportID(input_report_ids, SDL_RIFTDK1_REPORT_ID) &&
+           RiftDK1_HasReportID(feature_report_ids, SDL_RIFTDK1_FEATURE_CONFIG) &&
+           RiftDK1_HasReportID(feature_report_ids, SDL_RIFTDK1_FEATURE_KEEPALIVE);
+}
+
 static int32_t RiftDK1_Signed21(uint32_t value)
 {
     return (value & 0x100000) ? (int32_t)value - 0x200000 : (int32_t)value;

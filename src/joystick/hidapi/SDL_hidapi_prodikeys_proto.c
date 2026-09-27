@@ -83,16 +83,25 @@ bool SDL_Prodikeys_HandleReport(SDL_ProdikeysState *state, const uint8_t *report
         return true;
     }
     if (report[0] == PRODIKEYS_REPORT_MASK) {
-        /* A 24-bit mask, byte 1 most significant. Windows pads a shorter report
-           to the collection's longest, so bytes past 3 are not checked. */
+        /* A 24-bit mask, byte 1 most significant. The descriptor declares 16
+           bits where the keyboard sends 24, which Linux corrects, so hid.dll
+           can hand the report over at its declared 3 bytes. Those carry mask
+           bits 8-23, and bits 0-7 keep their state. Windows pads a shorter
+           report to the collection's longest, so bytes past 3 are not
+           checked. */
         uint32_t mask;
-        int bit;
+        int bit, first = 0;
 
-        if (length < 4) {
+        if (length < 3) {
             return false;
         }
-        mask = ((uint32_t)report[1] << 16) | ((uint32_t)report[2] << 8) | report[3];
-        for (bit = 0; bit < SDL_PRODIKEYS_MASK_BUTTONS; ++bit) {
+        mask = ((uint32_t)report[1] << 16) | ((uint32_t)report[2] << 8);
+        if (length >= 4) {
+            mask |= report[3];
+        } else {
+            first = 8;
+        }
+        for (bit = first; bit < SDL_PRODIKEYS_MASK_BUTTONS; ++bit) {
             Prodikeys_SetButton(state, SDL_PRODIKEYS_NOTE_BUTTONS + bit, (mask >> bit) & 1);
         }
         return true;

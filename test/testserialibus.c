@@ -123,8 +123,12 @@ static void TestFrames(void)
     H_Feed(h, frame_ch1_min, 32);
     {
         const int mark = h->npublished;
+        const int bad = ((const SDL_IBusState *)h->state)->bad_frames;
+
         H_Feed(h, frame_bad, 32);
         CHECK(h->npublished == mark && H_Axis(h, 0, 0) == -32768);
+        /* It is counted once */
+        CHECK(((const SDL_IBusState *)h->state)->bad_frames == bad + 1);
     }
     H_Feed(h, frame1, 32);
     CHECK(H_Axis(h, 0, 0) == 0);

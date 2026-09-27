@@ -24,16 +24,16 @@ it has not been read from an XID device. If Windows lists other compatible IDs
 for one, bind by hardware ID. An XID pad is a USB hub with the pad behind it,
 so bind the pad, not the hub.
 
-On Windows the libusb backend lists an XID interface only when it can open it,
-so an unbound pad does not appear. On Linux the kernel's xpad driver keeps XID
-devices, and the libusb backend leaves them to it unless
+On Windows the libusb backend lists an XID interface only when it can open its
+device, so an unbound pad does not appear. On Linux the kernel's xpad driver
+keeps XID devices, and the libusb backend leaves them to it unless
 `SDL_HINT_HIDAPI_LIBUSB_WHITELIST` is "0".
 
 ## Hints
 
 | Hint | Default | Devices |
 |---|---|---|
-| `SDL_HINT_JOYSTICK_HIDAPI_XBOX_ORIGINAL` | `SDL_HINT_JOYSTICK_HIDAPI_XBOX` | every XID interface except 0A7B:D000 |
+| `SDL_HINT_JOYSTICK_HIDAPI_XBOX_ORIGINAL` | `SDL_HINT_JOYSTICK_HIDAPI_XBOX` when set, otherwise `SDL_HINT_JOYSTICK_HIDAPI` | every XID interface except 0A7B:D000 |
 | `SDL_HINT_JOYSTICK_HIDAPI_STEEL_BATTALION` | `SDL_HINT_JOYSTICK_HIDAPI_XBOX_ORIGINAL` | 0A7B:D000 |
 
 The XID descriptor picks the decoder on any ID. ogx360 reports the Steel
@@ -42,11 +42,21 @@ Battalion under the first hint.
 
 ## Open
 
-The driver sends one vendor request, GET_DESCRIPTOR: `C1 06`, wValue 0x4200,
-wIndex the interface, wLength 16, with a 100 ms timeout. bType 0x01 in the
-reply is the gamepad family and 0x80 the Steel Battalion. A device with
-bType 0x03, the DVD remote, is closed. Without a usable reply the ID decides:
-0A7B:D000 is the Steel Battalion and any other ID the gamepad family.
+The driver's one vendor request is GET_DESCRIPTOR: `C1 06`, wValue 0x4200,
+wIndex the interface, wLength 16, with a 100 ms timeout. A stall, a timeout
+or a reply that does not parse sends it again, up to three requests in all.
+bType 0x01 in the reply is the gamepad family and 0x80 the Steel Battalion.
+A device with bType 0x03, the DVD remote, is closed. Without a usable reply
+the ID decides: 0A7B:D000 is the Steel Battalion and any other ID the
+gamepad family.
+
+Byte 15 of the joystick GUID records the result: bSubType for the gamepad
+family, 0x80 for a dance pad and 0xFF for the Steel Battalion. bSubType 0xFF
+gives 0. When all three requests fail, the ID sets the byte as it sets the
+decoder: 0xFF for 0A7B:D000, 0x80 for a dance-pad ID and 0 for any other ID.
+Such a device can show a different GUID, type and mapping than on a plug-in
+where its descriptor answers, and a mapping saved for one of its GUIDs does
+not apply to the other.
 
 The gamepad family then reads its current report once with GET_REPORT:
 `A1 01`, wValue 0x0100, wLength 20. A pad sends a report only when something
@@ -71,15 +81,20 @@ Silence is not a disconnect. A read error is.
 - A light gun, bSubType 0x50, adds button 11, down while the gun sees a
   bright screen.
 - The joystick type comes from bSubType: 0x01 and 0x02 gamepad, 0x10 wheel,
-  0x20 and 0x21 arcade stick, 0x30 flight stick, 0x80 dance pad, and unknown
-  for the rest.
+  0x20 and 0x21 arcade stick, 0x30 flight stick. Dance-pad mode gives a
+  dance pad. The driver gives 0x40, 0x50, 0x60 and 0x70 no type, and since
+  they carry the pad mapping, `SDL_GetJoystickType` reports them as
+  gamepads. Any other bSubType, and a device without a usable descriptor,
+  is a gamepad.
 - The name is the USB product string, else the name in the identity table,
   else "Xbox Controller" for bSubType 0x01, "Xbox Controller S" for 0x02 and
   "Xbox Input Device" for the rest.
 - The gamepad mapping is the standard layout without Guide. A dance pad maps
-  buttons 11 to 14 to the D-pad. For an ID in the identity table the GUID
-  alone decides the mapping. Any other XID device gets its mapping only while
-  it is connected, since only its interface class marks it.
+  buttons 11 to 14 to the D-pad. A connected device takes the mapping only
+  through its XID interface, since other drivers serve products of some of
+  the identity table's vendors. While no device with the GUID is connected,
+  the GUID alone decides for an ID in the identity table, and any other XID
+  device has no mapping until it connects.
 - `SDL_RumbleJoystick` writes `00 06 LL LH RL RH` to the OUT endpoint, low
   frequency on the left motor.
 

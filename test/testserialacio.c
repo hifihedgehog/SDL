@@ -784,17 +784,19 @@ static void TestBringUp(void)
     CHECK(SDL_ACIO_GetNodeCount(h->state) == 0);
     H_Feed(h, enumerate_reply, sizeof(enumerate_reply));
     CHECK(H_IsWrite(H_NextCall(h), version_request, 7, 2650) && Bus(h)->nodes == 1);
-    CHECK(SDL_ACIO_GetNodeCount(h->state) == 0 && SDL_ACIO_GetNode(h->state, 1) == NULL);
+    CHECK(SDL_ACIO_GetNodeCount(h->state) == 0);
     H_Feed(h, version_reply, sizeof(version_reply));
     CHECK(H_IsWrite(H_NextCall(h), start_request, 7, 2650));
     CHECK(strcmp(h->last_log, "ACIO node 1: BI2A, type 0D060000, version 1.2.1, Nov 27 2017 14:48:52") == 0);
     CHECK(State(h)->readies == 0 && Bus(h)->step == SDL_ACIO_STEP_START);
+    /* The version is kept, and no lookup sees the node before Ready */
+    CHECK(SDL_ACIO_GetNodeCount(h->state) == 0 && SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_BI2A) == 0);
     H_Feed(h, start_reply, sizeof(start_reply));
     CHECK(H_NextCall(h) == NULL && State(h)->readies == 1 && Bus(h)->step == SDL_ACIO_STEP_READY);
     CHECK(SDL_ACIO_GetNodeCount(h->state) == 1 && Bus(h)->sequence == 4);
-    node = SDL_ACIO_GetNode(h->state, 1);
-    CHECK(node && node->type == SDL_ACIO_TYPE_BI2A && strcmp(node->product, "BI2A") == 0 && node->major == 1 && node->minor == 2 && node->revision == 1);
-    CHECK(SDL_ACIO_GetNode(h->state, 0) == NULL && SDL_ACIO_GetNode(h->state, 2) == NULL);
+    node = &Bus(h)->versions[0];
+    CHECK(node->type == SDL_ACIO_TYPE_BI2A && strcmp(node->product, "BI2A") == 0 && node->major == 1 && node->minor == 2 && node->revision == 1);
+    CHECK(SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_BI2A) == 1);
     CHECK(SDL_ACIO_FindProduct(h->state, "BI2A") == 1 && SDL_ACIO_FindProduct(h->state, "KFCA") == 0);
     CHECK(SDL_ACIO_FindProduct(h->state, "BI2") == 0 && SDL_ACIO_FindProduct(h->state, NULL) == 0);
     CHECK(h->npresence == 0 && State(h)->downs == 0);
@@ -884,7 +886,7 @@ static void TestBringUp(void)
         /* The highest match, as bemanitools' iidxio takes the last */
         CHECK(SDL_ACIO_FindProduct(h->state, "BI2A") == 15 && SDL_ACIO_FindProduct(h->state, "RVOL") == 14);
         CHECK(SDL_ACIO_FindProduct(h->state, "ICCA") == 16 && SDL_ACIO_FindProduct(h->state, "PANB") == 13);
-        CHECK(strcmp(SDL_ACIO_GetNode(h->state, 7)->product, "MDXF") == 0 && strcmp(SDL_ACIO_GetNode(h->state, 16)->product, "ICCA") == 0);
+        CHECK(strcmp(Bus(h)->versions[6].product, "MDXF") == 0 && strcmp(Bus(h)->versions[15].product, "ICCA") == 0);
         H_Destroy(h);
     }
 }
@@ -1463,7 +1465,7 @@ static void TestTypes(void)
     CHECK(SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_KFCA) == 0 && SDL_ACIO_NextType(h->state, SDL_ACIO_TYPE_KFCA, 0) == 0);
     BringUpTypes(h, types, products, 5);
     CHECK(State(h)->readies == 1 && SDL_ACIO_GetNodeCount(h->state) == 5);
-    CHECK(SDL_ACIO_GetNode(h->state, 2)->type == SDL_ACIO_TYPE_RVOL && strcmp(SDL_ACIO_GetNode(h->state, 2)->product, "KFCA") == 0);
+    CHECK(Bus(h)->versions[1].type == SDL_ACIO_TYPE_RVOL && strcmp(Bus(h)->versions[1].product, "KFCA") == 0);
     /* The highest of a type */
     CHECK(SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_KFCA) == 3 && SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_RVOL) == 2);
     CHECK(SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_MDXF) == 4 && SDL_ACIO_FindType(h->state, SDL_ACIO_TYPE_PANB) == 5);
@@ -1670,6 +1672,85 @@ static void TestCloseReset(void)
     }
 }
 
+/* A port that refuses a line break, as a USB serial device without break
+   support can. bemanitools ignores the result of both EscapeCommFunction
+   calls of its reset (aciodrv/device.c:37-39), so the reset runs on without
+   the break. A break that cannot end is still port loss. */
+static uint32_t refused_escapes; /* Bit n refuses EscapeCommFunction n */
+
+static bool Refusing_Escape(void *userdata, uint32_t function)
+{
+    (void)H_Escape(userdata, function);
+    return (refused_escapes & (1u << function)) == 0;
+}
+
+static const SDL_SerialPortOps refusing_ops = {
+    H_Open, H_SetLine, H_SetTimeouts, H_Purge, Refusing_Escape, H_Write, H_Drain, H_Close, H_PresenceChanged, H_Publish, H_Log
+};
+
+static void TestRefusedBreak(void)
+{
+    const uint32_t both = (1u << SDL_SERIAL_SETBREAK) | (1u << SDL_SERIAL_CLRBREAK);
+    Harness *h;
+
+    /* Neither end of the break taken: the reset keeps its timeline on an
+       open port, and the probes start at 2650 */
+    probe_present = false;
+    probe_auto = false;
+    refused_escapes = both;
+    h = H_Create(&probe_module);
+    SDL_SerialEngine_Init(&h->engine, &refusing_ops, h, h->module, h->state, 0);
+    H_Start(h);
+    CHECK(H_ExpectOpened(h, PROBE_RATE, 8, SDL_SERIAL_NOPARITY, 1, 0));
+    CHECK(ExpectZeros(h, 0) && H_NextCall(h) == NULL);
+    CHECK(h->engine.open && !h->engine.breaking && h->engine.losses == 0 && Bus(h)->step == SDL_ACIO_STEP_BREAK);
+    H_Advance(h, 1449);
+    CHECK(H_NextCall(h) == NULL);
+    H_Advance(h, 1450);
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1450) && H_NextCall(h) == NULL);
+    CHECK(h->engine.open && h->engine.losses == 0 && Bus(h)->step == SDL_ACIO_STEP_SETTLE);
+    H_Advance(h, 2650);
+    CHECK(H_IsWrite(H_NextCall(h), aa, 1, 2650) && Bus(h)->step == SDL_ACIO_STEP_PROBE);
+    /* The bus comes up as over a port that takes the break */
+    H_Feed(h, aa, 1);
+    H_Feed(h, enumerate_reply, sizeof(enumerate_reply));
+    H_Feed(h, version_reply, sizeof(version_reply));
+    H_Feed(h, start_reply, sizeof(start_reply));
+    CHECK(Bus(h)->step == SDL_ACIO_STEP_READY && State(h)->readies == 1 && h->engine.opens == 1 && h->engine.losses == 0);
+    H_Destroy(h);
+
+    /* A refused end of a break the port holds is port loss, and the close
+       tries once more */
+    refused_escapes = 1u << SDL_SERIAL_CLRBREAK;
+    h = H_Create(&probe_module);
+    SDL_SerialEngine_Init(&h->engine, &refusing_ops, h, h->module, h->state, 0);
+    H_Start(h);
+    H_SkipCalls(h);
+    CHECK(h->engine.breaking);
+    H_Advance(h, 1450);
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1450) && H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 1450));
+    CHECK(H_IsCall(H_NextCall(h), 'C', 1450) && !h->engine.open && h->engine.losses == 1 && !h->engine.breaking);
+    H_Destroy(h);
+
+    /* The reset before a close runs its time without the break, and the port
+       closes when the break would have ended */
+    probe_close = true;
+    h = ReadyBus(&probe_module, true, true);
+    refused_escapes = both;
+    h->engine.ops = &refusing_ops;
+    H_Advance(h, 2700);
+    CHECK(SDL_SerialEngine_BeginStop(&h->engine, H_NS(2700)));
+    CHECK(ExpectZeros(h, 2700) && H_NextCall(h) == NULL && h->engine.open && h->engine.losses == 0);
+    H_Advance(h, 2700 + SDL_ACIO_BREAK_MS - 1);
+    CHECK(H_NextCall(h) == NULL && h->engine.open);
+    H_Advance(h, 2700 + SDL_ACIO_BREAK_MS);
+    CHECK(H_IsEscape(H_NextCall(h), SDL_SERIAL_CLRBREAK, 4150) && H_IsCall(H_NextCall(h), 'C', 4150) && H_NextCall(h) == NULL);
+    CHECK(!h->engine.open && State(h)->acio.base.closed && h->engine.losses == 0);
+    H_Destroy(h);
+    probe_close = false;
+    refused_escapes = 0;
+}
+
 int main(void)
 {
     TestEncode();
@@ -1685,5 +1766,6 @@ int main(void)
     TestTypes();
     TestAlternateRate();
     TestCloseReset();
+    TestRefusedBreak();
     return H_Finish();
 }

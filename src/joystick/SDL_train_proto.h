@@ -117,7 +117,10 @@ typedef struct SDL_TrainControl
     uint8_t data[8];
 } SDL_TrainControl;
 
-/* The outputs last sent, so a repeated request sends nothing */
+/* The outputs the controller has accepted, so a repeated rumble sends
+ * nothing. SDL_Train_Rumble and SDL_Train_Effect only build transfers, and
+ * SDL_Train_Sent records each one after the controller accepts it, so a
+ * transfer that failed is built again by the next request. */
 typedef struct SDL_TrainOutputs
 {
     bool left_motor;
@@ -129,17 +132,23 @@ extern void SDL_Train_InitOutputs(SDL_TrainOutputs *outputs);
 
 /* Rumble on the Type 2 and the Shinkansen: a nonzero low-frequency value
  * turns the left motor on and a nonzero high-frequency value the right one.
- * Fills up to two transfers for what changed and returns their count, or -1
- * on a model without motors. */
-extern int SDL_Train_Rumble(int model, SDL_TrainOutputs *outputs, uint16_t low, uint16_t high, SDL_TrainControl out[2]);
+ * Fills up to two transfers for what differs from the accepted outputs and
+ * returns their count, or -1 on a model without motors. */
+extern int SDL_Train_Rumble(int model, const SDL_TrainOutputs *outputs, uint16_t low, uint16_t high, SDL_TrainControl out[2]);
 
 /* A raw output: 2 bytes (status, function) on the Type 2, the 8-byte display
  * payload on the Shinkansen, one lamp byte on the Multi Train Controller and
  * the Train Mascon. Fills one transfer and returns 1, or returns -1. */
-extern int SDL_Train_Effect(int model, SDL_TrainOutputs *outputs, const uint8_t *data, size_t size, SDL_TrainControl *out);
+extern int SDL_Train_Effect(int model, const uint8_t *data, size_t size, SDL_TrainControl *out);
+
+/* Records a transfer from SDL_Train_Rumble or SDL_Train_Effect once the
+ * controller has accepted it: a Type 2 motor function or the Shinkansen's
+ * payload. Any other transfer records nothing. */
+extern void SDL_Train_Sent(int model, SDL_TrainOutputs *outputs, const SDL_TrainControl *control);
 
 /* The off states for a close. Fills up to three transfers and returns their
- * count. */
+ * count. The outputs return to their initial state whatever the transfers
+ * return, since the joystick is closing. */
 extern int SDL_Train_Close(int model, SDL_TrainOutputs *outputs, SDL_TrainControl out[3]);
 
 /* The Master Controllers' ASCII events: a word of five characters, then CR.

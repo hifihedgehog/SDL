@@ -145,7 +145,9 @@ typedef enum SDL_SerialIO
 
 typedef struct SDL_SerialPortOps
 {
-    /* Port calls, all on the port thread. A false return is port loss. */
+    /* Port calls, all on the port thread. A false return is port loss,
+     * except that Escape refusing a break, or the end of one while no break
+     * is held, finishes the break action as failed. */
     bool (*Open)(void *userdata);
     bool (*SetLine)(void *userdata, const SDL_SerialLineConfig *config);
     bool (*SetTimeouts)(void *userdata, const SDL_SerialTimeouts *timeouts);
@@ -183,6 +185,7 @@ typedef struct SDL_SerialEngine
     uint32_t losses;
     bool stopping;    /* Closing for good: the port never opens again */
     uint64_t stop_at; /* ms, the end of the time a close sequence has */
+    bool stalled;     /* The last call ran out of steps, see SDL_SerialEngine_GetDeadline */
 } SDL_SerialEngine;
 
 /* Closed, with the first open due at once */
@@ -197,7 +200,8 @@ extern void SDL_SerialEngine_Lost(SDL_SerialEngine *engine, uint64_t now_ns);
 /* A COM port arrived or left: a closed port retries at once */
 extern void SDL_SerialEngine_Rescan(SDL_SerialEngine *engine, uint64_t now_ns);
 extern void SDL_SerialEngine_Output(SDL_SerialEngine *engine, const SDL_SerialOutput *request, uint64_t now_ns);
-/* Earliest time in ms at which Run must be called. False when none. */
+/* Earliest time in ms at which Run must be called. False when none. After a
+ * call that ran out of steps with work left it is 1 ms after that call. */
 extern bool SDL_SerialEngine_GetDeadline(const SDL_SerialEngine *engine, uint64_t *deadline);
 /* The port layer keeps a read posted while this is true */
 extern bool SDL_SerialEngine_IsReading(const SDL_SerialEngine *engine);
@@ -261,5 +265,74 @@ typedef enum SDL_SerialPortChange
 /* old_changes gets KEEP, RESTART or STOP for each running port, and
  * new_changes START or KEEP for each entry of the new hint */
 extern void SDL_Serial_DiffPorts(const SDL_SerialPortEntry *old_entries, int nold, const SDL_SerialPortEntry *new_entries, int nnew, SDL_SerialPortChange *old_changes, SDL_SerialPortChange *new_changes);
+
+/* Decisions of the Windows port layer, kept here so the offline tests reach
+ * them */
+
+#define SDL_SERIAL_OUTPUT_QUEUE    16          /* Effect requests a port holds in order */
+#define SDL_SERIAL_IDLE_POLL_MS    10          /* The next read after a read that brought nothing */
+#define SDL_SERIAL_WAIT_FOREVER    0xFFFFFFFFu /* The Windows INFINITE */
+#define SDL_SERIAL_GUID_KEY_LENGTH (SDL_SERIAL_NAME_LENGTH + 6)
+
+/* Output requests on their way from the joystick thread to the port thread.
+ * A rumble, and an effect of a module that does not set queue_effects, waits
+ * in one slot per sub-device, where a newer request replaces an older one.
+ * The effects of a module that sets queue_effects wait in order. The port
+ * layer guards it with a mutex. */
+typedef struct SDL_SerialOutbox
+{
+    SDL_SerialOutput latest[SDL_SERIAL_MAX_SUBDEVICES];
+    bool latest_set[SDL_SERIAL_MAX_SUBDEVICES];
+    SDL_SerialOutput queued[SDL_SERIAL_OUTPUT_QUEUE];
+    int head;
+    int count;
+} SDL_SerialOutbox;
+
+extern void SDL_Serial_ClearOutbox(SDL_SerialOutbox *outbox);
+/* False, keeping nothing, when a queued effect finds SDL_SERIAL_OUTPUT_QUEUE
+ * requests waiting */
+extern bool SDL_Serial_PostOutput(SDL_SerialOutbox *outbox, const SDL_SerialModule *module, const SDL_SerialOutput *request);
+/* The next request for SDL_SerialEngine_Output, false when none: the slots
+ * first, then the oldest queued effect. A queued effect waits while the
+ * engine's module has an action queued, so each effect reaches the module
+ * once the one before it has left, and the module's action queue never
+ * overflows. A port that does not read, or that closes, drops every request
+ * at once. */
+extern bool SDL_Serial_TakeOutput(SDL_SerialOutbox *outbox, const SDL_SerialEngine *engine, SDL_SerialOutput *request);
+
+typedef enum SDL_SerialEffectCheck
+{
+    SDL_SERIAL_EFFECT_OK,
+    SDL_SERIAL_EFFECT_UNSUPPORTED, /* The module takes no effects */
+    SDL_SERIAL_EFFECT_BAD_SIZE,    /* Outside the module's range, or longer than SDL_SERIAL_MAX_EFFECT */
+    SDL_SERIAL_EFFECT_INVALID      /* Refused by the module's ValidEffect */
+} SDL_SerialEffectCheck;
+
+/* Whether a module takes an effect of these bytes */
+extern SDL_SerialEffectCheck SDL_Serial_CheckEffect(const SDL_SerialModule *module, const uint8_t *data, size_t length);
+
+/* The port thread's wait in ms before it runs the engine again: until the
+ * engine's deadline, or SDL_SERIAL_WAIT_FOREVER when it has none. read_posted
+ * says a read is out, and read_idle that the last read finished at once with
+ * nothing. While the engine reads and no read is out, the port thread reads
+ * again: at once after reads that brought bytes, since the port layer stops
+ * after sixteen of them in a row to see its events, and within
+ * SDL_SERIAL_IDLE_POLL_MS after one that brought nothing. */
+extern uint32_t SDL_SerialEngine_GetWait(const SDL_SerialEngine *engine, uint64_t now, bool read_posted, bool read_idle);
+
+/* The product name in the joystick GUID of a port the hint names. Such a GUID
+ * has vendor 0, so SDL_CreateJoystickGUID keeps only the first 9 bytes of
+ * the name, and SDL stores an automatic gamepad mapping without the name's
+ * CRC. By name alone the players of one JVS board shared player 1's mapping.
+ * The key is the CRC-16 of the name (SDL_crc16) as four hex digits, the
+ * sub-device as one, a space, then the name, so the kept bytes differ for
+ * every name and sub-device. SDL_SERIAL_GUID_KEY_LENGTH bytes hold any key,
+ * and a smaller buffer truncates the name. */
+extern void SDL_Serial_GUIDKey(char *key, size_t size, uint16_t name_crc, int sub, const char *name);
+
+/* The stamp of a joystick's next event: stamp, or the stamp given out last
+ * when that is later, so the events of one joystick never go back in time.
+ * last holds the stamp given out last, and moves to the result. */
+extern uint64_t SDL_Serial_EventStamp(uint64_t *last, uint64_t stamp);
 
 #endif /* SDL_serial_engine_h_ */

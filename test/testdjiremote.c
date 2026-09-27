@@ -836,7 +836,9 @@ static void TestPhantom2Reads(void)
     list[2] = -1;
     CHECK(H_OnlyButtons(h, 0, list));
 
-    /* 2: each value alone at -1000, 0 and 1000 */
+    /* 2: each value alone at -1000, 0 and 1000. The vertical axes and the
+       dial are negated. mDjiController and slaterbbx's fork of it read
+       -1000 as the dial turned right, which reads positive. */
     {
         static const int16_t values[3] = { -1000, 0, 1000 };
         int i;
@@ -863,7 +865,7 @@ static void TestPhantom2Reads(void)
             Phantom2(read, 0, 0, 0, 0, -780, 780, values[i]);
             Feed(h, read, 76);
             H_Advance(h, t += 10);
-            CHECK(Axes(h, 0, 0, 0, 0, scaled));
+            CHECK(Axes(h, 0, 0, 0, 0, -scaled));
         }
     }
     /* The levers: -780, 0 and 780, and any other value keeps the position */
@@ -1117,6 +1119,65 @@ static void TestBulkEarlyReply(void)
     H_Destroy(h);
 }
 
+/* The first 06/01 answer comes after the completion of the poll it answers,
+ * and then before it, as a port that reports the completion late delivers
+ * it. In both orders the next poll goes out at once, and a remote that then
+ * falls silent keeps its 06/01 polls every 10 ms, with no 06/F5, until the
+ * silence rule starts over 1000 ms after the answer. */
+static void TestBulkReplyBeforeCompletion(void)
+{
+    int order;
+
+    for (order = 0; order < 2; ++order) {
+        const bool reply_first = (order == 1);
+        Harness *h = H_Create(&SDL_DJIRemoteBulkModule);
+        uint16_t values[6] = { REST, REST, REST, REST, REST, REST };
+        uint8_t reply[64];
+        const size_t length = Channels32(reply, values);
+        uint64_t t;
+        int polls = 0, f5 = 0;
+
+        h->pend_writes = true;
+        H_Start(h);
+        CHECK(H_ExpectOpened(h, 115200, 8, SDL_SERIAL_NOPARITY, 1, 0));
+        CHECK(H_IsWrite(H_NextCall(h), simulator, sizeof(simulator), 0));
+        H_CompleteWrite(h, true);
+        H_Advance(h, 100);
+        CHECK(H_IsWrite(H_NextCall(h), poll01, sizeof(poll01), 100));
+        H_Advance(h, 101);
+        if (reply_first) {
+            Feed(h, reply, length);
+            CHECK(h->presence[0] == 1 && H_NextCall(h) == NULL);
+            H_CompleteWrite(h, true);
+        } else {
+            H_CompleteWrite(h, true);
+            Feed(h, reply, length);
+            CHECK(h->presence[0] == 1);
+        }
+        CHECK(H_IsWrite(H_NextCall(h), poll01, sizeof(poll01), 101));
+
+        for (t = 102; t < 1101; ++t) {
+            H_Advance(h, t);
+            H_CompleteWrite(h, true);
+        }
+        while (h->cursor < h->ncalls) {
+            const H_Call *call = H_NextCall(h);
+
+            if (call->length == sizeof(poll01) && memcmp(call->data, poll01, sizeof(poll01)) == 0) {
+                ++polls;
+            } else if (call->length == 13 && call->data[10] == 0xF5) {
+                ++f5;
+            }
+        }
+        /* The poll of 101 completes at 102, and one follows every 10 ms */
+        CHECK(polls == (1100 - 112) / 10 + 1);
+        CHECK(f5 == 0 && h->presence[0] == 1);
+        H_Advance(h, 1101);
+        CHECK(h->presence[0] == 0);
+        H_Destroy(h);
+    }
+}
+
 /* RM330 tests 3, 5 and 6 */
 static void TestBulkReports(void)
 {
@@ -1294,11 +1355,15 @@ static void TestPendingWrite(void)
     H_Advance(h, 150);
     CHECK(H_IsWrite(H_NextCall(h), pair, sizeof(pair), 150));
     /* The resend timer starts when the poll leaves. A reply while the poll
-       is still on its way sends nothing more. */
+       is still on its way sends nothing yet, and the poll's completion then
+       sends the next one at once, as the reply does after the completion. */
     H_Advance(h, 190);
     CHECK(H_NextCall(h) == NULL);
     Feed(h, reply, length);
     CHECK(h->presence[0] == 1 && H_NextCall(h) == NULL);
+    H_CompleteWrite(h, true);
+    CHECK(H_IsWrite(H_NextCall(h), pair, sizeof(pair), 190));
+    /* Without a reply the completion starts the 25 ms resend timer */
     H_CompleteWrite(h, true);
     H_Advance(h, 214);
     CHECK(H_NextCall(h) == NULL);
@@ -1371,6 +1436,7 @@ int main(void)
     TestBulkStartup();
     TestBulkChannels();
     TestBulkEarlyReply();
+    TestBulkReplyBeforeCompletion();
     TestBulkReports();
     TestBulkBatteryB();
     TestBulkBatteryA();

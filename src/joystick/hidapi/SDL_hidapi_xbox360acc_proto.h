@@ -123,15 +123,20 @@ extern void SDL_Xbox360Acc_ControlSetup(const SDL_Xbox360AccControl *control, ui
 #define SDL_XBOX360ACC_WIRED_STOPPED   0
 #define SDL_XBOX360ACC_WIRED_KEEPALIVE 10 /* Steps 1 to 9 are the start-up */
 
+/* The lamp bytes that can wait for the control pipe at once */
+#define SDL_XBOX360ACC_WIRED_LAMP_QUEUE 8
+
 typedef struct SDL_Xbox360AccWired
 {
     uint16_t bcd_device;
     uint8_t step;          /* The start-up step due next, SDL_XBOX360ACC_WIRED_KEEPALIVE or _STOPPED */
     bool in_flight;        /* A transfer went out and has not completed */
-    bool in_flight_extra;  /* That transfer is a 1B the chatpad asked for */
+    bool in_flight_extra;  /* That transfer is a 1B the chatpad asked for, or a lamp */
     bool send_1b;          /* The chatpad asked for a 1B */
     bool keepalive_1e;     /* The next keep-alive is 1E, otherwise 1F */
     uint64_t due_ms;       /* When the next step or keep-alive is due */
+    uint8_t lamps[SDL_XBOX360ACC_WIRED_LAMP_QUEUE]; /* Lamp bytes waiting, oldest first */
+    int lamp_count;
     SDL_Xbox360AccChatpad chatpad;
 } SDL_Xbox360AccWired;
 
@@ -139,14 +144,15 @@ typedef struct SDL_Xbox360AccWired
  * Step 5 writes 09 00 at bcdDevice 0x0114 and 01 02 otherwise. */
 extern void SDL_Xbox360Acc_WiredStart(SDL_Xbox360AccWired *wired, uint16_t bcd_device, uint64_t now_ms);
 
-/* The pad is gone: no more transfers, and the chatpad joystick goes. */
+/* The pad is gone, or the chatpad's reads ended: no more transfers, the
+ * queued lamps are dropped, and the chatpad joystick goes. */
 extern void SDL_Xbox360Acc_WiredStop(SDL_Xbox360AccWired *wired);
 
 /* The transfer to send now, if one is due and none is in flight. Each goes
  * out after the previous one completes: steps 1 to 6 back to back, 1F 1000
  * ms after step 6, 1E 1000 ms after that, 1B at once, then 1F and 1E in
  * turn, each 1000 ms after the one before. A 1B the chatpad asked for goes
- * first and moves nothing. */
+ * first, then each queued lamp in order, and neither moves the schedule. */
 extern bool SDL_Xbox360Acc_WiredNext(SDL_Xbox360AccWired *wired, uint64_t now_ms, SDL_Xbox360AccControl *control);
 
 /* The transfer from SDL_Xbox360Acc_WiredNext ended at now_ms, completed or
@@ -170,6 +176,13 @@ extern void SDL_Xbox360Acc_WiredPadReport(SDL_Xbox360AccWired *wired, const uint
 /* A lamp: one effect byte from the valid set, sent as wValue of 41 00 ...
  * 0002. False for any other byte or size. */
 extern bool SDL_Xbox360Acc_WiredLamp(const uint8_t *effect, size_t size, SDL_Xbox360AccControl *control);
+
+/* Queues a lamp for SDL_Xbox360Acc_WiredNext, which sends each queued lamp
+ * in order once no transfer is in flight, after a 1B the chatpad asked for
+ * and before the step or keep-alive that is due. A lamp moves nothing. False
+ * for a byte or size SDL_Xbox360Acc_WiredLamp refuses, once the chatpad has
+ * stopped, and while SDL_XBOX360ACC_WIRED_LAMP_QUEUE lamps wait. */
+extern bool SDL_Xbox360Acc_WiredQueueLamp(SDL_Xbox360AccWired *wired, const uint8_t *effect, size_t size);
 
 /* The wireless chatpad and the uDraw, one slot of the receiver */
 

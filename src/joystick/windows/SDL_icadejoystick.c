@@ -30,20 +30,22 @@
  * no access for HidD_GetAttributes, taken from the driver's own reference to
  * hid.dll, and marks those with the cabinet's IDs or a pair from
  * SDL_HINT_JOYSTICK_ICADE_DEVICES. It lists them again after each HID
- * interface notification on its window. The pure decoder in
- * SDL_icade_proto.c turns their records into state. With
+ * interface notification on its window. The joystick thread sets aside a
+ * new device that SDL's ignore lists name, and the pure decoder in
+ * SDL_icade_proto.c turns the records of the others into state. With
  * SDL_HINT_JOYSTICK_ICADE_RAWINPUT on, the window registers for the keyboard
  * class with RIDEV_INPUTSINK and RIDEV_DEVNOTIFY while at least one iCade is
- * marked and no other window of the process holds the class, reads WM_INPUT,
- * and removes the registration when the last one leaves, since only one
- * window per device class receives raw input in a process. With the hint
- * off, SDL registers nothing and the host passes the keyboard records it
- * already receives to SDL_ICadeProcessRawKeyboard. Keyboard traffic takes
- * only this driver's lock, and as in the RFCOMM driver the joystick thread
- * takes presence and state changes from it. The driver thread never logs:
- * the joystick thread holds SDL's joystick lock while it waits for it, and
- * an application's log callback can need that lock. Raw Input consumes no
- * keystroke, so the letters still reach the window with the keyboard focus.
+ * marked and not set aside, and no other window of the process holds the
+ * class. It reads WM_INPUT and removes the registration when the last one
+ * leaves or is set aside, since only one window per device class receives
+ * raw input in a process. With the hint off, SDL registers nothing and the
+ * host passes the keyboard records it already receives to
+ * SDL_ICadeProcessRawKeyboard. Keyboard traffic takes only this driver's
+ * lock, and as in the RFCOMM driver the joystick thread takes presence and
+ * state changes from it. The driver thread never logs: the joystick thread
+ * holds SDL's joystick lock while it waits for it, and an application's log
+ * callback can need that lock. Raw Input consumes no keystroke, so the
+ * letters still reach the window with the keyboard focus.
  */
 
 #include "SDL_internal.h"
@@ -147,7 +149,7 @@ SDL_COMPILE_TIME_ASSERT(icade_overrun, SDL_ICADE_OVERRUN == KEYBOARD_OVERRUN_MAK
 #define ICADE_NOTE_LENGTH    160
 #define ICADE_RESCAN_TIMER_1 1
 #define ICADE_RESCAN_TIMER_2 2
-#define ICADE_WM_APPLY       (WM_APP + 1) /* The joystick thread has new hint values */
+#define ICADE_WM_APPLY       (WM_APP + 1) /* The joystick thread has new hint values or set a device aside */
 #define ICADE_CLASS_NAME     L"SDL_ICade"
 
 /* GUID_DEVINTERFACE_HID, as SDL_windowsjoystick.c spells it */
@@ -169,6 +171,7 @@ typedef struct ICADE_Device
     /* Under the lock */
     HANDLE handle;
     Uint32 generation; /* 0 while no device holds the slot */
+    bool ignored;      /* Set aside for SDL's ignore lists by the joystick thread */
     SDL_ICadeLayout layout;
     Uint16 vendor;
     Uint16 product;
@@ -242,7 +245,10 @@ static SDL_AtomicInt icade_presence_changed;
 /* The driver thread's */
 static ICADE_Keyboard *icade_keyboards;
 static int icade_nkeyboards;
-static bool icade_rawinput;     /* The window holds the keyboard registration it made */
+/* Set when the window's keyboard registration is made or found, and cleared
+   when the driver lets it go. Another window can have taken the class
+   meanwhile, and given it up. */
+static bool icade_rawinput;
 static bool icade_updating;     /* ICADE_UpdateRegistration is running */
 static bool icade_update_again; /* It was called again meanwhile */
 static HDEVNOTIFY icade_notify;
@@ -305,6 +311,7 @@ static void ICADE_FreeDevice(ICADE_Device *device)
 {
     device->handle = NULL;
     device->generation = 0;
+    device->ignored = false;
     device->layout = SDL_ICADE_LAYOUT_NONE;
     device->path[0] = '\0';
     device->state = 0;
@@ -312,7 +319,8 @@ static void ICADE_FreeDevice(ICADE_Device *device)
 }
 
 /* One keyboard record from WM_INPUT or the host. Takes only this driver's
-   lock. True when the handle is a device the driver decodes. */
+   lock. True when the handle is a device the driver decodes, which a device
+   set aside for SDL's ignore lists is not. */
 static bool ICADE_Key(HANDLE handle, Uint16 make_code, Uint16 flags)
 {
     SDL_Mutex *lock = ICADE_Lock();
@@ -327,7 +335,7 @@ static bool ICADE_Key(HANDLE handle, Uint16 make_code, Uint16 flags)
         for (i = 0; i < ICADE_MAX_DEVICES; ++i) {
             ICADE_Device *device = &icade_devices[i];
 
-            if (device->generation && device->handle == handle) {
+            if (device->generation && !device->ignored && device->handle == handle) {
                 found = true;
                 if (SDL_ICade_ApplyKey(&device->state, make_code, flags)) {
                     SDL_ICade_PushQueue(&device->queue, device->state, SDL_GetTicksNS());
@@ -443,7 +451,7 @@ static void ICADE_Classify(void)
             }
         }
         if (i < ICADE_MAX_DEVICES) {
-            continue; /* Already decoded */
+            continue; /* Already in a slot, decoded or set aside */
         }
         if (!slot) {
             if (!icade_logged_full) {
@@ -473,7 +481,10 @@ static void ICADE_Classify(void)
 
 /* Which window of the process holds the keyboard class, from
    GetRegisteredRawInputDevices. A registration with no window follows the
-   keyboard focus, so it counts as another window's. */
+   keyboard focus, so it counts as another window's. So does a registration
+   of usage page 1 with usage 0, as RIDEV_PAGEONLY makes one, since it covers
+   every collection of the page, keyboards included (RAWINPUTDEVICE). A
+   keyboard registration decides first, wherever the list puts it. */
 static ICADE_Owner ICADE_KeyboardOwner(HWND window)
 {
     RAWINPUTDEVICE local[16];
@@ -498,6 +509,11 @@ static ICADE_Owner ICADE_KeyboardOwner(HWND window)
                 break;
             }
         }
+        for (i = 0; owner == ICADE_OWNER_NONE && i < got; ++i) {
+            if (registered[i].usUsagePage == USB_USAGEPAGE_GENERIC_DESKTOP && registered[i].usUsage == 0) {
+                owner = ICADE_OWNER_OTHER;
+            }
+        }
     }
     if (registered != local) {
         SDL_free(registered);
@@ -508,8 +524,8 @@ static ICADE_Owner ICADE_KeyboardOwner(HWND window)
 /* Takes the keyboard class only while no window of the process holds it.
    The RegisterRawInputDevices remarks warn that a library's registration can
    interfere with the raw input processing of the application that loads it.
-   Refused, or unable to read the registrations, it leaves icade_rawinput
-   false so the next update checks again. */
+   Refused, or unable to read the registrations, it leaves icade_rawinput as
+   it was, and the next update checks again. */
 static void ICADE_Register(HWND window)
 {
     RAWINPUTDEVICE device;
@@ -573,11 +589,14 @@ static void ICADE_Unregister(HWND window)
 }
 
 /* Holds the keyboard registration while the hint allows it and at least one
-   iCade is marked, and removes it otherwise, so a process with no iCade
-   keeps its own keyboard Raw Input. Registering can report the keyboards
-   already there to the window, which can list them again and change the
-   devices before the registration returns. A call made meanwhile only asks
-   for one more pass once this one is done. */
+   iCade is marked and not set aside for SDL's ignore lists, and removes it
+   otherwise, so a process with no iCade keeps its own keyboard Raw Input.
+   Another window can take the class and give it up again, and Windows tells
+   this window neither, so while a registration is recorded each pass reads
+   the registrations again. Registering can report the keyboards already
+   there to the window, which can list them again and change the devices
+   before the registration returns. A call made meanwhile only asks for one
+   more pass once this one is done. */
 static void ICADE_UpdateRegistration(HWND window)
 {
     SDL_Mutex *lock = ICADE_Lock();
@@ -595,13 +614,13 @@ static void ICADE_UpdateRegistration(HWND window)
         SDL_LockMutex(lock);
         want = icade_want_rawinput;
         for (i = 0; i < ICADE_MAX_DEVICES; ++i) {
-            if (icade_devices[i].generation) {
+            if (icade_devices[i].generation && !icade_devices[i].ignored) {
                 present = true;
                 break;
             }
         }
         SDL_UnlockMutex(lock);
-        if (want && present && !icade_rawinput) {
+        if (want && present && (!icade_rawinput || ICADE_KeyboardOwner(window) == ICADE_OWNER_NONE)) {
             ICADE_Register(window);
         } else if ((!want || !present) && icade_rawinput) {
             ICADE_Unregister(window);
@@ -738,7 +757,8 @@ static void ICADE_Removed(HWND window, HANDLE handle)
     ICADE_UpdateRegistration(window);
 }
 
-/* The hints the joystick thread passed, applied on the driver thread */
+/* The hints the joystick thread passed, or a device it set aside, applied on
+   the driver thread */
 static void ICADE_ApplyConfig(HWND window)
 {
     ICADE_Classify();
@@ -902,10 +922,15 @@ static int ICADE_GetSlot(int device_index)
     return -1;
 }
 
-/* Takes the decoded devices as joysticks, or removes those that left */
+/* Takes the decoded devices as joysticks, or removes those that left. A
+   device that SDL's ignore lists name when it arrives is set aside instead:
+   it keeps its slot, so the next list does not take it again, but it is no
+   joystick, its records are not decoded, and it keeps no keyboard
+   registration. */
 static void ICADE_CheckPresence(bool notify)
 {
     SDL_Mutex *lock = ICADE_Lock();
+    bool set_aside = false;
     int i;
 
     for (i = 0; i < ICADE_MAX_DEVICES; ++i) {
@@ -913,11 +938,13 @@ static void ICADE_CheckPresence(bool notify)
         SDL_ICadeLayout layout = SDL_ICADE_LAYOUT_NONE;
         Uint16 vendor = 0, product = 0, version = 0;
         Uint32 generation;
+        bool ignored;
         SDL_JoystickType type;
 
         SDL_LockMutex(lock);
         generation = device->generation;
-        if (generation && generation != device->registered) {
+        ignored = device->ignored;
+        if (generation && generation != device->registered && !ignored) {
             layout = device->layout;
             vendor = device->vendor;
             product = device->product;
@@ -933,9 +960,7 @@ static void ICADE_CheckPresence(bool notify)
             }
             device->registered = 0;
         }
-        if (!device->registered && generation) {
-            device->registered = generation;
-            device->joystick_layout = layout;
+        if (!device->registered && generation && !ignored) {
             if (layout == SDL_ICADE_LAYOUT_CABINET) {
                 SDL_strlcpy(device->joystick_name, "ION iCade", sizeof(device->joystick_name));
                 type = SDL_JOYSTICK_TYPE_ARCADE_STICK;
@@ -943,12 +968,34 @@ static void ICADE_CheckPresence(bool notify)
                 (void)SDL_snprintf(device->joystick_name, sizeof(device->joystick_name), "iCade Controller (0x%.4x/0x%.4x)", vendor, product);
                 type = SDL_JOYSTICK_TYPE_GAMEPAD;
             }
+            /* SDL's ignore lists, read when a device arrives, as SDL's Raw
+               Input and Windows.Gaming.Input drivers read them
+               (SDL_rawinputjoystick.c:896, SDL_windows_gaming_input.c:457) */
+            if (SDL_ShouldIgnoreJoystick(vendor, product, version, device->joystick_name)) {
+                SDL_LockMutex(lock);
+                if (device->generation == generation) {
+                    device->ignored = true;
+                    set_aside = true;
+                }
+                SDL_UnlockMutex(lock);
+                continue;
+            }
+            device->registered = generation;
+            device->joystick_layout = layout;
             device->instance_id = SDL_GetNextObjectID();
             /* 'i' is this driver's signature, and the type rides in the last
-               byte. The iCade letters come over a Bluetooth keyboard link. */
+               byte. The bus is Bluetooth, and Open reports a wireless
+               connection, because the iCade and pads in iCade mode pair as
+               Bluetooth keyboards. A wired keyboard listed in
+               SDL_HINT_JOYSTICK_ICADE_DEVICES gets the same bus and state. */
             device->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, vendor, product, version, NULL, device->joystick_name, 'i', (Uint8)type);
             SDL_PrivateJoystickAdded(device->instance_id);
         }
+    }
+    /* The driver thread gives up a keyboard registration it holds only for
+       devices set aside */
+    if (set_aside && icade_window) {
+        PostMessageW(icade_window, ICADE_WM_APPLY, 0, 0);
     }
 }
 

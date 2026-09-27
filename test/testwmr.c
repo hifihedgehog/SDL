@@ -17,6 +17,7 @@
    Monado builds. Tests 1 to 8 are the ticket's. */
 
 #include "../src/joystick/hidapi/SDL_hidapi_wmr_proto.h"
+#include "../src/joystick/usb_ids.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -300,6 +301,15 @@ static void TestIdentity(void)
     CHECK(SDL_WMR_IsControllerID(0x045E, 0x065B, NULL));
     CHECK(!SDL_WMR_IsControllerID(0x045E, 0x065C, &model) && !SDL_WMR_IsControllerID(0x045E, 0x0659, &model));
     CHECK(!SDL_WMR_IsControllerID(0x03F0, 0x066A, &model) && !SDL_WMR_IsControllerID(0x04E8, 0x065D, &model));
+    /* The module's IDs are the ones usb_ids.h gives the admitted rows */
+    model = SDL_WMR_MODEL_REVERB_G2;
+    CHECK(SDL_WMR_IsControllerID(USB_VENDOR_MICROSOFT, USB_PRODUCT_MICROSOFT_WMR_CONTROLLER, &model) &&
+          model == SDL_WMR_MODEL_FIRST_GENERATION);
+    model = SDL_WMR_MODEL_REVERB_G2;
+    CHECK(SDL_WMR_IsControllerID(USB_VENDOR_MICROSOFT, USB_PRODUCT_MICROSOFT_WMR_CONTROLLER_ODYSSEY, &model) &&
+          model == SDL_WMR_MODEL_FIRST_GENERATION);
+    CHECK(SDL_WMR_IsControllerID(USB_VENDOR_MICROSOFT, USB_PRODUCT_MICROSOFT_WMR_CONTROLLER_REVERB_G2, &model) &&
+          model == SDL_WMR_MODEL_REVERB_G2);
 
     CHECK(SDL_WMR_GetHand("Motion controller - Left") == SDL_WMR_HAND_LEFT);
     CHECK(SDL_WMR_GetHand("Motion controller - Right") == SDL_WMR_HAND_RIGHT);

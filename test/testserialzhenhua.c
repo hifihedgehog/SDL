@@ -46,6 +46,19 @@ static void BringUp(Harness *h)
     H_Feed(h, v1, sizeof(v1));
 }
 
+/* An EF and count channel values, each reversed as the transmitter sends it */
+static void FeedValues(Harness *h, const uint8_t *values, int count)
+{
+    uint8_t raw[1 + SDL_ZHENHUA_CHANNELS];
+    int i;
+
+    raw[0] = SDL_ZHENHUA_SYNC;
+    for (i = 0; i < count; ++i) {
+        raw[1 + i] = SDL_ZhenHua_Reverse(values[i]);
+    }
+    H_Feed(h, raw, (size_t)(1 + count));
+}
+
 static Harness *PresentTransmitter(void)
 {
     Harness *h = H_Create(&SDL_SerialZhenHuaModule);
@@ -118,6 +131,31 @@ static void TestDetection(void)
     H_Feed(h, v1, 10);
     CHECK(h->presence[0] == 1);
     H_Destroy(h);
+
+    /* Channel 3 lost from the second frame: the tenth byte is the next
+       frame's EF, so nothing is presented from a buffer that mixes two
+       frames. Detection starts over at that EF, and the first values
+       presented are those of one whole frame. */
+    {
+        static const uint8_t first[4] = { 60, 90, 120, 150 };
+        static const uint8_t cut[3] = { 61, 91, 151 };
+        static const uint8_t third[4] = { 62, 92, 122, 152 };
+        static const uint8_t fourth[4] = { 63, 93, 123, 153 };
+
+        h = H_Create(&SDL_SerialZhenHuaModule);
+        H_Start(h);
+        FeedValues(h, first, 4);
+        FeedValues(h, cut, 3);
+        FeedValues(h, third, 4);
+        CHECK(h->npresence == 0);
+        FeedValues(h, fourth, 4);
+        CHECK(h->presence[0] == 1 && h->npublished >= 2);
+        /* The snapshot at rest that presents it, then the fourth frame */
+        for (i = 0; i < 4; ++i) {
+            CHECK(h->published[1].controls.axes[i] == SDL_Serial_ScaleUnsigned(fourth[i], SDL_ZHENHUA_MIN, SDL_ZHENHUA_MAX));
+        }
+        H_Destroy(h);
+    }
 }
 
 static void TestFrames(void)

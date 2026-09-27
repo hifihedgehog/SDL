@@ -410,6 +410,7 @@ void SDL_Serial_SetIdentity(SDL_SerialIdentity *identity, const char *name, uint
     identity->nbuttons = (uint8_t)((nbuttons < 0) ? 0 : (nbuttons > SDL_SERIAL_MAX_BUTTONS) ? SDL_SERIAL_MAX_BUTTONS : nbuttons);
     identity->nhats = (uint8_t)((nhats < 0) ? 0 : (nhats > SDL_SERIAL_MAX_HATS) ? SDL_SERIAL_MAX_HATS : nhats);
     identity->nballs = (uint8_t)((nballs < 0) ? 0 : (nballs > SDL_SERIAL_MAX_BALLS) ? SDL_SERIAL_MAX_BALLS : nballs);
+    identity->player_index = -1;
 }
 
 SDL_SerialMapInput SDL_Serial_MapButton(int button)

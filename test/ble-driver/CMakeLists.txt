@@ -6,6 +6,8 @@ project(SDLBLEDriverTests LANGUAGES C CXX)
 # a real static SDL against a fake transport, so its Init, Detect, Open,
 # Update, Close and Quit, the joystick and gamepad APIs, the GUID, the
 # gamepad mapping, touchpads, sensors and battery all run without a radio.
+# The Switch 2 driver, which shares the transport, runs against the same
+# fake for its watcher check.
 if(NOT WIN32 OR NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The driver test requires native MSVC for 64-bit Windows.")
 endif()
@@ -82,24 +84,26 @@ endif()
 
 enable_testing()
 
-# How the driver in the test reaches the fake transport and not SDL's:
-# - testblegattdriver.c renames every transport function with a macro, then
-#   includes the driver source. The driver in the test calls Fake_BLEGATT_*,
-#   while SDL_ble_gatt.c in the static SDL keeps SDL_BLEGATT_* for the
-#   Switch 2 driver. The names differ, so nothing clashes.
-# - The test's object defines SDL_BLEGATT_JoystickDriver. The linker takes
-#   every object named on its command line and searches a library only for a
-#   symbol still undefined, so SDL_joystick.c's driver table binds to the
-#   test's copy and SDL's own SDL_blegattjoystick.c object is never pulled.
-#   Were it pulled for any other symbol, its SDL_BLEGATT_JoystickDriver would
-#   collide with the test's and the link would fail with LNK2005. A linked
-#   test therefore runs only the test's copy of the driver.
-# - Before the link, CheckTransport.cmake reads the test object's symbol
-#   table and fails the build when it still calls an SDL_BLEGATT_ function, a
-#   Windows Bluetooth or WinRT entry point, or a way to resolve one at run
-#   time, such as a transport function added to SDL_ble_gatt.h after the
-#   renames were written.
-add_library(testblegattdriver_main OBJECT "${BLE_TESTS}/testblegattdriver.c")
+# How the drivers in the test reach the fake transport and not SDL's:
+# - testblegattdriver.c and testblegattswitch2.c rename every transport
+#   function with a macro (testblegattfake.h), then include the source of
+#   the BLE GATT driver and of the Switch 2 driver. Both drivers in the test
+#   call Fake_BLEGATT_*, which testblegattdriver.c defines.
+# - The test's objects define SDL_BLEGATT_JoystickDriver and
+#   SDL_BLE_JoystickDriver. The linker takes every object named on its
+#   command line and searches a library only for a symbol still undefined, so
+#   SDL_joystick.c's driver table binds to the test's copies, and SDL's own
+#   SDL_blegattjoystick.c and SDL_ble_switch2joystick.c objects are never
+#   pulled, nor SDL_ble_gatt.c, which only they call. Were one pulled for any
+#   other symbol, its driver would collide with the test's and the link
+#   would fail with LNK2005. A linked test therefore runs only the test's
+#   copies of the drivers.
+# - Before the link, CheckTransport.cmake reads the test objects' symbol
+#   tables and fails the build when one still calls an SDL_BLEGATT_
+#   function, a Windows Bluetooth or WinRT entry point, or a way to resolve
+#   one at run time, such as a transport function added to SDL_ble_gatt.h
+#   after the renames were written.
+add_library(testblegattdriver_main OBJECT "${BLE_TESTS}/testblegattdriver.c" "${BLE_TESTS}/testblegattswitch2.c")
 target_compile_definitions(testblegattdriver_main PRIVATE USING_GENERATED_CONFIG_H SDL_STATIC_LIB)
 target_include_directories(testblegattdriver_main PRIVATE
     "${BLE_SDL_ROOT}/src"

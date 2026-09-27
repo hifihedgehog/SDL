@@ -36,7 +36,9 @@ SDL cannot reach the raw data while xusb22 holds a device. Its Windows HID
 backend skips the synthetic HID collections xusb22 creates, libusb cannot
 open a device that xusb22 owns, and the libusb backend skips an Xbox interface
 it cannot open. Such a pad reaches SDL through its other Windows backends, as
-before, with no chatpad.
+before, with no chatpad. That holds while SDL reads another pad or a receiver
+through WinUSB too: a device WinUSB owns is on no driver those backends read,
+so SDL never takes it for one of their pads.
 
 ## Binding WinUSB
 
@@ -155,8 +157,10 @@ that handle. If a condition fails, the pad works as before with no chatpad
 joystick. The start-up and the keep-alives go out whether or not a chatpad is
 plugged in.
 
-SDL sends these control transfers from the driver's updates, each after the
-previous one completes, with a 100 ms timeout:
+SDL submits these control transfers from the driver's updates, each after the
+previous one completes, with a 100 ms timeout. They complete on the libusb
+backend's event thread, so no update waits for the pad, and a step due at once
+goes out at the first update after the one before completes:
 
 | Step | bmRequestType | bRequest | wValue | wIndex | wLength | Data | Due |
 |---|---|---|---|---|---|---|---|
@@ -190,9 +194,14 @@ on the libusb backend's event thread. SDL reads bytes 0 to 3 of a message of
 Any other first byte, or a shorter message, changes nothing.
 
 The chatpad joystick connects on the first key report or status after step 9.
-It disconnects with the pad, or when the pad reports on interface 0 that the
-chatpad is gone: report `08 03` with bit 0 of byte 2 clear. A lamp byte goes
-out as the wValue of a `41 00` request with wIndex 0002 and no data.
+It disconnects with the pad, when the chatpad read ends with an error while
+the pad stays, which also stops the keep-alives, or when the pad reports on
+interface 0 that the chatpad is gone: report `08 03` with bit 0 of byte 2
+clear. A lamp byte goes out as the wValue of a `41 00` request with
+wIndex 0002 and no data, once no transfer is in flight, after a `1B` the
+chatpad asked for and before the step or keep-alive that is due.
+`SDL_SendJoystickEffect` returns once the lamp is queued, and fails while 8
+lamps wait.
 
 ## Wireless chatpad
 
@@ -220,13 +229,17 @@ slot that shows a device, pads with or without a chatpad and tablets alike:
 | every 1000 ms after that | `1E`, then `1F`, in turn |
 | at the next scheduled command after a status `F0 03` | `1B`, in place of the keep-alive |
 | after each scheduled command | each Shift, Green, Orange or People lamp the application lit |
-| on `SDL_SendJoystickEffect` | the lamp byte, at once |
+| on `SDL_SendJoystickEffect` | the lamp byte, queued at once |
 
 A slot shows a device on the connection status, `08` with bit 7 of byte 1
 set, on the link control packet, or on a pad or tablet state packet. The
 commands stop when the slot empties or the receiver goes, and the next device
 on the slot starts again with `1B` after 100 ms. SDL queues the scheduled
-commands during the driver's updates and sends them at the end of each update.
+commands during the driver's updates and hands them to the HIDAPI rumble
+thread at the end of each update, which writes them in order among the pad's
+rumble packets. The receiver answers a write with NAK until it has passed the
+one before to the pad, so a write can take up to its 1000 ms timeout, and no
+update waits for one.
 
 ## Xbox 360 uDraw GameTablet
 
@@ -310,11 +323,12 @@ before.
 
 | Hint | Default | Off |
 |---|---|---|
-| `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_CHATPAD` | The value of `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360`, which follows `SDL_HINT_JOYSTICK_HIDAPI_XBOX` when unset | No chatpad is read, no chatpad command goes out, and the wired driver leaves interface 2 alone |
-| `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_UDRAW` | The value of `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_WIRELESS`, which follows `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` when unset | A tablet is an Xbox 360 gamepad, and a slot connects on its connection status |
+| `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_CHATPAD` | The first of `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` and `SDL_HINT_JOYSTICK_HIDAPI_XBOX` that is set, otherwise `SDL_HINT_JOYSTICK_HIDAPI` | No chatpad is read, no chatpad command goes out, and the wired driver leaves interface 2 alone |
+| `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_UDRAW` | The first of `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_WIRELESS`, `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` and `SDL_HINT_JOYSTICK_HIDAPI_XBOX` that is set, otherwise `SDL_HINT_JOYSTICK_HIDAPI` | A tablet is an Xbox 360 gamepad, and a slot connects on its connection status |
 
-SDL reads both when it opens a wired pad or a receiver, so a change applies
-when the device is next plugged in, or after the driver's own hint,
+The wired driver reads the chatpad hint when it opens a wired pad, and the
+receiver driver reads both hints when it opens a receiver, so a change
+applies when the device is next plugged in, or after the driver's own hint,
 `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360` for the wired pad or
 `SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_WIRELESS` for the receiver, is turned off
 and on again. With both hints "0" the two drivers do what they did before.
@@ -334,7 +348,10 @@ receivers it serves, whichever backend delivers the slot.
 
 On Linux the kernel's xpad driver keeps Xbox 360 pads and receivers, and
 SDL's libusb backend leaves them to it unless
-`SDL_HINT_HIDAPI_LIBUSB_WHITELIST` is "0". Nothing changes there by default.
+`SDL_HINT_HIDAPI_LIBUSB_WHITELIST` is "0". Nothing changes there by default
+in a build with another HID backend, such as hidraw through libudev. A build
+whose only HID backend is libusb turns the whitelist off by default, and the
+changes above then apply there too.
 
 ## Known limits
 
@@ -350,9 +367,15 @@ SDL's libusb backend leaves them to it unless
   differences matter is not recorded.
 - xboxdrv refuses pad revisions other than 1.10 and 1.14, and their chatpad
   endpoint and start-up data are not recorded. SDL starts no chatpad on them.
-- The wired driver runs the start-up once per pad connection. It does not run
-  it again, or restart a chatpad read that ended in an error, while the pad
-  stays connected.
+- The wired driver runs the start-up once per pad connection. A chatpad read
+  that ends in an error disconnects the chatpad joystick and stops the
+  keep-alives, and neither comes back while the pad stays connected.
+- A receiver slot whose read ends in an error while the receiver stays has no
+  joystick until SDL opens the slot again, which it tries at the next device
+  change.
+- The receiver commands go through the HIDAPI rumble thread, which waits 10 ms
+  after each write, so each command queued ahead of a rumble on any HIDAPI
+  device holds that rumble back by 10 ms or more.
 - How often the wired pad relays the chatpad's status is not recorded, so an
   idle chatpad's joystick can wait for the first key.
 - The wired driver answers a status `F0 03` with a `1B`. Only disabled
@@ -379,13 +402,18 @@ SDL's libusb backend leaves them to it unless
 ## Tests
 
 The protocol module is C99 with no SDL runtime and no I/O.
-`test/controller-protocols` runs `testxbox360acc` against key reports built
-from Spivey's serial capture in xboxdrv's USB framing, receiver packets built
-from [MS-XUSBI] and tablet packets built from brandonw.net's table: every key
-code, the wired start-up and keep-alives at both revisions, the wireless
-commands, four slots at once, slot typing, the tablet's corners, both hints
-off, and every truncation of every packet with stale bytes past its length,
-all on an injected clock. `testvendorusb` checks the enumeration rule that
-keeps a wired pad or receiver this process holds, and that the pad's other
-interfaces and the receiver's headset interfaces are never listed. Both run
-in normal and AddressSanitizer builds.
+`test/controller-protocols` builds and runs `test/testxbox360acc.c` against
+key reports built from Spivey's serial capture in xboxdrv's USB framing,
+receiver packets built from [MS-XUSBI] and tablet packets built from
+brandonw.net's table: every key code, the wired start-up and keep-alives at
+both revisions with the lamps queued between them, the wireless commands, four
+slots at once, slot typing, the tablet's corners, both hints off, and every
+truncation of every packet with stale bytes past its length, all on an
+injected clock. It also builds and runs `test/testvendorusb.c`, which checks
+the enumeration rule that keeps a wired pad or receiver this process holds,
+that the pad's other interfaces and the receiver's headset interfaces are
+never listed, that a pad or receiver read through WinUSB is never taken for a
+pad another Windows backend lists, and, in TestClaimOrder, the order in which
+the backend claims interface 0, over every order of opening and closing the
+receiver's four slots, against a model of libusb 1.0.29's claim rules. Both
+run in normal and AddressSanitizer builds.
