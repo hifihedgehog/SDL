@@ -1151,6 +1151,40 @@ static void TestBase(void)
     free(s);
 }
 
+/* Properties an identity carries to its joystick (hifihedgehog/SDL#35) */
+static const char *const property_names[] = { "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7" };
+typedef char property_names_cover_every_entry[(sizeof(property_names) / sizeof(property_names[0]) > SDL_SERIAL_MAX_PROPERTIES) ? 1 : -1];
+
+static void TestIdentityProperties(void)
+{
+    SDL_SerialIdentity identity;
+    char copy[3];
+    int i;
+
+    SDL_Serial_SetIdentity(&identity, "Probe", SDL_SERIAL_TYPE_GAMEPAD, 2, 4, 1, 1);
+    for (i = 0; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        CHECK(identity.properties[i].name == NULL);
+    }
+    /* Every entry takes a name, and one more name is refused */
+    for (i = 0; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        CHECK(SDL_Serial_AddProperty(&identity, property_names[i], i));
+    }
+    CHECK(!SDL_Serial_AddProperty(&identity, property_names[SDL_SERIAL_MAX_PROPERTIES], 99));
+    /* A name set again replaces its value in place, matched by its text */
+    memcpy(copy, "p0", sizeof(copy));
+    CHECK(SDL_Serial_AddProperty(&identity, copy, -5));
+    CHECK(strcmp(identity.properties[0].name, "p0") == 0 && identity.properties[0].value == -5);
+    for (i = 1; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        CHECK(identity.properties[i].name == property_names[i] && identity.properties[i].value == i);
+    }
+    CHECK(!SDL_Serial_AddProperty(NULL, "p0", 1) && !SDL_Serial_AddProperty(&identity, NULL, 1));
+    /* A new identity carries none */
+    SDL_Serial_SetIdentity(&identity, "Probe", SDL_SERIAL_TYPE_GAMEPAD, 2, 4, 1, 1);
+    for (i = 0; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        CHECK(identity.properties[i].name == NULL);
+    }
+}
+
 /* A module deadline that Tick never moves: each call still ends after 256
    steps, and the next deadline is 1 ms after the call, so the port thread
    waits between calls */
@@ -1544,6 +1578,7 @@ int main(void)
     TestHalfAxis();
     TestScaling();
     TestBase();
+    TestIdentityProperties();
     TestBreak();
     TestCloseSequence();
     TestStall();

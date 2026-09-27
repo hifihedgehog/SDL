@@ -154,6 +154,18 @@ typedef struct SDL_SerialGamepadMap
     SDL_SerialMapInput lefttrigger, righttrigger;
 } SDL_SerialGamepadMap;
 
+#define SDL_SERIAL_MAX_PROPERTIES 4
+
+/* A number the driver sets as a property of the sub-device's joystick when
+ * the joystick opens, for a device that tells the host more than its
+ * controls. name points to a string literal, and NULL marks an unused
+ * entry. */
+typedef struct SDL_SerialProperty
+{
+    const char *name;
+    int64_t value;
+} SDL_SerialProperty;
+
 typedef struct SDL_SerialIdentity
 {
     char name[SDL_SERIAL_NAME_LENGTH];
@@ -165,6 +177,7 @@ typedef struct SDL_SerialIdentity
     int8_t player_index; /* Set by the device's position, such as a cabinet side, or -1 */
     bool has_mapping;
     SDL_SerialGamepadMap mapping;
+    SDL_SerialProperty properties[SDL_SERIAL_MAX_PROPERTIES];
 } SDL_SerialIdentity;
 
 typedef struct SDL_SerialControls
@@ -321,8 +334,13 @@ extern void SDL_Serial_EarlierDeadline(bool *have, uint64_t *deadline, uint64_t 
 /* One line for the driver's log, such as a device error */
 extern void SDL_Serial_Log(SDL_SerialBase *base, const char *text);
 
-/* Sets an identity with no player index. The name is truncated to fit. */
+/* Sets an identity with no player index and no properties. The name is
+   truncated to fit. */
 extern void SDL_Serial_SetIdentity(SDL_SerialIdentity *identity, const char *name, uint8_t type, int naxes, int nbuttons, int nhats, int nballs);
+
+/* Sets a property of the identity, replacing one of the same name. Returns
+   false when all SDL_SERIAL_MAX_PROPERTIES entries hold other names. */
+extern bool SDL_Serial_AddProperty(SDL_SerialIdentity *identity, const char *name, int64_t value);
 
 /* Gamepad inputs */
 extern SDL_SerialMapInput SDL_Serial_MapButton(int button);

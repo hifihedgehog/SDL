@@ -413,6 +413,25 @@ void SDL_Serial_SetIdentity(SDL_SerialIdentity *identity, const char *name, uint
     identity->player_index = -1;
 }
 
+bool SDL_Serial_AddProperty(SDL_SerialIdentity *identity, const char *name, int64_t value)
+{
+    int i;
+
+    if (!identity || !name) {
+        return false;
+    }
+    for (i = 0; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        SDL_SerialProperty *property = &identity->properties[i];
+
+        if (!property->name || strcmp(property->name, name) == 0) {
+            property->name = name;
+            property->value = value;
+            return true;
+        }
+    }
+    return false;
+}
+
 SDL_SerialMapInput SDL_Serial_MapButton(int button)
 {
     SDL_SerialMapInput input;

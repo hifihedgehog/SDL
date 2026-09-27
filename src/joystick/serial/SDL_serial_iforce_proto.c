@@ -74,6 +74,15 @@ static void IForce_Identify(SDL_IForceSerialState *s)
     SDL_IForce_GetIdentity(s->model, &identity);
     SDL_Serial_SetIdentity(&serial, name, identity.wheel ? SDL_SERIAL_TYPE_WHEEL : SDL_SERIAL_TYPE_FLIGHT_STICK,
                            identity.naxes, identity.nbuttons, identity.nhats, 0);
+    /* The query results the I-Force haptic driver reads: M and P, which pick
+       the model the haptic driver works with, and N's effect count and B's
+       memory end when N reported effects, as the USB driver publishes them */
+    SDL_Serial_AddProperty(&serial, SDL_IFORCE_PROP_VENDOR_NUMBER, q->vendor_id);
+    SDL_Serial_AddProperty(&serial, SDL_IFORCE_PROP_PRODUCT_NUMBER, q->product_id);
+    if (q->effects > 0) {
+        SDL_Serial_AddProperty(&serial, SDL_IFORCE_PROP_EFFECTS_NUMBER, q->effects);
+        SDL_Serial_AddProperty(&serial, SDL_IFORCE_PROP_MEMORY_NUMBER, q->memory_end);
+    }
     SDL_Serial_Present(&s->base, 0, &serial);
     SDL_IForce_ResetState(s->model, &s->input);
     IForce_Commit(s);
