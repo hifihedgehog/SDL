@@ -29,8 +29,9 @@
 #include "../../joystick/SDL_sysjoystick.h" // accessing _SDL_Joystick
 
 #define SDL_HAPTIC_HIDAPI_LG4FF
-// I-Force force feedback, where the I-Force joystick driver is (hifihedgehog/SDL#33 Part 8)
-#ifdef HAVE_LIBUSB
+// I-Force force feedback, where an I-Force joystick driver is: the USB one
+// with libusb (hifihedgehog/SDL#33 Part 8), the serial one (hifihedgehog/SDL#35)
+#if defined(HAVE_LIBUSB) || defined(SDL_JOYSTICK_SERIAL)
 #define SDL_HAPTIC_HIDAPI_IFORCE
 #endif
 
@@ -38,7 +39,7 @@ typedef struct SDL_HIDAPI_HapticDriver SDL_HIDAPI_HapticDriver;
 typedef struct SDL_HIDAPI_HapticDevice
 {
     SDL_Haptic *haptic; /* related haptic ref */
-    SDL_Joystick *joystick; /* related hidapi joystick */
+    SDL_Joystick *joystick; /* related hidapi joystick, or serial joystick for a driver that serves one */
     SDL_HIDAPI_HapticDriver *driver; /* driver to use */
     void *ctx; /* driver specific context */
 } SDL_HIDAPI_HapticDevice;
@@ -67,6 +68,11 @@ struct SDL_HIDAPI_HapticDriver
     bool (*Pause)(SDL_HIDAPI_HapticDevice *device); /* returns true on success, false on error */
     bool (*Resume)(SDL_HIDAPI_HapticDevice *device); /* returns true on success, false on error */
     bool (*StopEffects)(SDL_HIDAPI_HapticDevice *device); /* returns true on success, false on error */
+
+    /* PadForge fork: true when JoystickSupported and the functions above
+       also serve joysticks of the serial driver, SDL_SERIAL_JoystickDriver.
+       A driver that leaves this out serves HIDAPI joysticks only. */
+    bool serial;
 };
 
 extern SDL_HIDAPI_HapticDriver SDL_HIDAPI_HapticDriverLg4ff;

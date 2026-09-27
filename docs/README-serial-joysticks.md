@@ -161,7 +161,9 @@ devices in [README-iforce.md](README-iforce.md), the Master Controllers in
 purpose outputs to that player's board, for a VRinsight panel one 8-byte
 message, such as `SPD250` and two 00 bytes for the speed display, for a
 Kettler a 2-byte little-endian power target in watts, and for an I-Force
-device one whole force feedback command, which the driver frames.
+device one whole force feedback command, which the driver frames. SDL's
+haptic API drives an I-Force device through the same commands once its `N`
+reply reports effects. See [README-iforce.md](README-iforce.md).
 
 VRinsight messages and I-Force commands go out in the order sent, each once
 the one before it has left, and `SDL_SendJoystickEffect` fails while 16 of
@@ -218,4 +220,6 @@ named or matched.
 
 The engine and every protocol module are C99 with no SDL runtime and no I/O.
 `test/serial-joystick` replays each module's byte streams against a scripted
-port and runs in normal and AddressSanitizer builds.
+port. `test/serial-driver` runs the driver itself in a static SDL against
+scripted COM ports, with SDL's haptic API on an I-Force wheel. Both run in
+normal and AddressSanitizer builds.
