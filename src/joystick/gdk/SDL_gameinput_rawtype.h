@@ -26,6 +26,7 @@
 #ifndef SDL_gameinput_rawtype_h_
 #define SDL_gameinput_rawtype_h_
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "../usb_ids.h"
@@ -95,6 +96,17 @@ static int SDL_GameInputRawTypeForDevice(uint16_t vendor, uint16_t product)
         break;
     }
     return SDL_GAMEINPUT_RAWTYPE_NONE;
+}
+
+/* Whether the GameInput backend leaves a gamepad to the other backends. It
+ * does while SDL_HINT_JOYSTICK_GAMEINPUT is off, except for an instrument
+ * above, which stays on the raw report path that
+ * SDL_HINT_JOYSTICK_GAMEINPUT_RAW governs. The Xbox One Guitar Hero Live
+ * dongle declares the Xbox gamepad class next to its own (PlasticBand's
+ * descriptor dump), so GameInput lists it as a gamepad as well. */
+static bool SDL_GameInputLeavesGamepad(bool gamepad_hint, int raw_type)
+{
+    return !gamepad_hint && raw_type == SDL_GAMEINPUT_RAWTYPE_NONE;
 }
 
 #endif /* SDL_gameinput_rawtype_h_ */

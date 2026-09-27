@@ -236,7 +236,8 @@ static void GAMEINPUT_InternalAddOrFind(IGameInputDevice *pDevice)
 #endif
 
     if (GAMEINPUT_InternalIsGamepad(info)) {
-        if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT)) {
+        // PadForge fork: a raw instrument that is also a gamepad stays while the gamepad hint is off
+        if (SDL_GameInputLeavesGamepad(SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT), raw_type)) {
             goto done;
         }
     } else if (raw_type == SDL_GAMEINPUT_RAWTYPE_NONE) {
