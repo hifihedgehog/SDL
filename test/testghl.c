@@ -859,6 +859,19 @@ static void TestGameInputRawType(void)
     CHECK(SDL_GameInputRawTypeForDevice(0x0000, 0x0000) == SDL_GAMEINPUT_RAWTYPE_NONE);
 }
 
+/* With SDL_HINT_JOYSTICK_GAMEINPUT off the GameInput backend leaves plain
+   gamepads to the other backends and keeps the instruments it reads through
+   raw reports, the Xbox One Guitar Hero Live dongle among them */
+static void TestGameInputLeavesGamepad(void)
+{
+    CHECK(SDL_GameInputLeavesGamepad(false, SDL_GAMEINPUT_RAWTYPE_NONE));
+    CHECK(!SDL_GameInputLeavesGamepad(true, SDL_GAMEINPUT_RAWTYPE_NONE));
+    CHECK(!SDL_GameInputLeavesGamepad(false, SDL_GameInputRawTypeForDevice(0x1430, 0x079B)));
+    CHECK(!SDL_GameInputLeavesGamepad(true, SDL_GameInputRawTypeForDevice(0x1430, 0x079B)));
+    CHECK(!SDL_GameInputLeavesGamepad(false, SDL_GameInputRawTypeForDevice(USB_VENDOR_MADCATZ, USB_PRODUCT_MADCATZ_XB1_STRATOCASTER_GUITAR)));
+    CHECK(SDL_GameInputLeavesGamepad(false, SDL_GameInputRawTypeForDevice(0x045E, 0x02EA)));
+}
+
 int main(void)
 {
     TestIdentity();
@@ -869,6 +882,7 @@ int main(void)
     TestTruncations();
     TestKeepAlive();
     TestGameInputRawType();
+    TestGameInputLeavesGamepad();
 
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);

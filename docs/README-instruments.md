@@ -18,6 +18,11 @@ pure modules that `test/controller-protocols` replays:
 Without the keep-alive the strum bar cuts out held frets. Each path sends it at
 open and every 8 seconds, as an output report for the HID dongles (see Output
 reports below). A failed send is retried 1000 ms later.
+The Xbox One dongle also declares the Xbox gamepad class, so GameInput lists
+it as a gamepad. While `SDL_HINT_JOYSTICK_GAMEINPUT` is off, the GameInput
+backend leaves other gamepads to the other backends and still reads this
+dongle through raw reports. `SDL_HINT_JOYSTICK_GAMEINPUT_RAW` turns the raw
+path off.
 `SDL_HINT_JOYSTICK_HIDAPI_GHL`, on by default, turns the HIDAPI driver on. With
 it off, the PS3/Wii U dongle is handled as it was before this driver: the PS3
 third-party driver takes it while `SDL_HINT_JOYSTICK_HIDAPI_PS3` is on and the

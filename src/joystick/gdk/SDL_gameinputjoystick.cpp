@@ -290,7 +290,8 @@ static bool SupportedGameInputDevice(IGameInputDevice *pDevice)
 #endif
 
     if (GAMEINPUT_InternalIsGamepad(pDevice)) {
-        if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT)) {
+        // PadForge fork: a raw instrument that is also a gamepad stays while the gamepad hint is off
+        if (SDL_GameInputLeavesGamepad(SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT), raw_type)) {
             return false;
         }
 #if defined(SDL_JOYSTICK_DINPUT)
