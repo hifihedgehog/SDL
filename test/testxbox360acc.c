@@ -92,6 +92,16 @@ static bool SameChatpad(const SDL_Xbox360AccChatpad *a, const SDL_Xbox360AccChat
 
 static bool SameWired(const SDL_Xbox360AccWired *a, const SDL_Xbox360AccWired *b)
 {
+    int i;
+
+    if (a->lamp_count != b->lamp_count) {
+        return false;
+    }
+    for (i = 0; i < a->lamp_count; ++i) {
+        if (a->lamps[i] != b->lamps[i]) {
+            return false;
+        }
+    }
     return a->bcd_device == b->bcd_device && a->step == b->step && a->in_flight == b->in_flight &&
            a->in_flight_extra == b->in_flight_extra && a->send_1b == b->send_1b &&
            a->keepalive_1e == b->keepalive_1e && a->due_ms == b->due_ms && SameChatpad(&a->chatpad, &b->chatpad);
@@ -811,6 +821,98 @@ static void TestWiredLamps(void)
     SDL_Xbox360Acc_ControlSetup(&control, setup);
     CHECK(setup[0] == 0xC0 && setup[1] == 0xA1 && setup[2] == 0x0C && setup[3] == 0xA3 &&
           setup[4] == 0x16 && setup[5] == 0xE4 && setup[6] == 0x02 && setup[7] == 0x01);
+}
+
+/* Test 11, continued: the driver sends every control transfer without
+   waiting for it, one at a time, so a lamp waits for the transfer in flight
+   and goes out before the next step or keep-alive, and moves neither */
+static void TestWiredLampQueue(void)
+{
+    SDL_Xbox360AccWired *wired = NewWired();
+    SDL_Xbox360AccControl control;
+    SDL_Xbox360AccControl sent[16];
+    static const uint8_t handshake[] = { 0xF0, 0x03, 0x00, 0x00, 0x00 };
+    uint8_t effect[2] = { 0x08, 0x00 };
+    uint64_t now;
+    int i, b;
+
+    now = WiredReady(wired, 0);
+
+    /* A lamp goes out alone, and the first keep-alive stays due 1000 ms
+       after step 9 */
+    CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    CHECK(SDL_Xbox360Acc_WiredNext(wired, now + 10, &control) && IsCommand(&control, 0x08));
+    CHECK(!SDL_Xbox360Acc_WiredNext(wired, now + 10, &control));
+    SDL_Xbox360Acc_WiredDone(wired, now + 20, true);
+    CHECK(!SDL_Xbox360Acc_WiredNext(wired, now + 999, &control));
+    CHECK(SDL_Xbox360Acc_WiredNext(wired, now + 1000, &control) && IsCommand(&control, 0x1F));
+
+    /* A lamp queued while the keep-alive is in flight waits for it, then
+       goes before the next keep-alive that is due */
+    effect[0] = 0x0C;
+    CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    CHECK(!SDL_Xbox360Acc_WiredNext(wired, now + 1000, &control));
+    SDL_Xbox360Acc_WiredDone(wired, now + 1000, false);
+    CHECK(SDL_Xbox360Acc_WiredNext(wired, now + 2000, &control) && IsCommand(&control, 0x0C));
+    SDL_Xbox360Acc_WiredDone(wired, now + 2000, true);
+    CHECK(SDL_Xbox360Acc_WiredNext(wired, now + 2000, &control) && IsCommand(&control, 0x1E));
+    SDL_Xbox360Acc_WiredDone(wired, now + 2000, true);
+    now += 2000;
+
+    /* The 1B the chatpad asked for goes first, then the lamps in order */
+    WiredReport(wired, handshake, sizeof(handshake));
+    effect[0] = 0x09;
+    CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    effect[0] = 0x01;
+    CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    CHECK(WiredPump(wired, now, sent, 16) == 3);
+    CHECK(IsCommand(&sent[0], 0x1B) && IsCommand(&sent[1], 0x09) && IsCommand(&sent[2], 0x01));
+    CHECK(WiredPump(wired, now + 999, sent, 16) == 0);
+    CHECK(WiredPump(wired, now + 1000, sent, 16) == 1 && IsCommand(&sent[0], 0x1F));
+    now += 1000;
+
+    /* The queue holds SDL_XBOX360ACC_WIRED_LAMP_QUEUE lamps, and a lamp it
+       refuses leaves it as it was */
+    for (i = 0; i < SDL_XBOX360ACC_WIRED_LAMP_QUEUE; ++i) {
+        effect[0] = (uint8_t)(i % 5);
+        CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    }
+    effect[0] = 0x0B;
+    CHECK(!SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    CHECK(WiredPump(wired, now, sent, 16) == SDL_XBOX360ACC_WIRED_LAMP_QUEUE);
+    for (i = 0; i < SDL_XBOX360ACC_WIRED_LAMP_QUEUE; ++i) {
+        CHECK(IsCommand(&sent[i], (uint16_t)(i % 5)));
+    }
+
+    /* The bytes and the size SDL_Xbox360Acc_WiredLamp takes, and no others */
+    for (b = 0; b < 256; ++b) {
+        const bool valid = (b <= 0x04) || (b >= 0x08 && b <= 0x0C);
+
+        effect[0] = (uint8_t)b;
+        CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1) == valid);
+        CHECK(WiredPump(wired, now, sent, 16) == (valid ? 1 : 0));
+        if (valid) {
+            CHECK(IsCommand(&sent[0], (uint16_t)b));
+        }
+    }
+    effect[0] = 0x08;
+    CHECK(!SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 0));
+    CHECK(!SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 2));
+    CHECK(!SDL_Xbox360Acc_WiredQueueLamp(wired, NULL, 1));
+    CHECK(!SDL_Xbox360Acc_WiredQueueLamp(NULL, effect, 1));
+    CHECK(wired->lamp_count == 0);
+
+    /* A lamp queued before the pad goes never goes out, a stopped chatpad
+       takes none, and a restart begins with an empty queue */
+    CHECK(SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    SDL_Xbox360Acc_WiredStop(wired);
+    CHECK(wired->lamp_count == 0);
+    CHECK(!SDL_Xbox360Acc_WiredNext(wired, now + 100000, &control));
+    CHECK(!SDL_Xbox360Acc_WiredQueueLamp(wired, effect, 1));
+    SDL_Xbox360Acc_WiredStart(wired, 0x0114, now + 200000);
+    CHECK(wired->lamp_count == 0);
+    CHECK(SDL_Xbox360Acc_WiredNext(wired, now + 200000, &control) && IsControl(&control, 0x40, 0xA9, 0xA30C, 0x4423, 0));
+    free(wired);
 }
 
 /* The wireless chatpad */
@@ -1899,6 +2001,7 @@ int main(void)
     TestWiredPresence();
     TestWiredUnplug();
     TestWiredLamps();
+    TestWiredLampQueue();
     TestWirelessKeys();
     TestWirelessSchedule();
     TestWirelessPackets();

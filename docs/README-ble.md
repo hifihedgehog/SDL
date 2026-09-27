@@ -3,7 +3,10 @@
 This fork reads controllers that send their input as notifications on a
 vendor GATT service over Bluetooth LE instead of the HID service. Windows
 loads no driver for such a service. The driver is Windows only and shares
-its WinRT transport with the Switch 2 driver.
+its WinRT transport, and with it the advertisement watcher, with the
+Switch 2 driver. Each of the two drivers, while it listens, checks the
+watcher every 2 seconds at the joystick update and starts a new one when it
+did not start or has stopped, as when the Bluetooth radio was off.
 
 | Family | Found by | Pairing | Joystick |
 |---|---|---|---|
@@ -27,12 +30,20 @@ writes a bond into Windows, and for an Oculus Go it can replace the
 controller's pairing with its headset. With the hint off, pair the Daydream
 and the Oculus Go in Windows Settings first. A device the driver tried
 before it was paired appears at its next attempt, up to 5 minutes later.
-Every hint can be set anytime. The driver applies a family hint at the next
-joystick update, and the pairing hint to each connection it starts after
-that. A family turned off loses its joysticks at once, and the driver
-disconnects its devices after any closing writes. At `SDL_Quit` the driver
-waits at most 1 second for closing writes and at most 3 seconds in all for
-the links to close. A link still closing then is left to close on its own.
+Every hint of this driver can be set anytime. The driver applies a family
+hint at the next joystick update, and the pairing hint to each connection it
+starts after that. A family turned off loses its joysticks at once, and the
+driver disconnects its devices after any closing writes. At `SDL_Quit` the
+driver waits at most 1 second for closing writes and at most 3 seconds in
+all for the links to close. A link still closing then is left to close on
+its own. At other times a link still closing 5 seconds after its connection
+ended is left to close on its own, and its device can connect again.
+SDL's device lists, `SDL_HINT_JOYSTICK_BLACKLIST_DEVICES`,
+`SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES` and
+`SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT`, apply by the vendor and
+product IDs in the table when a joystick would appear. Only the Daydream
+has IDs, so an allow list leaves out every other family. An ignored device
+stays connected and gets no joystick.
 
 While a family is on, the driver watches advertisements. It connects to a
 matching device, discovers its services without the cache, subscribes to
@@ -48,10 +59,12 @@ the wait. A failed pairing is tried again at the next advertisement twice,
 then waits the same way. A failed connection waits 5 seconds, and so does
 a link lost before the joystick appears, unless the link drops while the
 driver, after a failed subscription, pairs the controller or removes its
-bond.
+bond. Such a link is tried again at the next advertisement twice, then
+waits the same way, since the driver counts it as a failed pairing or a
+failed bond removal.
 Changing the pairing hint ends the wait of every address the driver is not
-connected to. The joystick's serial is the Bluetooth address as 12 hex
-digits.
+connected to, and of every other address when its connection ends. The
+joystick's serial is the Bluetooth address as 12 hex digits.
 
 Gamepads report their buttons and axes at SDL's gamepad positions, and the
 driver's gamepad mapping names each one. A touchpad also moves the left
@@ -79,12 +92,13 @@ service. The controller's orientation is not exposed.
 ## Gear VR
 
 SDL writes 08 00, waits for the controller to echo it, then writes 01 00,
-which streams 68 packets a second. Without the echo in 4 seconds it writes
-01 00 alone, which streams about 30. It writes 04 00 every 10 seconds and
-00 00 when SDL closes the connection. When 3 seconds pass without a packet,
-counted from the 01 00 write or from the last packet, SDL releases every
-control and runs the start-up again from 08 00, since an 01 00 that reaches
-the controller before the echo can stop the stream for good. After two such
+which streams 68 packets a second. Without the echo within 4 seconds of the
+08 00 write completing, it writes 01 00 alone, which streams about 30. It
+writes 04 00 every 10 seconds and 00 00 when SDL closes the connection.
+When 3 seconds pass without a packet, counted from the completion of the
+01 00 write or from the last packet, SDL releases every control and runs
+the start-up again from 08 00, since an 01 00 that reaches the controller
+before the echo can stop the stream for good. After two such
 restarts in a row bring no packet, the driver disconnects the controller
 and connects again later. The touchpad is SDL's touchpad and also moves the
 left stick, the trigger is the right trigger, the touchpad click South,
@@ -178,6 +192,8 @@ service. This mapping is the fork's own.
 - The Poke Ball Plus's stick center comes from one tool's range. A ball
   that rests elsewhere reads slightly off center.
 - A device with a rotating address gets a new serial for each connection.
+- Whether Windows opens a device again while the close of its previous
+  link hangs is not known.
 
 ## Tests
 
@@ -186,5 +202,6 @@ The session and the device modules are C99 with no SDL runtime and no I/O.
 `testblezwiftcrypto` runs the Zwift key exchange through Windows' CNG, in
 normal and AddressSanitizer builds. `test/ble-driver` runs
 `testblegattdriver`, the driver inside a static SDL against a fake transport,
-in both builds. It and `testblegearvr` read the Gear VR packets from the
+in both builds, with the Switch 2 driver against the same fake for its
+watcher check. It and `testblegearvr` read the Gear VR packets from the
 gearvr-controller clone.

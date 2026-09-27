@@ -734,17 +734,23 @@ static bool Order(const Sim *sim, int count, int a, int b, int c)
 
 static void TestImu(void)
 {
+    static const uint8_t zero_slot[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
     Sim sim;
-    uint64_t t, reset_ack;
-    int i, n;
+    uint64_t t, reset_ack, query_sent, next;
+    int i, n, zeroed, posted;
+    size_t r;
 
     SimOpen(&sim, true, 1000);
     CHECK(Order(&sim, 3, 2, 1, 0));
-    // Steps 1-4 leave the IMU layout alone, the 5C send changes it
+    /* Step 1 leaves the IMU layout alone. From the 22 01 send bytes 37-48 no
+       longer count as an IMU sample: a Joy-Con that kept a Ring-Con format
+       zeroes bytes 37-42 after it, as Working2.txt shows below. */
     for (t = 1000; t < 3000 && CountSent(&sim, 0x5C) == 0; ++t) {
         Run(&sim, t, t);
-        if (CountSent(&sim, 0x5C) == 0) {
+        if (CountSent(&sim, 0x22) == 0) {
             CHECK(Order(&sim, 3, 2, 1, 0));
+        } else {
+            CHECK(Order(&sim, 2, 1, 0, -1));
         }
     }
     CHECK(Order(&sim, 2, 1, 0, -1)); // bytes 25-36 first, then 13-24, none from 37-48
@@ -798,6 +804,43 @@ static void TestImu(void)
     CHECK(console_reset_lag[2].ms_after_ack == 45 && console_reset_lag[3].ms_after_ack == 48);
     // The machine's stop keeps two samples past that: 22 00 goes out 50 ms after the answer
     CHECK(SDL_RINGCON_STEP_GAP_MS > 45);
+
+    /* Ringcon-Driver's Working2.txt: after 22 01 this Joy-Con, which kept a
+       Ring-Con format, zeroes bytes 37-42 in each of the 161 reports logged
+       while 0x59 goes unanswered. The machine sits at step 4 through them and
+       posts none of them as the oldest IMU sample. The absent path's stop
+       gives the samples back. */
+    SimOpen(&sim, true, 1000);
+    sim.silent[0x59] = true;
+    for (t = 1000; t < 2000 && CountSent(&sim, 0x59) == 0; ++t) {
+        Run(&sim, t, t);
+    }
+    query_sent = sim.sent_ms[sim.sent_count - 1];
+    t = query_sent;
+    zeroed = 0;
+    posted = 0;
+    for (r = 0; r < sizeof(working2_silence) / sizeof(working2_silence[0]); ++r) {
+        const uint8_t *report = working2_silence[r].report;
+        int order[3], count, j;
+
+        next = query_sent + ((uint64_t)(r + 1) * 1000) / 60;
+        Run(&sim, t + 1, next);
+        t = next;
+        if (report[0] != SDL_RINGCON_REPORT_FULL || memcmp(&report[37], zero_slot, sizeof(zero_slot)) != 0) {
+            continue;
+        }
+        ++zeroed;
+        count = SDL_RingCon_ImuPostOrder(&sim.machine, order);
+        for (j = 0; j < count; ++j) {
+            posted += (order[j] == 2);
+        }
+    }
+    CHECK(sim.machine.phase == SDL_RINGCON_PHASE_START && sim.machine.index == 3);
+    CHECK(zeroed == 161);
+    CHECK(posted == 0);
+    Run(&sim, t + 1, t + 12000);
+    CHECK(!SDL_RingCon_Engaged(&sim.machine) && sim.stop_count == 1 && sim.stops[0] == SDL_RINGCON_STOP_ABSENT);
+    CHECK(Order(&sim, 3, 2, 1, 0));
 }
 
 /* ------------------------------------------------------------------------ */
@@ -959,7 +1002,8 @@ static void TestGates(void)
 static void TestPriority(void)
 {
     Sim sim;
-    uint64_t t;
+    uint8_t full[REPORT_LENGTH];
+    uint64_t t, sent, u;
     int first, i;
 
     // Opening while NFC holds the MCU starts nothing
@@ -1047,6 +1091,43 @@ static void TestPriority(void)
     CHECK(sim.stop_count == 1 && sim.stops[0] == SDL_RINGCON_STOP_DISABLED);
     CHECK(sim.sent[sim.sent_count - 1][10] == 0x03);
     CHECK(!SDL_RingCon_Engaged(&sim.machine));
+
+    /* A stop asked for when the 5A answer arrives and withdrawn inside the
+       50 ms gap: polling begins when the gap ends, and a live strain keeps it
+       running. First the hint turns off before the answer and on again right
+       after it, then NFC or camera demand comes and goes the same way. */
+    for (i = 0; i < 2; ++i) {
+        SimOpen(&sim, true, 1000);
+        for (t = 1000; t < 2000 && CountSent(&sim, 0x5A) == 0; ++t) {
+            Run(&sim, t, t);
+        }
+        sent = sim.sent_ms[sim.sent_count - 1];
+        if (i == 0) {
+            sim.enabled = false;
+        } else {
+            sim.mcu_wanted = true;
+        }
+        Run(&sim, t, sent + (uint64_t)sim.delay);
+        CHECK(sim.machine.acked && !sim.active);
+        sim.enabled = true;
+        sim.mcu_wanted = false;
+        MakeFull(2600, full);
+        for (u = sent + (uint64_t)sim.delay + 1; u <= sent + 20000; ++u) {
+            if ((u % 15) == 0) {
+                Full(&sim, u, full, REPORT_LENGTH);
+            }
+            Run(&sim, u, u);
+            if (u == sent + (uint64_t)sim.delay + SDL_RINGCON_STEP_GAP_MS - 1) {
+                CHECK(!sim.active);
+            } else if (u == sent + (uint64_t)sim.delay + SDL_RINGCON_STEP_GAP_MS) {
+                CHECK(sim.active); // the gap ends
+            }
+        }
+        CHECK(sim.active && sim.activations == 1 && sim.stop_count == 0);
+        CHECK(sim.machine.phase == SDL_RINGCON_PHASE_POLLING);
+        CHECK(sim.axis == 2600 && sim.rest == 2600);
+        CHECK(sim.sent_count == 6); // the six start steps and nothing more
+    }
 }
 
 /* ------------------------------------------------------------------------ */

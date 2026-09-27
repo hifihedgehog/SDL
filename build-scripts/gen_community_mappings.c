@@ -34,8 +34,13 @@
      vendor and product,
    - SDL_gamepad_db.h maps that vendor and product on no platform,
    - controller_list.h does not list it,
-   - and no HIDAPI driver supports it, whether or not a hint enables that
-     driver.
+   - no HIDAPI driver supports it on any of the interfaces
+     HIDAPI_IsDeviceSupportedByAnyDriver asks about, whether or not a hint
+     enables that driver,
+   - SDL does not type it as a flight stick or a wheel, since neither has a
+     gamepad's shape,
+   - and it is not vJoy's 1234:BEAD, which every vJoy device shares while
+     each user sets its buttons and axes.
    Each kept row is copied as written, minus its platform field, which the
    SDL_JOYSTICK_DINPUT section of SDL_gamepad_db.h already implies. The rows
    are sorted by GUID.
@@ -55,10 +60,18 @@
 #include "../src/joystick/controller_type.h"
 #include "../src/joystick/controller_list.h"
 
-/* Declared in src/joystick/hidapi/SDL_hidapijoystick_c.h, in the static library. */
+/* Declared in src/joystick/hidapi/SDL_hidapijoystick_c.h and
+   src/joystick/SDL_joystick_c.h, in the static library. */
 extern bool HIDAPI_IsDeviceSupportedByAnyDriver(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
+extern bool SDL_IsJoystickFlightStick(Uint16 vendor_id, Uint16 product_id);
+extern bool SDL_IsJoystickWheel(Uint16 vendor_id, Uint16 product_id, Uint16 crc);
 
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
+
+/* vJoy's VENDOR_N_ID and PRODUCT_N_ID (inc/public.h, force feedback
+   build), which all its devices share */
+#define VJOY_VENDOR  0x1234
+#define VJOY_PRODUCT 0xBEAD
 
 /* SHA-256, FIPS 180-4. */
 
@@ -399,6 +412,8 @@ typedef struct Counts
     unsigned int mapped;
     unsigned int listed;
     unsigned int hidapi;
+    unsigned int shape; /* Flight sticks and wheels */
+    unsigned int vjoy;
     unsigned int kept;
 } Counts;
 
@@ -410,6 +425,27 @@ static void *LoadFile(const char *path, size_t *length)
     }
     return data;
 }
+
+/* Every joystick backend, SDL's and the fork's, stays off */
+static const char *const offline_hints[] = {
+    SDL_HINT_JOYSTICK_HIDAPI,
+    SDL_HINT_JOYSTICK_RAWINPUT,
+    SDL_HINT_JOYSTICK_DIRECTINPUT,
+    SDL_HINT_XINPUT_ENABLED,
+    SDL_HINT_JOYSTICK_WGI,
+    SDL_HINT_JOYSTICK_GAMEINPUT,
+    SDL_HINT_JOYSTICK_BLE,
+    SDL_HINT_JOYSTICK_BLE_SWITCH2,
+    SDL_HINT_JOYSTICK_SERIAL_AUTO,
+    SDL_HINT_JOYSTICK_RFCOMM,
+    SDL_HINT_JOYSTICK_ICADE,
+};
+
+/* The serial port and DJI remote hints are lists, so they are set empty */
+static const char *const offline_list_hints[] = {
+    SDL_HINT_JOYSTICK_SERIAL,
+    SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS,
+};
 
 /* SDL hints come from the environment too. Clear every SDL variable so the
    output depends on the files alone. */
@@ -463,11 +499,27 @@ int main(int argc, char *argv[])
     if (!Sha256SelfTest()) {
         return 1;
     }
+    /* SDL's flight stick and wheel lists load with the joystick subsystem.
+       Every backend is off, so SDL opens no device. */
+    for (i = 0; i < ARRAY_COUNT(offline_hints); ++i) {
+        SDL_SetHint(offline_hints[i], "0");
+    }
+    for (i = 0; i < ARRAY_COUNT(offline_list_hints); ++i) {
+        SDL_SetHint(offline_list_hints[i], "");
+    }
+    if (!SDL_Init(SDL_INIT_JOYSTICK)) {
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    if (!SDL_IsJoystickFlightStick(0x044F, 0xB10A) || !SDL_IsJoystickWheel(0x046D, 0xC24F, 0)) {
+        fprintf(stderr, "SDL's flight stick and wheel lists are not loaded.\n");
+        goto done;
+    }
     /* The Switch 2 driver is compiled only with libusb. Without it the HIDAPI
        check would keep rows for devices the shipped library reads. */
     if (!HIDAPI_IsDeviceSupportedByAnyDriver(0x057E, 0x2073, 0, "Switch 2 GameCube Controller")) {
         fprintf(stderr, "The static library lacks the Switch 2 HIDAPI driver. Configure it with SDL_HIDAPI_LIBUSB and a libusb, as the shared library is.\n");
-        return 1;
+        goto done;
     }
 
     db = (char *)LoadFile(db_path, &db_length);
@@ -570,6 +622,13 @@ int main(int argc, char *argv[])
         } else if (HIDAPI_IsDeviceSupportedByAnyDriver(vendor, product, 0, name)) {
             ++counts.hidapi;
             reason = "supported by a HIDAPI driver";
+        } else if (SDL_IsJoystickFlightStick(vendor, product) || SDL_IsJoystickWheel(vendor, product, 0)) {
+            /* A crc of 0 asks about the ID alone, as SDL_gamepad.c does */
+            ++counts.shape;
+            reason = "a flight stick or a wheel";
+        } else if (vendor == VJOY_VENDOR && product == VJOY_PRODUCT) {
+            ++counts.vjoy;
+            reason = "vJoy's shared ID";
         }
         if (strcmp(mode, "report") == 0) {
             printf("%04X:%04X %-30s %s\n", vendor, product, reason ? reason : "kept", name);
@@ -660,9 +719,10 @@ int main(int argc, char *argv[])
                  "   Windows rows: %u. In the USB form with a vendor and product: %u.\n"
                  "   Left out because SDL_gamepad_db.h maps the device on some platform: %u,\n"
                  "   because controller_list.h lists it: %u, because a HIDAPI driver\n"
-                 "   supports it: %u. Kept: %u.\n"
+                 "   supports it: %u, because SDL types it as a flight stick or a wheel: %u,\n"
+                 "   because it is vJoy's shared ID: %u. Kept: %u.\n"
                  "*/\n",
-                 counts.windows, counts.usb, counts.mapped, counts.listed, counts.hidapi, counts.kept);
+                 counts.windows, counts.usb, counts.mapped, counts.listed, counts.hidapi, counts.shape, counts.vjoy, counts.kept);
     TextAppendString(&out, line);
     for (i = 0; i < row_count; ++i) {
         TextAppendString(&out, "    \"");
@@ -674,8 +734,8 @@ int main(int argc, char *argv[])
         goto done;
     }
 
-    printf("Windows rows %u, USB form %u, mapped %u, listed %u, HIDAPI %u, kept %u, SHA-256 %s\n",
-           counts.windows, counts.usb, counts.mapped, counts.listed, counts.hidapi, counts.kept, sha256);
+    printf("Windows rows %u, USB form %u, mapped %u, listed %u, HIDAPI %u, flight stick or wheel %u, vJoy %u, kept %u, SHA-256 %s\n",
+           counts.windows, counts.usb, counts.mapped, counts.listed, counts.hidapi, counts.shape, counts.vjoy, counts.kept, sha256);
 
     if (strcmp(mode, "write") == 0) {
         if (!SDL_SaveFile(header_path, out.data, out.length)) {
@@ -716,5 +776,6 @@ done:
     SDL_free(source);
     SDL_free(mappings);
     SDL_free(existing);
+    SDL_Quit();
     return status;
 }

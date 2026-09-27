@@ -7,7 +7,8 @@ Classic Controller, Wii U Pro Controller and Balance Board. The hint
 it off they report as an unknown extension, as before.
 
 The protocol lives in `src/joystick/hidapi/SDL_hidapi_wii_ext_proto.c`, and
-`test/controller-protocols` runs its replay tests.
+`test/controller-protocols` runs its replay tests. `test/community-mappings`
+checks the gamepad mappings SDL generates from it.
 
 | Extension | ID bytes 0, 4, 5 | Joystick type | Buttons, axes, hats |
 |---|---|---|---|
@@ -21,7 +22,10 @@ The protocol lives in `src/joystick/hidapi/SDL_hidapi_wii_ext_proto.c`, and
 
 Every one keeps the remote's own buttons at 15-25, as the Classic Controller
 configuration does, and none has a GUIDE button. GUID byte 15 is the extension
-type, so each configuration has its own GUID.
+type, so each configuration has its own GUID. Each gamepad mapping binds only
+the controls its extension reports: the drum kit, turntable and TaTaCon have
+no D-pad, the guitar's strum bar is D-pad up and down, and only the TaTaCon
+binds the stick buttons, to its faces.
 
 - Guitar: green, red, yellow and blue frets on SOUTH, EAST, WEST and NORTH,
   orange on LEFT_SHOULDER, the pedal on RIGHT_SHOULDER, minus on BACK, plus on
@@ -41,7 +45,11 @@ type, so each configuration has its own GUID.
 - TaTaCon: the faces on LEFT_STICK and RIGHT_STICK, the rims on the triggers.
 - Tablets: axis 0 and 1 are the raw pen coordinates, -1 while the pen is out of
   range, axis 2 the pressure. Button 2 is pen in range, and on the uDraw
-  buttons 0 and 1 are the pen's lower and upper buttons.
+  buttons 0 and 1 are the pen's lower and upper buttons. The uDraw sends
+  12-bit coordinates, X left to right and Y bottom to top, about 80-1960 by
+  95-1450 on hardware, and 9-bit pressure. The Drawsome sends 16-bit
+  coordinates, X left to right and Y top to bottom, 0-10206 by 0-7422
+  measured, and 12-bit pressure.
 - Shinkansen: the brake and power levers on LEFT_TRIGGER and RIGHT_TRIGGER by
   notch, their raw bytes on axes 6 and 7. The face buttons follow the Classic
   Controller's bits, the D-pad is hat 0.

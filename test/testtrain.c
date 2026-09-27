@@ -104,6 +104,28 @@ static bool IsControl(const SDL_TrainControl *control, const char *setup_bytes, 
     return memcmp(setup, setup_bytes, 8) == 0 && control->length == length && (length == 0 || memcmp(control->data, data, length) == 0);
 }
 
+/* A rumble and an effect whose every transfer the controller accepts */
+static int SentRumble(int model, SDL_TrainOutputs *outputs, uint16_t low, uint16_t high, SDL_TrainControl out[2])
+{
+    const int count = SDL_Train_Rumble(model, outputs, low, high, out);
+    int i;
+
+    for (i = 0; i < count; ++i) {
+        SDL_Train_Sent(model, outputs, &out[i]);
+    }
+    return count;
+}
+
+static int SentEffect(int model, SDL_TrainOutputs *outputs, const uint8_t *data, size_t size, SDL_TrainControl *out)
+{
+    const int count = SDL_Train_Effect(model, data, size, out);
+
+    if (count == 1) {
+        SDL_Train_Sent(model, outputs, out);
+    }
+    return count;
+}
+
 /* Taito 11 */
 static void TestIdentity(void)
 {
@@ -505,23 +527,23 @@ static void TestTaitoOutputs(void)
     int i;
 
     SDL_Train_InitOutputs(&outputs);
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0x4000, 0, out) == 1);
+    CHECK(SentRumble(SDL_TRAIN_TYPE2, &outputs, 0x4000, 0, out) == 1);
     CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x01\x01", 2));
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 0, out) == 0);
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 1, out) == 1);
+    CHECK(SentRumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 0, out) == 0);
+    CHECK(SentRumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 1, out) == 1);
     CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x01\x02", 2));
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0, 0, out) == 2);
+    CHECK(SentRumble(SDL_TRAIN_TYPE2, &outputs, 0, 0, out) == 2);
     CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x00\x01", 2));
     CHECK(IsControl(&out[1], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x00\x02", 2));
-    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x03", 2, out) == 1);
+    CHECK(SentEffect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x03", 2, out) == 1);
     CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x01\x03", 2));
     /* An effect that turns a motor on counts for the next rumble */
-    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x01", 2, out) == 1 && outputs.left_motor);
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 1, 0, out) == 0);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x02", 2, out) == 1 && outputs.right_motor);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x00\x02", 2, out) == 1 && !outputs.right_motor);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x03\x00", 3, out) == -1);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, &outputs, NULL, 2, out) == -1);
+    CHECK(SentEffect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x01", 2, out) == 1 && outputs.left_motor);
+    CHECK(SentRumble(SDL_TRAIN_TYPE2, &outputs, 1, 0, out) == 0);
+    CHECK(SentEffect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x02", 2, out) == 1 && outputs.right_motor);
+    CHECK(SentEffect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x00\x02", 2, out) == 1 && !outputs.right_motor);
+    CHECK(SentEffect(SDL_TRAIN_TYPE2, &outputs, (const uint8_t *)"\x01\x03\x00", 3, out) == -1);
+    CHECK(SentEffect(SDL_TRAIN_TYPE2, &outputs, NULL, 2, out) == -1);
     CHECK(SDL_Train_Close(SDL_TRAIN_TYPE2, &outputs, out) == 3);
     CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x00\x01", 2));
     CHECK(IsControl(&out[1], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x00\x02", 2));
@@ -531,25 +553,25 @@ static void TestTaitoOutputs(void)
     /* Shinkansen: one 8-byte payload carries both motors and the displays */
     SDL_Train_InitOutputs(&outputs);
     CHECK(memcmp(outputs.shinkansen, "\x00\x00\x00\x00\xFF\xFF\xFF\xFF", 8) == 0);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_SHINKANSEN, &outputs, (const uint8_t *)"\x00\x00\x85\x09\x25\x01\x30\x01", 8, out) == 1);
+    CHECK(SentEffect(SDL_TRAIN_SHINKANSEN, &outputs, (const uint8_t *)"\x00\x00\x85\x09\x25\x01\x30\x01", 8, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x09\x01\x03\x00\x00\x08\x00", "\x00\x00\x85\x09\x25\x01\x30\x01", 8));
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 0, out) == 0);
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 9, out) == 1);
+    CHECK(SentRumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 0, out) == 0);
+    CHECK(SentRumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 9, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x09\x01\x03\x00\x00\x08\x00", "\x00\x01\x85\x09\x25\x01\x30\x01", 8));
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 9, 9, out) == 1);
+    CHECK(SentRumble(SDL_TRAIN_SHINKANSEN, &outputs, 9, 9, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x09\x01\x03\x00\x00\x08\x00", "\x01\x01\x85\x09\x25\x01\x30\x01", 8));
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 1, 1, out) == 0);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_SHINKANSEN, &outputs, (const uint8_t *)"\x00\x00", 2, out) == -1);
+    CHECK(SentRumble(SDL_TRAIN_SHINKANSEN, &outputs, 1, 1, out) == 0);
+    CHECK(SentEffect(SDL_TRAIN_SHINKANSEN, &outputs, (const uint8_t *)"\x00\x00", 2, out) == -1);
     CHECK(SDL_Train_Close(SDL_TRAIN_SHINKANSEN, &outputs, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x09\x01\x03\x00\x00\x08\x00", "\x00\x00\x00\x00\xFF\xFF\xFF\xFF", 8));
     CHECK(!outputs.left_motor && !outputs.right_motor);
 
     /* The Ryojohen and the P5/B8 cartridge have no motors */
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_RYOJOHEN, &outputs, 1, 1, out) == -1);
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_MTC_P5B8, &outputs, 1, 1, out) == -1);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_RYOJOHEN, &outputs, (const uint8_t *)"\x01\x01", 2, out) == -1);
+    CHECK(SentRumble(SDL_TRAIN_RYOJOHEN, &outputs, 1, 1, out) == -1);
+    CHECK(SentRumble(SDL_TRAIN_MTC_P5B8, &outputs, 1, 1, out) == -1);
+    CHECK(SentEffect(SDL_TRAIN_RYOJOHEN, &outputs, (const uint8_t *)"\x01\x01", 2, out) == -1);
     CHECK(SDL_Train_Close(SDL_TRAIN_RYOJOHEN, &outputs, out) == 0);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_MTC_P5B8, &outputs, (const uint8_t *)"\x01\x03", 2, out) == 1);
+    CHECK(SentEffect(SDL_TRAIN_MTC_P5B8, &outputs, (const uint8_t *)"\x01\x03", 2, out) == 1);
     CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x01\x03", 2));
     CHECK(SDL_Train_Close(SDL_TRAIN_MTC_P5B8, &outputs, out) == 3);
 
@@ -563,6 +585,62 @@ static void TestTaitoOutputs(void)
         for (i = 0; i < 1000; ++i) {
             Decode(SDL_TRAIN_SHINKANSEN, shinkansen_rest, 6, &state);
         }
+        CHECK(memcmp(&before, &outputs, sizeof(outputs)) == 0);
+    }
+}
+
+/* A transfer the controller never accepted leaves the outputs as they were,
+   so the same request builds it again */
+static void TestTaitoFailedOutputs(void)
+{
+    SDL_TrainOutputs outputs;
+    SDL_TrainControl out[3];
+
+    /* Type 2: both motors on, and neither transfer accepted */
+    SDL_Train_InitOutputs(&outputs);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 0xFFFF, out) == 2);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 0xFFFF, out) == 2);
+    /* Only the first accepted: the same request builds the second alone */
+    SDL_Train_Sent(SDL_TRAIN_TYPE2, &outputs, &out[0]);
+    CHECK(outputs.left_motor && !outputs.right_motor);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 0xFFFF, out) == 1);
+    CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x01\x02", 2));
+    SDL_Train_Sent(SDL_TRAIN_TYPE2, &outputs, &out[0]);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0xFFFF, 0xFFFF, out) == 0);
+    /* A stop that is not accepted leaves both motors recorded on */
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0, 0, out) == 2);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 0, 0, out) == 2);
+    CHECK(outputs.left_motor && outputs.right_motor);
+
+    /* An effect that turns the left motor on, not accepted */
+    SDL_Train_InitOutputs(&outputs);
+    CHECK(SDL_Train_Effect(SDL_TRAIN_TYPE2, (const uint8_t *)"\x01\x01", 2, out) == 1);
+    CHECK(!outputs.left_motor);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_TYPE2, &outputs, 1, 0, out) == 1);
+    CHECK(IsControl(&out[0], "\x41\x09\x01\x02\x00\x00\x02\x00", "\x01\x01", 2));
+
+    /* Shinkansen: the right motor on, not accepted, then a display payload
+       that is. The payload follows only what was accepted. */
+    SDL_Train_InitOutputs(&outputs);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 9, out) == 1);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 9, out) == 1);
+    CHECK(IsControl(&out[0], "\x40\x09\x01\x03\x00\x00\x08\x00", "\x00\x01\x00\x00\xFF\xFF\xFF\xFF", 8));
+    CHECK(SDL_Train_Effect(SDL_TRAIN_SHINKANSEN, (const uint8_t *)"\x00\x00\x85\x09\x25\x01\x30\x01", 8, out) == 1);
+    CHECK(memcmp(outputs.shinkansen, "\x00\x00\x00\x00\xFF\xFF\xFF\xFF", 8) == 0);
+    SDL_Train_Sent(SDL_TRAIN_SHINKANSEN, &outputs, &out[0]);
+    CHECK(memcmp(outputs.shinkansen, "\x00\x00\x85\x09\x25\x01\x30\x01", 8) == 0);
+    CHECK(SDL_Train_Rumble(SDL_TRAIN_SHINKANSEN, &outputs, 0, 9, out) == 1);
+    CHECK(IsControl(&out[0], "\x40\x09\x01\x03\x00\x00\x08\x00", "\x00\x01\x85\x09\x25\x01\x30\x01", 8));
+
+    /* A lamp transfer records nothing, and missing pointers change nothing */
+    SDL_Train_InitOutputs(&outputs);
+    {
+        SDL_TrainOutputs before = outputs;
+
+        CHECK(SDL_Train_Effect(SDL_TRAIN_MASCON, (const uint8_t *)"\x10", 1, out) == 1);
+        SDL_Train_Sent(SDL_TRAIN_MASCON, &outputs, &out[0]);
+        SDL_Train_Sent(SDL_TRAIN_TYPE2, &outputs, NULL);
+        SDL_Train_Sent(SDL_TRAIN_TYPE2, NULL, &out[0]);
         CHECK(memcmp(&before, &outputs, sizeof(outputs)) == 0);
     }
 }
@@ -711,16 +789,16 @@ static void TestLamps(void)
     int i;
 
     SDL_Train_InitOutputs(&outputs);
-    CHECK(SDL_Train_Effect(SDL_TRAIN_MTC_P4B7, &outputs, (const uint8_t *)"\x12", 1, out) == 1);
+    CHECK(SentEffect(SDL_TRAIN_MTC_P4B7, &outputs, (const uint8_t *)"\x12", 1, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x50\x12\x00\x00\x00\x00\x00", NULL, 0));
-    CHECK(SDL_Train_Effect(SDL_TRAIN_MASCON, &outputs, (const uint8_t *)"\x10", 1, out) == 1);
+    CHECK(SentEffect(SDL_TRAIN_MASCON, &outputs, (const uint8_t *)"\x10", 1, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x50\x10\x00\x00\x00\x00\x00", NULL, 0));
-    CHECK(SDL_Train_Effect(SDL_TRAIN_MTC_P13B7, &outputs, (const uint8_t *)"\x12\x00", 2, out) == -1);
+    CHECK(SentEffect(SDL_TRAIN_MTC_P13B7, &outputs, (const uint8_t *)"\x12\x00", 2, out) == -1);
     CHECK(SDL_Train_Close(SDL_TRAIN_MTC_P4B2B7, &outputs, out) == 1);
     CHECK(IsControl(&out[0], "\x40\x50\x00\x00\x00\x00\x00\x00", NULL, 0));
     CHECK(SDL_Train_Close(SDL_TRAIN_MTC_P5B7, &outputs, out) == 1 && SDL_Train_Close(SDL_TRAIN_MASCON, &outputs, out) == 1);
-    CHECK(SDL_Train_Rumble(SDL_TRAIN_MASCON, &outputs, 1, 1, out) == -1);
-    CHECK(SDL_Train_Close(SDL_TRAIN_MASTER, &outputs, out) == 0 && SDL_Train_Effect(SDL_TRAIN_MASTER, &outputs, (const uint8_t *)"\x10", 1, out) == -1);
+    CHECK(SentRumble(SDL_TRAIN_MASCON, &outputs, 1, 1, out) == -1);
+    CHECK(SDL_Train_Close(SDL_TRAIN_MASTER, &outputs, out) == 0 && SentEffect(SDL_TRAIN_MASTER, &outputs, (const uint8_t *)"\x10", 1, out) == -1);
 
     /* No transfer while 1000 reports arrive */
     SDL_Train_InitOutputs(&outputs);
@@ -889,6 +967,7 @@ int main(void)
     TestTaitoHatAndPedal();
     TestTaitoRejects();
     TestTaitoOutputs();
+    TestTaitoFailedOutputs();
     TestLevers();
     TestLeverControls();
     TestLamps();

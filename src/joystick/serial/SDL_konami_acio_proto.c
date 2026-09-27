@@ -632,6 +632,7 @@ void SDL_ACIO_ActionDone(void *state, bool success, uint64_t now)
         ACIO_Break(state, true);
         break;
     case SDL_ACIO_STEP_BREAK_SET:
+        /* A refused break keeps the reset's time, as aciodrv's does */
         bus->step = SDL_ACIO_STEP_BREAK;
         ACIO_SetTimer(bus, now + SDL_ACIO_BREAK_MS);
         break;
@@ -708,14 +709,6 @@ int SDL_ACIO_GetNodeCount(const void *state)
     const SDL_ACIOBus *bus = ACIO_ConstBus(state);
 
     return (bus->step == SDL_ACIO_STEP_READY) ? bus->nodes : 0;
-}
-
-const SDL_ACIONodeVersion *SDL_ACIO_GetNode(const void *state, int address)
-{
-    if (address < 1 || address > SDL_ACIO_GetNodeCount(state)) {
-        return NULL;
-    }
-    return &ACIO_ConstBus(state)->versions[address - 1];
 }
 
 int SDL_ACIO_FindProduct(const void *state, const char *product)

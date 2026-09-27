@@ -29,6 +29,8 @@
 
 #ifdef SDL_JOYSTICK_HIDAPI_INTEL_WIRELESS
 
+#include "../../misc/SDL_libusb.h"
+
 /* The Intel Wireless Series base station (8086:C013) serves up to eight
  * wireless pads on alternate setting 1 of its interface 0. The shared
  * vendor-USB path in SDL_hidapi_vendorusb.c selects that alternate and its
@@ -42,6 +44,13 @@ SDL_COMPILE_TIME_ASSERT(intel_wireless_hat_right, SDL_INTEL_WIRELESS_HAT_RIGHT =
 SDL_COMPILE_TIME_ASSERT(intel_wireless_hat_down, SDL_INTEL_WIRELESS_HAT_DOWN == SDL_HAT_DOWN);
 SDL_COMPILE_TIME_ASSERT(intel_wireless_hat_left, SDL_INTEL_WIRELESS_HAT_LEFT == SDL_HAT_LEFT);
 
+/* The activation replies go to interrupt OUT 0x01, the endpoint the vendor
+ * rule selects. UpdateDevice runs with SDL's joystick lock held, so a reply
+ * written on the libusb handle waits at most 10 ms, ten intervals of that
+ * endpoint. SDL_hid_write would wait up to 1000 ms. */
+#define INTEL_WIRELESS_REPLY_ENDPOINT   0x01
+#define INTEL_WIRELESS_REPLY_TIMEOUT_MS 10
+
 typedef struct
 {
     SDL_HIDAPI_Device *device;
@@ -49,6 +58,10 @@ typedef struct
     SDL_JoystickID joysticks[SDL_INTEL_WIRELESS_SLOTS];
     bool refresh[SDL_INTEL_WIRELESS_SLOTS]; /* Opened since the slot connected */
     Uint64 timestamp;                       /* Of the event being sent */
+#ifdef HAVE_LIBUSB
+    SDL_LibUSBContext *libusb; /* NULL when the device has no libusb handle */
+    libusb_device_handle *handle;
+#endif
 } SDL_DriverIntelWireless_Context;
 
 static void HIDAPI_DriverIntelWireless_RegisterHints(SDL_HintCallback callback, void *userdata)
@@ -142,6 +155,16 @@ static bool HIDAPI_DriverIntelWireless_InitDevice(SDL_HIDAPI_Device *device)
     SDL_IntelWireless_Init(&ctx->state);
     device->context = ctx;
 
+#ifdef HAVE_LIBUSB
+    /* The replies go out on the handle the libusb backend holds. A device
+     * another backend opened has none and keeps SDL_hid_write. */
+    ctx->handle = (libusb_device_handle *)SDL_GetPointerProperty(SDL_hid_get_properties(device->dev), SDL_PROP_HIDAPI_LIBUSB_DEVICE_HANDLE_POINTER, NULL);
+    if (!ctx->handle || !SDL_InitLibUSB(&ctx->libusb)) {
+        ctx->libusb = NULL;
+        ctx->handle = NULL;
+    }
+#endif
+
     /* A joystick connects when its slot becomes ready or sends input. A
      * remembered slot alone connects nothing, so a paired pad that is
      * switched off does not appear. */
@@ -155,6 +178,24 @@ static int HIDAPI_DriverIntelWireless_GetDevicePlayerIndex(SDL_HIDAPI_Device *de
 
 static void HIDAPI_DriverIntelWireless_SetDevicePlayerIndex(SDL_HIDAPI_Device *device, SDL_JoystickID instance_id, int player_index)
 {
+}
+
+/* Returns the bytes written, or -1 when the write failed, as SDL_hid_write
+ * does */
+static int HIDAPI_DriverIntelWireless_WriteReply(SDL_DriverIntelWireless_Context *ctx, Uint8 reply[SDL_INTEL_WIRELESS_REPLY_SIZE])
+{
+#ifdef HAVE_LIBUSB
+    if (ctx->libusb) {
+        int actual = 0;
+
+        if (ctx->libusb->interrupt_transfer(ctx->handle, INTEL_WIRELESS_REPLY_ENDPOINT, reply, SDL_INTEL_WIRELESS_REPLY_SIZE,
+                                            &actual, INTEL_WIRELESS_REPLY_TIMEOUT_MS) < 0) {
+            return -1;
+        }
+        return actual;
+    }
+#endif
+    return SDL_hid_write(ctx->device->dev, reply, SDL_INTEL_WIRELESS_REPLY_SIZE);
 }
 
 static bool HIDAPI_DriverIntelWireless_UpdateDevice(SDL_HIDAPI_Device *device)
@@ -192,7 +233,7 @@ static bool HIDAPI_DriverIntelWireless_UpdateDevice(SDL_HIDAPI_Device *device)
     /* At most one activation reply per update. A failed or short write is
      * queued again after a delay. */
     if (SDL_IntelWireless_NextReply(&ctx->state, SDL_GetTicksNS(), reply)) {
-        const int written = SDL_hid_write(device->dev, reply, sizeof(reply));
+        const int written = HIDAPI_DriverIntelWireless_WriteReply(ctx, reply);
         SDL_IntelWireless_ReplyDone(&ctx->state, written, SDL_GetTicksNS());
     }
     return true;
@@ -253,6 +294,15 @@ static void HIDAPI_DriverIntelWireless_CloseJoystick(SDL_HIDAPI_Device *device, 
 
 static void HIDAPI_DriverIntelWireless_FreeDevice(SDL_HIDAPI_Device *device)
 {
+#ifdef HAVE_LIBUSB
+    SDL_DriverIntelWireless_Context *ctx = (SDL_DriverIntelWireless_Context *)device->context;
+
+    if (ctx && ctx->libusb) {
+        SDL_QuitLibUSB();
+        ctx->libusb = NULL;
+        ctx->handle = NULL;
+    }
+#endif
 }
 
 SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverIntelWireless = {

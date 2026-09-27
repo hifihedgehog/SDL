@@ -256,6 +256,51 @@ static void TestReplies(void)
     CHECK(queries.done && SDL_IForce_NextQuery(&queries) == 0);
 }
 
+/* The effect count and the memory end are final once N has been asked,
+   while C, E, O and V are still to come */
+static void TestQueriesKnown(void)
+{
+    static const uint8_t open[] = { 'O' };
+    SDL_IForceQueries queries;
+    int i;
+
+    SDL_IForce_InitQueries(&queries);
+    CHECK(!SDL_IForce_QueriesKnown(&queries));
+    Answer(&queries, open, 1);
+    Answer(&queries, (const uint8_t *)"\x4D\x6D\x04", 3);
+    Answer(&queries, (const uint8_t *)"\x50\x81\xC2", 3);
+    Answer(&queries, (const uint8_t *)"\x42\xE8\x03", 3);
+    CHECK(!SDL_IForce_QueriesKnown(&queries) && SDL_IForce_NextQuery(&queries) == 'N');
+    Answer(&queries, (const uint8_t *)"\x4E\x0A", 2);
+    CHECK(SDL_IForce_QueriesKnown(&queries) && SDL_IForce_NextQuery(&queries) == 'C' && !queries.done);
+    CHECK(queries.effects == 10 && queries.memory_end == 1000);
+    /* The rest changes neither, answered or not */
+    Answer(&queries, NULL, 0);
+    Answer(&queries, NULL, 0);
+    Answer(&queries, NULL, 0);
+    Answer(&queries, (const uint8_t *)"\x56\x01", 2);
+    CHECK(SDL_IForce_QueriesKnown(&queries) && queries.done && queries.effects == 10 && queries.memory_end == 1000);
+
+    /* An unanswered N is final too: no effects, and here the default memory end */
+    SDL_IForce_InitQueries(&queries);
+    Answer(&queries, open, 1);
+    Answer(&queries, NULL, 0);
+    Answer(&queries, NULL, 0);
+    Answer(&queries, NULL, 0);
+    CHECK(!SDL_IForce_QueriesKnown(&queries));
+    Answer(&queries, NULL, 0);
+    CHECK(SDL_IForce_QueriesKnown(&queries) && SDL_IForce_NextQuery(&queries) == 'C');
+    CHECK(queries.effects == 0 && queries.memory_end == SDL_IFORCE_MEMORY_DEFAULT);
+
+    /* Twenty unanswered O queries end the sequence with no effects */
+    SDL_IForce_InitQueries(&queries);
+    for (i = 0; i < 20; ++i) {
+        CHECK(!SDL_IForce_QueriesKnown(&queries));
+        Answer(&queries, NULL, 0);
+    }
+    CHECK(SDL_IForce_QueriesKnown(&queries) && !queries.open && queries.effects == 0);
+}
+
 static const uint8_t wheel_neutral[] = { 0x03, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xF0 };
 static const uint8_t joystick_neutral[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xF0 };
 
@@ -973,6 +1018,161 @@ static void TestUpdates(void)
     CHECK(!SDL_IForce_DeferredDeadline(&ff, &deadline) && !SDL_IForce_NextDeferred(&ff, 1000, &out));
 }
 
+static bool CommandsEqual(const SDL_IForceCommands *a, const SDL_IForceCommands *b)
+{
+    int i;
+
+    if (a->count != b->count) {
+        return false;
+    }
+    for (i = 0; i < a->count; ++i) {
+        if (!CommandIs(&a->command[i], (const char *)b->command[i].bytes, b->command[i].length)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Commands that failed to send are undone: the effect and any waiting update
+   go back, so the same update is sent again. The blocks the failed commands
+   carried keep the time of that try, since the device may hold them. */
+static void TestUndo(void)
+{
+    SDL_IForceFF ff;
+    SDL_IForceCommands out, first;
+    SDL_IForceEffect constant = Constant(), sine = Sine();
+    uint64_t deadline = 0;
+
+    /* An update that goes at once */
+    SDL_IForce_InitFF(&ff, 4, 200);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 1000, &out) == SDL_IFORCE_UPLOAD_SENT);
+    constant.level = 0x7000;
+    constant.delay = 9;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 1100, &first) == SDL_IFORCE_UPLOAD_SENT && first.count == 2);
+    SDL_IForce_Undo(&ff);
+    CHECK(ff.slots[0].effect.level == 0x4000 && ff.slots[0].effect.delay == 5);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 1100, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    CHECK(SDL_IForce_DeferredDeadline(&ff, &deadline) && deadline == 1120);
+    CHECK(!SDL_IForce_NextDeferred(&ff, 1119, &out));
+    CHECK(SDL_IForce_NextDeferred(&ff, 1120, &out) && CommandsEqual(&out, &first));
+
+    /* A waiting update whose commands fail waits again, 20 ms after the try */
+    constant.level = 0x1000;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 1130, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    CHECK(SDL_IForce_NextDeferred(&ff, 1140, &first) && first.count == 1);
+    SDL_IForce_Undo(&ff);
+    CHECK(ff.slots[0].effect.level == 0x7000);
+    CHECK(SDL_IForce_DeferredDeadline(&ff, &deadline) && deadline == 1160);
+    CHECK(!SDL_IForce_NextDeferred(&ff, 1159, &out));
+    CHECK(SDL_IForce_NextDeferred(&ff, 1160, &out) && CommandsEqual(&out, &first));
+    CHECK(!SDL_IForce_DeferredDeadline(&ff, &deadline));
+
+    /* An update that went at once and dropped a waiting one brings it back */
+    CHECK(SDL_IForce_Upload(&ff, 1, &sine, 2000, &out) == SDL_IFORCE_UPLOAD_SENT);
+    sine.period = 100;
+    CHECK(SDL_IForce_Upload(&ff, 1, &sine, 2005, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    sine.period = 250;
+    sine.direction = 0x8000;
+    CHECK(SDL_IForce_Upload(&ff, 1, &sine, 2006, &out) == SDL_IFORCE_UPLOAD_SENT && out.count == 1);
+    SDL_IForce_Undo(&ff);
+    CHECK(ff.slots[1].effect.direction == 0xC000);
+    CHECK(SDL_IForce_DeferredDeadline(&ff, &deadline) && deadline == 2020);
+    CHECK(SDL_IForce_NextDeferred(&ff, 2020, &out) && out.count == 1);
+    CHECK(out.command[0].bytes[0] == 0x04 && out.command[0].bytes[6] == 100);
+
+    /* A new effect gives its blocks back */
+    constant = Constant();
+    SDL_IForce_InitFF(&ff, 2, 15);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 0, &first) == SDL_IFORCE_UPLOAD_SENT && first.count == 3);
+    SDL_IForce_Undo(&ff);
+    CHECK(!ff.slots[0].used && !ff.slots[0].block[0].used && !ff.slots[0].block[1].used);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 0, &out) == SDL_IFORCE_UPLOAD_SENT && CommandsEqual(&out, &first));
+    SDL_IForce_Undo(&ff);
+    CHECK(SDL_IForce_Upload(&ff, 1, &constant, 0, &out) == SDL_IFORCE_UPLOAD_SENT);
+    CHECK(ff.slots[1].block[0].start == 0 && ff.slots[1].block[1].start == 2);
+
+    /* Without failed commands there is nothing to undo */
+    SDL_IForce_InitFF(&ff, 2, 200);
+    SDL_IForce_Undo(&ff);
+    CHECK(!ff.slots[0].used);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 0, &out) == SDL_IFORCE_UPLOAD_SENT);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 0, &out) == SDL_IFORCE_UPLOAD_UNCHANGED);
+    SDL_IForce_Undo(&ff);
+    CHECK(ff.slots[0].used && ff.slots[0].effect.level == 0x4000);
+    constant.level = 1;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 5, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    SDL_IForce_Undo(&ff);
+    CHECK(SDL_IForce_DeferredDeadline(&ff, &deadline) && deadline == 20 && ff.slots[0].effect.level == 0x4000);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 30, &out) == SDL_IFORCE_UPLOAD_SENT);
+    SDL_IForce_Erase(&ff, 0);
+    SDL_IForce_Undo(&ff);
+    CHECK(!ff.slots[0].used);
+    SDL_IForce_Undo(NULL);
+}
+
+/* A waiting update whose sends fail SDL_IFORCE_SEND_TRIES times in a row is
+   dropped, and the effect stays as the device held it */
+static void TestSendTries(void)
+{
+    SDL_IForceFF ff;
+    SDL_IForceCommands out, first;
+    SDL_IForceEffect constant = Constant();
+    uint64_t deadline = 0;
+    int i;
+
+    SDL_IForce_InitFF(&ff, 2, 200);
+    CHECK(SDL_IForce_DeferredFailed(&ff) == -1 && SDL_IForce_DeferredFailed(NULL) == -1);
+    CHECK(SDL_IForce_Upload(&ff, 1, &constant, 0, &out) == SDL_IFORCE_UPLOAD_SENT);
+    constant.level = 0x7000;
+    CHECK(SDL_IForce_Upload(&ff, 1, &constant, 5, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    for (i = 1; i <= SDL_IFORCE_SEND_TRIES; ++i) {
+        CHECK(SDL_IForce_DeferredDeadline(&ff, &deadline) && deadline == (uint64_t)(20 * i));
+        CHECK(SDL_IForce_NextDeferred(&ff, deadline, &out) && out.count == 1);
+        if (i == 1) {
+            first = out;
+        }
+        CHECK(CommandsEqual(&out, &first));
+        CHECK(SDL_IForce_DeferredFailed(&ff) == ((i < SDL_IFORCE_SEND_TRIES) ? -1 : 1));
+    }
+    /* Nothing waits, and the effect is the one the device held */
+    CHECK(!SDL_IForce_DeferredDeadline(&ff, &deadline) && !SDL_IForce_NextDeferred(&ff, 5000, &out));
+    CHECK(ff.slots[1].effect.level == 0x4000 && !ff.slots[1].pending);
+    /* The next update of that effect is built against it */
+    CHECK(SDL_IForce_Upload(&ff, 1, &constant, 5000, &out) == SDL_IFORCE_UPLOAD_SENT && CommandsEqual(&out, &first));
+
+    /* The failures of a replaced update count on */
+    constant = Constant();
+    SDL_IForce_InitFF(&ff, 1, 200);
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 0, &out) == SDL_IFORCE_UPLOAD_SENT);
+    constant.level = 0x1000;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 5, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    CHECK(SDL_IForce_NextDeferred(&ff, 20, &out) && SDL_IForce_DeferredFailed(&ff) == -1);
+    constant.level = 0x1100;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 25, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    CHECK(SDL_IForce_NextDeferred(&ff, 40, &out) && SDL_IForce_DeferredFailed(&ff) == -1);
+    CHECK(SDL_IForce_NextDeferred(&ff, 60, &out) && SDL_IForce_DeferredFailed(&ff) == 0);
+    CHECK(!SDL_IForce_DeferredDeadline(&ff, &deadline));
+
+    /* A send that goes through starts the count again */
+    constant.level = 0x1200;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 65, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    CHECK(SDL_IForce_NextDeferred(&ff, 80, &out) && SDL_IForce_DeferredFailed(&ff) == -1);
+    CHECK(SDL_IForce_NextDeferred(&ff, 100, &out) && !SDL_IForce_DeferredDeadline(&ff, &deadline));
+    constant.level = 0x1300;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 105, &out) == SDL_IFORCE_UPLOAD_DEFERRED);
+    CHECK(SDL_IForce_NextDeferred(&ff, 120, &out) && SDL_IForce_DeferredFailed(&ff) == -1);
+    CHECK(SDL_IForce_NextDeferred(&ff, 140, &out) && SDL_IForce_DeferredFailed(&ff) == -1);
+
+    /* A failed send of the application's own update puts the waiting one
+       back with its count, neither added to nor cleared */
+    constant.level = 0x1400;
+    CHECK(SDL_IForce_Upload(&ff, 0, &constant, 160, &out) == SDL_IFORCE_UPLOAD_SENT);
+    SDL_IForce_Undo(&ff);
+    CHECK(SDL_IForce_DeferredDeadline(&ff, &deadline) && deadline == 180);
+    CHECK(SDL_IForce_NextDeferred(&ff, 180, &out) && SDL_IForce_DeferredFailed(&ff) == 0);
+    CHECK(!SDL_IForce_DeferredDeadline(&ff, &deadline) && ff.slots[0].effect.level == 0x1200);
+}
+
 /* The RS-232 framing, as Linux's receiver takes it */
 typedef struct Frames
 {
@@ -1089,6 +1289,7 @@ int main(void)
     TestModels();
     TestQuerySequence();
     TestReplies();
+    TestQueriesKnown();
     TestWheel();
     TestButtonsAndHat();
     TestGuillemotWheel();
@@ -1100,6 +1301,8 @@ int main(void)
     TestEffects();
     TestMemory();
     TestUpdates();
+    TestUndo();
+    TestSendTries();
     TestSerialFraming();
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);

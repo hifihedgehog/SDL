@@ -451,7 +451,7 @@ static void USIO_Complete(SDL_USIOState *state, const SDL_USIOSink *sink)
                  * alone (bpreader_hook.c:95-98, :110), and RPCS3 names the
                  * range 0900 to 0910 as one device (sys_usbd.cpp:270-271). */
                 state->phase = SDL_USIO_PHASE_REJECTED;
-                sink->log(sink->userdata, "0B9A:0900 left alone, not a USIO");
+                sink->log(sink->userdata, "0B9A:0900 is not a USIO: no more commands and no joysticks");
                 return;
             }
         }

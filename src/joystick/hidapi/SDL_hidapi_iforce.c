@@ -37,13 +37,18 @@
  * through libusb once WinUSB is bound. The descriptor's VID:PID picks the
  * layout, so input needs no query. The queries O, M, P, B, N, C, E, O and V
  * are vendor control requests of up to 1000 ms each, with O tried up to 20
- * times, so they run on their own thread. Their effect count and memory end
- * become joystick properties, which the I-Force haptic driver reads. The
- * protocol lives in SDL_iforce_proto.c, where the offline tests run it. */
+ * times, so they run on their own thread. Once N has been asked, N's effect
+ * count and B's memory end become joystick properties, which the I-Force
+ * haptic driver reads. The protocol lives in SDL_iforce_proto.c, where the
+ * offline tests run it. */
 SDL_COMPILE_TIME_ASSERT(iforce_hat_up, SDL_IFORCE_HAT_UP == SDL_HAT_UP);
 SDL_COMPILE_TIME_ASSERT(iforce_hat_right, SDL_IFORCE_HAT_RIGHT == SDL_HAT_RIGHT);
 SDL_COMPILE_TIME_ASSERT(iforce_hat_down, SDL_IFORCE_HAT_DOWN == SDL_HAT_DOWN);
 SDL_COMPILE_TIME_ASSERT(iforce_hat_left, SDL_IFORCE_HAT_LEFT == SDL_HAT_LEFT);
+
+/* GET_STATUS of the device, asked once at InitDevice */
+#define HIDAPI_IFORCE_STATUS_REQUEST_TYPE 0x80 /* IN, standard, to the device */
+#define HIDAPI_IFORCE_STATUS_TIMEOUT_MS   100
 
 typedef struct
 {
@@ -63,7 +68,7 @@ typedef struct
 
     /* Under lock */
     SDL_IForceQueries queries;
-    bool unanswered; /* A query went unanswered */
+    bool unanswered; /* An O went unanswered before the device answered one */
     bool finished;   /* The sequence is over, or never started */
 } SDL_DriverIForce_Context;
 
@@ -109,7 +114,10 @@ static int SDLCALL HIDAPI_DriverIForce_QueryThread(void *data)
                                                reply, setup.length, SDL_IFORCE_QUERY_TIMEOUT_MS);
         SDL_LockMutex(ctx->lock);
         SDL_IForce_QueryResult(&ctx->queries, (result > 0) ? reply : NULL, (result > 0) ? (size_t)result : 0);
-        if (result <= 0 || reply[0] != letter) {
+        if (!ctx->queries.open) {
+            /* Until the device answers O, only O is asked, so this O went
+               unanswered. A silent device takes 20 of them, so the open
+               stops waiting for N. */
             ctx->unanswered = true;
         }
         SDL_BroadcastCondition(ctx->settled);
@@ -168,6 +176,22 @@ static bool HIDAPI_DriverIForce_InitDevice(SDL_HIDAPI_Device *device)
     if (!handle) {
         return SDL_SetError("I-Force devices are read through libusb");
     }
+    if (SDL_InitLibUSB(&ctx->libusb)) {
+        Uint8 status[2];
+
+        /* Until WinUSB is bound, libusb on Windows reaches a HID-class
+           device through Windows' HID driver, which takes only HID class
+           requests and a few standard ones, so no query could be answered.
+           That path refuses GET_STATUS at once. WinUSB passes it to the
+           device, and every USB device answers it. A device on that path
+           stays with the other joystick backends. */
+        if (ctx->libusb->control_transfer(handle, HIDAPI_IFORCE_STATUS_REQUEST_TYPE, LIBUSB_REQUEST_GET_STATUS, 0, 0,
+                                          status, sizeof(status), HIDAPI_IFORCE_STATUS_TIMEOUT_MS) == LIBUSB_ERROR_NOT_SUPPORTED) {
+            SDL_QuitLibUSB();
+            ctx->libusb = NULL;
+            return SDL_SetError("I-Force devices need WinUSB");
+        }
+    }
     SDL_IForce_GetIdentity(ctx->model, &ctx->identity);
     SDL_IForce_ResetState(ctx->model, &ctx->state);
     SDL_IForce_InitQueries(&ctx->queries);
@@ -178,16 +202,16 @@ static bool HIDAPI_DriverIForce_InitDevice(SDL_HIDAPI_Device *device)
 
     ctx->lock = SDL_CreateMutex();
     ctx->settled = SDL_CreateCondition();
-    if (ctx->lock && ctx->settled && SDL_InitLibUSB(&ctx->libusb)) {
+    if (ctx->libusb && ctx->lock && ctx->settled) {
         ctx->handle = handle;
         ctx->finished = false;
         ctx->thread = SDL_CreateThread(HIDAPI_DriverIForce_QueryThread, "SDL I-Force queries", ctx);
-        if (!ctx->thread) {
-            ctx->finished = true;
-            SDL_QuitLibUSB();
-            ctx->libusb = NULL;
-            ctx->handle = NULL;
-        }
+    }
+    if (!ctx->thread && ctx->libusb) {
+        ctx->finished = true;
+        SDL_QuitLibUSB();
+        ctx->libusb = NULL;
+        ctx->handle = NULL;
     }
     /* Without the queries the device keeps its input and has no force feedback */
     return HIDAPI_JoystickConnected(device, NULL);
@@ -209,21 +233,22 @@ static void HIDAPI_DriverIForce_Post(SDL_DriverIForce_Context *ctx, SDL_Joystick
     }
 }
 
-/* The joystick learns N and B once the sequence is over */
+/* The joystick learns N and B once N has been asked, or the sequence is
+   over. C, E, the second O and V change neither. */
 static void HIDAPI_DriverIForce_Publish(SDL_DriverIForce_Context *ctx, SDL_Joystick *joystick)
 {
     SDL_PropertiesID props;
     SDL_IForceQueries queries;
-    bool finished;
+    bool known;
 
     if (ctx->published || !joystick) {
         return;
     }
     SDL_LockMutex(ctx->lock);
-    finished = ctx->finished;
+    known = ctx->finished || SDL_IForce_QueriesKnown(&ctx->queries);
     queries = ctx->queries;
     SDL_UnlockMutex(ctx->lock);
-    if (!finished) {
+    if (!known) {
         return;
     }
     ctx->published = true;
@@ -283,16 +308,16 @@ static bool HIDAPI_DriverIForce_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     ctx->post_pending = true;
 
     /* An application that opens the haptic device next needs N and B. Wait
-       until the sequence is over or a query goes unanswered, which a device
-       that answers takes a few milliseconds and a silent one one timeout,
-       and never longer than one timeout. A later end publishes from the
-       update. */
+       until N has been asked, the sequence is over or an O goes unanswered,
+       which a device that answers takes a few milliseconds and a silent one
+       one timeout, and never longer than one timeout. A later answer
+       publishes from the update. */
     ctx->published = false;
     if (ctx->lock) {
         const Uint64 deadline = SDL_GetTicks() + SDL_IFORCE_QUERY_TIMEOUT_MS;
 
         SDL_LockMutex(ctx->lock);
-        while (!ctx->finished && !ctx->unanswered) {
+        while (!SDL_IForce_QueriesKnown(&ctx->queries) && !ctx->finished && !ctx->unanswered) {
             const Uint64 now = SDL_GetTicks();
 
             if (now >= deadline) {

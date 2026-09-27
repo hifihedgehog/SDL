@@ -165,10 +165,16 @@ typedef struct SDL_WiiExtCaps
     uint8_t nhats;
     bool accel;    /* The remote's accelerometer as SDL_SENSOR_ACCEL */
     bool mono_led; /* SDL_JOYSTICK_CAP_MONO_LED */
-    bool mapping;  /* Whether the gamepad layer maps it */
 } SDL_WiiExtCaps;
 
 extern bool SDL_WiiExt_GetCaps(int type, SDL_WiiExtCaps *caps);
+
+/* The gamepad mapping fields SDL generates for a type this module decodes.
+ * They bind only controls the type's decoder posts, at SDL's gamepad
+ * positions: no D-pad without a hat, no GUIDE, and stick clicks only for the
+ * TaTaCon's faces. NULL for the tablets, which have no gamepad shape, and for
+ * any type this module does not decode. */
+extern const char *SDL_WiiExt_GetMapping(int type);
 
 /* The device name and joystick type for every configuration, the ones that
  * existed before this module included. */

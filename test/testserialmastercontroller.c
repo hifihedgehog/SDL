@@ -205,6 +205,30 @@ static void TestFraming(void)
     H_Destroy(h);
 }
 
+/* A press and its release in one read, as a port thread that runs late
+   reads them: each word reaches the joystick, as Mackoy's reader raises
+   onKeyDown and onKeyUp for words that share a read */
+static void TestPressReleaseOneRead(void)
+{
+    Harness *h = H_Create(&SDL_SerialMasterControllerModule);
+    int mark, i;
+    bool pressed = false;
+
+    H_Start(h);
+    H_SkipCalls(h);
+    FeedText(h, "TSA50\r");
+    mark = h->npublished;
+    FeedText(h, "TSK99\rTSK00\r");
+    for (i = mark; i < h->npublished; ++i) {
+        if (SDL_Serial_GetButton(&h->published[i].controls, 3)) {
+            pressed = true;
+        }
+    }
+    CHECK(pressed && h->npublished - mark == 2);
+    CHECK(H_NoButtons(h, 0));
+    H_Destroy(h);
+}
+
 static void BringUp(Harness *h)
 {
     FeedText(h, "TSA50\r");
@@ -236,6 +260,7 @@ int main(void)
     TestPresence();
     TestEvents();
     TestFraming();
+    TestPressReleaseOneRead();
     TestBatteries();
     return H_Finish();
 }

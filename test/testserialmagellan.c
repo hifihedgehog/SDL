@@ -169,6 +169,35 @@ static void TestStartupFailure(void)
     H_Destroy(h);
 }
 
+/* A version line longer than the line buffer still presents the device,
+   named from its first bytes. No source records the line's length: X.org
+   keeps 256 bytes of it and spacenavd 127. */
+static void TestLongVersion(void)
+{
+    Harness *h = H_Create(&SDL_SerialMagellanModule);
+    char version[71];
+
+    memset(version, 'x', 70);
+    memcpy(version, "vSPACEBALL 5000 Version 6.60 ", 29);
+    version[70] = '\0';
+    H_Start(h);
+    H_Advance(h, 1000);
+    Line(h, 1010, "m0");
+    Line(h, 1020, "z");
+    Line(h, 1030, "z");
+    Line(h, 1040, "q00");
+    Line(h, 1050, "pAA");
+    Line(h, 1060, "nH");
+    Line(h, 1070, "m3");
+    Line(h, 1080, version);
+    CHECK(h->presence[0] == 1 && strcmp(h->identity[0].name, "Spaceball 5000") == 0);
+    CHECK(State(h)->step == SDL_MAGELLAN_STEP_PRESENT);
+    /* The next line is read from its start */
+    Line(h, 1090, "k000");
+    CHECK(H_NoButtons(h, 0) && !State(h)->line_overflow && State(h)->line_length == 0);
+    H_Destroy(h);
+}
+
 static void TestNames(void)
 {
     static const char spaceball[] = "vSPACEBALL 5000 Version 6.60";
@@ -375,6 +404,7 @@ int main(void)
     BuildVectors();
     TestStartup();
     TestStartupFailure();
+    TestLongVersion();
     TestNames();
     TestDecode();
     TestMouseMode();

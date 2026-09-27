@@ -22,10 +22,14 @@
 /* JVS arcade I/O boards on a USB-RS485 adapter, protocol token "jvs". 115200
  * baud 8N1 with RTS high while sending. The module is the bus master: it
  * resets the boards twice, assigns addresses until one goes unanswered,
- * identifies each board and then polls them in turn. Frames are E0, the
- * node, a length, the data and a checksum, with E0 and D0 escaped as D0 and
- * the value less one. The facts are from jvsio, MAME's jvs devices,
- * JoypadOS and Dolphin (GPL, facts only). No code from Dolphin is copied.
+ * identifies each board and then polls them in turn. Each player is a
+ * joystick. Player 1 also gets, as axes, the analog channels, up to 8, and
+ * then the rotary channels of the first board that reports either, which is
+ * the first board whenever it has any, whichever board has player 1. Frames
+ * are E0, the node, a length, the data and a checksum, with E0 and D0
+ * escaped as D0 and the value less one. The facts are from jvsio, MAME's jvs
+ * devices, JoypadOS and Dolphin (GPL, facts only). No code from Dolphin is
+ * copied.
  */
 
 #ifndef SDL_serial_jvs_proto_h_
@@ -43,7 +47,7 @@
 #define SDL_JVS_RESET_MS      500  /* Between the two resets */
 #define SDL_JVS_REPLY_MS      100
 #define SDL_JVS_ERROR_MS      500  /* After an error, before the next reset */
-#define SDL_JVS_SCAN_MS       1000 /* After a scan that found no board */
+#define SDL_JVS_SCAN_MS       1000 /* After a scan that found no board, no player or nothing to poll */
 #define SDL_JVS_MAX_FRAME     257  /* Node, length and up to 255 bytes */
 #define SDL_JVS_TEXT_LENGTH   100
 #define SDL_JVS_MAX_OUTPUT    8
@@ -63,7 +67,7 @@ typedef enum SDL_JVSStep
     SDL_JVS_STEP_IDENTIFY, /* 10 to 14 to one board */
     SDL_JVS_STEP_POLL,
     SDL_JVS_STEP_ERROR,    /* 500 ms, then the resets */
-    SDL_JVS_STEP_SCAN      /* No board: 1000 ms, then the resets */
+    SDL_JVS_STEP_SCAN      /* No board, no player or nothing to poll: 1000 ms, then the resets */
 } SDL_JVSStep;
 
 typedef struct SDL_JVSBoard
@@ -104,7 +108,8 @@ typedef struct SDL_JVSState
     uint8_t command;     /* The identify command being asked */
     SDL_JVSBoard board_info[SDL_JVS_MAX_BOARDS];
     int players;         /* Joysticks presented */
-    int poll_board_of_player1;
+    int analog_board;    /* The first board with analog or rotary channels, which player 1 takes, -1 when none */
+    bool logged_no_players; /* The last identification found no player, and the log says so */
 
     bool rx_in;
     bool rx_escape;

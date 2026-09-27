@@ -391,6 +391,7 @@ static void Ended(SDL_BLEHost *host, uint64_t address, const BH_Harness *h)
 #define END_PUBLISHED 0x02
 #define END_PAIRING   0x04
 #define END_CONNECT   0x08
+#define END_REMOVAL   0x10
 
 static void EndWith(SDL_BLEHost *host, uint64_t address, int flags, uint64_t now)
 {
@@ -401,6 +402,7 @@ static void EndWith(SDL_BLEHost *host, uint64_t address, int flags, uint64_t now
     outcome.published = (flags & END_PUBLISHED) != 0;
     outcome.pairing_failed = (flags & END_PAIRING) != 0;
     outcome.connect_failed = (flags & END_CONNECT) != 0;
+    outcome.removal_lost = (flags & END_REMOVAL) != 0;
     SDL_BLEHost_SessionEnded(host, address, &outcome, now);
 }
 
@@ -418,12 +420,15 @@ static void ExpectOutcome(const BH_Harness *h, int flags, int line)
         outcome.published = before;
         outcome.pairing_failed = before;
         outcome.connect_failed = before;
+        outcome.removal_lost = before;
         SDL_BLESession_GetOutcome(&h->session, &outcome);
         BH_CHECK(outcome.backoff == ((flags & END_BACKOFF) != 0) && outcome.published == ((flags & END_PUBLISHED) != 0) &&
                      outcome.pairing_failed == ((flags & END_PAIRING) != 0) &&
-                     outcome.connect_failed == ((flags & END_CONNECT) != 0),
-                 "line %d: the outcome is backoff %d, published %d, pairing failed %d, connect failed %d", line,
-                 (int)outcome.backoff, (int)outcome.published, (int)outcome.pairing_failed, (int)outcome.connect_failed);
+                     outcome.connect_failed == ((flags & END_CONNECT) != 0) &&
+                     outcome.removal_lost == ((flags & END_REMOVAL) != 0),
+                 "line %d: the outcome is backoff %d, published %d, pairing failed %d, connect failed %d, removal lost %d",
+                 line, (int)outcome.backoff, (int)outcome.published, (int)outcome.pairing_failed,
+                 (int)outcome.connect_failed, (int)outcome.removal_lost);
     }
 }
 
@@ -1731,10 +1736,55 @@ static void TestHostOutcomes(void)
     EndWith(&host, 0xA1, END_PAIRING, t);
     CHECK(!Offer(&host, &ad, t + 119999, &match) && Offer(&host, &ad, t + 120000, &match));
 
+    /* Links lost during a bond removal count apart from failed pairings: the
+       first two free the address at once, the third arms the schedule, and
+       so does each after it until a publish */
+    SDL_BLEHost_Init(&host);
+    CHECK(Offer(&host, &ad, 0, &match));
+    for (i = 0; i < SDL_BLE_PAIRING_TRIES - 1; ++i) {
+        EndWith(&host, 0xA1, END_REMOVAL, 1000);
+        BH_CHECK(!SDL_BLEHost_IsActive(&host, 0xA1) && Offer(&host, &ad, 1000, &match), "lost removal %d waits", i);
+    }
+    EndWith(&host, 0xA1, END_REMOVAL, 1000);
+    CHECK(!Offer(&host, &ad, 15999, &match) && Offer(&host, &ad, 16000, &match));
+    EndWith(&host, 0xA1, END_REMOVAL, 16000);
+    CHECK(!Offer(&host, &ad, 45999, &match) && Offer(&host, &ad, 46000, &match));
+    /* They spend none of the failed pairings' tries: two failed pairings
+       still free the address at once */
+    for (i = 0; i < SDL_BLE_PAIRING_TRIES - 1; ++i) {
+        EndWith(&host, 0xA1, END_PAIRING, 46000);
+        BH_CHECK(Offer(&host, &ad, 46000, &match), "failed pairing %d after the lost removals", i);
+    }
+    /* A publish clears the count */
+    EndWith(&host, 0xA1, END_PUBLISHED, 46000);
+    for (i = 0; i < SDL_BLE_PAIRING_TRIES - 1; ++i) {
+        BH_CHECK(Offer(&host, &ad, 46000, &match), "lost removal %d after the publish", i);
+        EndWith(&host, 0xA1, END_REMOVAL, 46000);
+    }
+    CHECK(Offer(&host, &ad, 46000, &match));
+    EndWith(&host, 0xA1, END_REMOVAL, 46000);
+    CHECK(!Offer(&host, &ad, 60999, &match) && Offer(&host, &ad, 61000, &match));
+    /* So does SDL_BLEHost_ClearBackoff, for an address without a session */
+    EndWith(&host, 0xA1, END_PUBLISHED, 61000);
+    for (i = 0; i < SDL_BLE_PAIRING_TRIES - 1; ++i) {
+        CHECK(Offer(&host, &ad, 61000, &match));
+        EndWith(&host, 0xA1, END_REMOVAL, 61000);
+    }
+    CHECK(host.entries[0].removal_losses == SDL_BLE_PAIRING_TRIES - 1);
+    SDL_BLEHost_ClearBackoff(&host);
+    for (i = 0; i < SDL_BLE_PAIRING_TRIES - 1; ++i) {
+        BH_CHECK(Offer(&host, &ad, 61000, &match), "lost removal %d after the clear", i);
+        EndWith(&host, 0xA1, END_REMOVAL, 61000);
+    }
+    CHECK(Offer(&host, &ad, 61000, &match));
+    EndWith(&host, 0xA1, END_REMOVAL, 61000);
+    CHECK(!Offer(&host, &ad, 75999, &match) && Offer(&host, &ad, 76000, &match));
+
     /* SDL_BLEHost_ClearBackoff: every address without a session may start
        one at once, and its schedule and its failed pairings start over. The
-       address with a session keeps its reservation and its count. The idle
-       entries sit first and last in the table. */
+       address with a session keeps its reservation, and its wait and its
+       counts start over when that session ends. The idle entries sit first
+       and last in the table. */
     SDL_BLEHost_Init(&host);
     SDL_BLEHost_ClearBackoff(&host);
     CHECK(host.count == 0);
@@ -1768,9 +1818,77 @@ static void TestHostOutcomes(void)
     }
     EndWith(&host, 0xA2, END_PAIRING, 16000);
     CHECK(!Offer(&host, &other, 30999, &match) && Offer(&host, &other, 31000, &match));
-    /* The one with a session kept its count: its next backoff is 30 s */
+    /* The one with a session ends with a backoff and still waits no more.
+       Its schedule starts over, so the backoff after that is the first step,
+       15 s, and the one after it the second, 30 s. */
     EndWith(&host, 0xA3, END_BACKOFF, 16000);
-    CHECK(!Offer(&host, &third, 45999, &match) && Offer(&host, &third, 46000, &match));
+    CHECK(!SDL_BLEHost_IsActive(&host, 0xA3) && Offer(&host, &third, 16000, &match));
+    EndWith(&host, 0xA3, END_BACKOFF, 16000);
+    CHECK(!Offer(&host, &third, 30999, &match) && Offer(&host, &third, 31000, &match));
+    EndWith(&host, 0xA3, END_BACKOFF, 31000);
+    CHECK(!Offer(&host, &third, 60999, &match) && Offer(&host, &third, 61000, &match));
+}
+
+/* The pairing hint changes while a session connects, as
+   BLEGATT_ApplyHints clears the host: the session was made with the old
+   setting, so the wait it ends with says nothing under the new one. An
+   unbonded Daydream that backed off five times with pairing off is tried
+   again at its next advertisement, and its schedule starts over. */
+static void TestClearDuringSession(void)
+{
+    SDL_BLEHost host;
+    SDL_BLEAdvertisement ad;
+    SDL_BLEMatch match = { -1, 0 };
+    BH_Harness *h;
+    uint64_t t = 1000;
+    int i;
+
+    SDL_BLEHost_Init(&host);
+    ad = Ad(0xD1, SDL_BLE_AD_ADVERTISEMENT);
+    AdName(&ad, "Daydream controller");
+    /* Five sessions with pairing off, each ended by the missing bond */
+    for (i = 0; i < 5; ++i) {
+        if (!Offer(&host, &ad, t, &match)) {
+            BH_FAIL("session %d did not start at %llu", i, (unsigned long long)t);
+            return;
+        }
+        h = BH_Create(SDL_BLE_Families[match.family], match.variant, NULL, false);
+        h->now = t;
+        BH_Connected(h, true, false);
+        BH_CHECK(h->session.backoff, "session %d backs off", i);
+        Ended(&host, ad.address, h);
+        DESTROY(h);
+        t = host.entries[0].until;
+    }
+    CHECK(host.entries[0].failures == 5);
+
+    /* The sixth starts with pairing off, and the hint changes before its
+       open answers. The address keeps its reservation. */
+    if (!Offer(&host, &ad, t, &match)) {
+        BH_FAIL("the sixth session did not start");
+        return;
+    }
+    h = BH_Create(SDL_BLE_Families[match.family], match.variant, NULL, false);
+    h->now = t;
+    SDL_BLEHost_ClearBackoff(&host);
+    CHECK(SDL_BLEHost_IsActive(&host, 0xD1) && !Offer(&host, &ad, t, &match));
+    h->now = t + 200;
+    BH_Connected(h, true, false);
+    CHECK(h->session.backoff && SDL_BLESession_Ended(&h->session));
+    Ended(&host, ad.address, h);
+    DESTROY(h);
+
+    /* 1 ms later the next advertisement starts a session, which can pair */
+    BH_CHECK(Offer(&host, &ad, t + 201, &match), "the address waits until %llu after the hint changed during its session",
+             (unsigned long long)host.entries[0].until);
+    h = BH_Create(SDL_BLE_Families[match.family], match.variant, NULL, true);
+    h->now = t + 201;
+    BH_Connected(h, true, false);
+    CHECK(BH_LastKind(h) == PAIR);
+    DESTROY(h);
+    /* Its schedule started over: the next backoff is 15 s */
+    EndWith(&host, 0xD1, END_BACKOFF, t + 201);
+    CHECK(!Offer(&host, &ad, t + 201 + 14999, &match) && Offer(&host, &ad, t + 201 + 15000, &match));
 }
 
 /* The host and the session together, advertisements coming every 20 ms: a
@@ -1778,7 +1896,8 @@ static void TestHostOutcomes(void)
    once, then waits the schedule. An address that cannot be opened, or whose
    link drops before the joystick appears, is tried every
    SDL_BLE_CONNECT_RETRY_MS. One whose link drops while its stale bond is
-   removed is tried again at once. */
+   removed is tried again at once, and from the SDL_BLE_PAIRING_TRIES-th such
+   loss it waits the schedule. */
 static void TestRetries(void)
 {
     SDL_BLEHost host;
@@ -1862,11 +1981,14 @@ static void TestRetries(void)
     CHECK(!Offer(&host, &ad, 34999, &match) && Offer(&host, &ad, 35000, &match));
 
     /* A link that drops while a stale bond is removed: the next
-       advertisement connects at once, so the next session pairs afresh */
+       advertisement connects at once, since unpairing can drop the link and
+       the next session then pairs afresh. Every session here finds the bond
+       again, as when the removal fails as the link drops, so from the third
+       such loss the address waits the schedule. */
     SDL_BLEHost_Init(&host);
     ad.address = 0xD8;
     sessions = 0;
-    for (now = 0; now < 100; now += 20) {
+    for (now = 0; now < 20000; now += 20) {
         if (Offer(&host, &ad, now, &match)) {
             BH_Harness *h = BH_Create(SDL_BLE_Families[match.family], match.variant, NULL, true);
 
@@ -1884,9 +2006,10 @@ static void TestRetries(void)
             DESTROY(h);
         }
     }
-    CHECK(sessions == 5);
-    if (sessions == 5) {
-        CHECK(started[0] == 0 && started[1] == 20 && started[4] == 80);
+    BH_CHECK(sessions == SDL_BLE_PAIRING_TRIES + 1, "%d sessions in 20 s, each losing its link during the bond removal",
+             sessions);
+    if (sessions == SDL_BLE_PAIRING_TRIES + 1) {
+        CHECK(started[0] == 0 && started[1] == 20 && started[2] == 40 && started[3] == 40 + 15000);
     }
 
     /* A link that drops while the Oculus Go pairs after a failed
@@ -2781,7 +2904,7 @@ static void Test9_Clock(void)
     BH_Harness *h;
     int mark, nsnapshots;
 
-    /* Gear VR without the acknowledgement: 01 00 at +4000, then 04 00 every
+    /* Gear VR without the acknowledgment: 01 00 at +4000, then 04 00 every
        10 s */
     h = BH_Create(&SDL_BLEGearVRFamily, 0, NULL, false);
     h->now = 1000;
@@ -2835,7 +2958,7 @@ static void Test9_Clock(void)
     EXPECT_LOG(h, mark, "remove disconnect");
     DESTROY(h);
 
-    /* Gear VR with the acknowledgement at +1580 ms: 01 00 at once, then the
+    /* Gear VR with the acknowledgment at +1580 ms: 01 00 at once, then the
        keep-alive 10 s later. A later 2-byte echo is not input. */
     h = BH_Create(&SDL_BLEGearVRFamily, 0, NULL, false);
     h->now = 1000;
@@ -3174,7 +3297,7 @@ static void TestFlowPublish(void)
     CHECK(BH_Count(h, PUBLISH) == 1 && BH_Button(h, SDL_BLE_BUTTON_SOUTH) && !BH_Button(h, SDL_BLE_BUTTON_EAST));
     DESTROY(h);
 
-    /* Gear VR: input before the acknowledgement does not publish */
+    /* Gear VR: input before the acknowledgment does not publish */
     h = BH_Create(&SDL_BLEGearVRFamily, 0, NULL, false);
     BH_Start(h, false);
     BH_WriteAll(h);
@@ -3636,7 +3759,7 @@ static void TestFlowLostBeforePublish(void)
     EXPECT_OUTCOME(h, END_CONNECT);
     DESTROY(h);
 
-    /* Removing a stale bond after Unreachable */
+    /* Removing a stale bond after Unreachable: no wait, but a lost removal */
     h = BH_Create(&SDL_BLEGearVRFamily, 0, NULL, true);
     BH_Connected(h, true, true);
     BH_Discovered(h, true, NULL);
@@ -3644,7 +3767,7 @@ static void TestFlowLostBeforePublish(void)
     CHECK(Phase(h) == SDL_BLE_PHASE_REPAIRING);
     Lost(h);
     EXPECT_LOG(h, 0, "connect discover sub0=none unbond disconnect");
-    EXPECT_OUTCOME(h, 0);
+    EXPECT_OUTCOME(h, END_REMOVAL);
     DESTROY(h);
     /* Pairing after a failed subscription: no wait, but a failed pairing */
     h = BH_Create(&SDL_BLEOculusGoFamily, 0, NULL, true);
@@ -3955,20 +4078,22 @@ static void TestFlowStartTimeout(void)
     uint8_t face[SDL_OCULUSGO_REPORT_SIZE];
     uint64_t deadline, t;
     BH_Harness *h;
-    int mark;
+    int mark, logs;
 
     /* A module without timers: the start deadline is the only one, 30 s
-       after the start */
+       after the start. One log line gives the reason for the end. */
     h = BH_Create(&SDL_BLEPokeballFamily, 0, NULL, false);
     h->now = 1000;
     BH_Start(h, false);
     CHECK(SDL_BLESession_GetDeadline(&h->session, &deadline) && deadline == timeout && deadline == 31000);
     mark = h->nactions;
+    logs = bh_log_lines;
     BH_Advance(h, timeout - 1);
     EXPECT_LOG(h, mark, "");
     BH_Advance(h, timeout);
     EXPECT_LOG(h, mark, "backoff disconnect");
     CHECK(TimeAt(h, mark) == timeout && h->session.backoff && !h->published);
+    BH_CHECK(bh_log_lines == logs + 1, "the start timeout: %d log lines", bh_log_lines - logs);
     CHECK(!SDL_BLESession_GetDeadline(&h->session, &deadline));
     DESTROY(h);
 
@@ -4281,6 +4406,7 @@ int main(void)
     Test2_OneConnect();
     TestHost();
     TestHostOutcomes();
+    TestClearDuringSession();
     TestRetries();
     TestQueue();
     Test3_DescriptorValues();

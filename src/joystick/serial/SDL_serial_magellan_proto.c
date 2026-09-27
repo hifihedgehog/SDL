@@ -254,8 +254,10 @@ static void Magellan_HandleLine(SDL_MagellanState *s, uint64_t now)
         }
         break;
     case SDL_MAGELLAN_STEP_V:
-        if (length > 0 && line[0] == 'v') {
-            Magellan_Present(s, line, length);
+        /* No source records how long the version text is, so a line past
+           the buffer counts too, named from the bytes the buffer kept */
+        if (s->line_length > 0 && line[0] == 'v') {
+            Magellan_Present(s, line, s->line_length);
         }
         break;
     default:

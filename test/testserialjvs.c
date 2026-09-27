@@ -228,6 +228,8 @@ static void TestStartup(void)
     CHECK(strcmp(h->identity[0].name, "JVS I/O Player 1") == 0 && strcmp(h->identity[1].name, "JVS I/O Player 2") == 0);
     CHECK(h->identity[0].type == SDL_SERIAL_TYPE_ARCADE_STICK && h->identity[0].nbuttons == 14 && h->identity[1].nbuttons == 13);
     CHECK(h->identity[0].naxes == 8 && h->identity[1].naxes == 0 && h->identity[0].nhats == 1);
+    /* Players 1 to 4 are player indexes 0 to 3 */
+    CHECK(h->identity[0].player_index == 0 && h->identity[1].player_index == 1);
     CHECK(State(h)->board_info[0].players == 2 && State(h)->board_info[0].switches == 13);
     CHECK(State(h)->board_info[0].slots == 2 && State(h)->board_info[0].analog == 8 && State(h)->board_info[0].outputs == 6);
     {
@@ -338,6 +340,86 @@ static void TestScan(void)
     Write(h, 510, r_report02, sizeof(r_report02));
     CHECK(State(h)->step == SDL_JVS_STEP_ERROR);
     H_Destroy(h);
+}
+
+/* Boards that report no input leave nothing to poll, so the bus is scanned
+   again 1000 ms later, as an empty bus is, and a board that joins later is
+   found */
+static void TestNothingToPoll(void)
+{
+    static const uint8_t outputs_only[7] = { 0x01, 0x01, 0x12, 0x06, 0x00, 0x00, 0x00 };
+    Harness *h = H_Create(&SDL_SerialJVSModule);
+    uint8_t frame[32];
+    const size_t n = Encode(0x00, outputs_only, sizeof(outputs_only), frame);
+    int logs;
+
+    H_Start(h);
+    BringUpWith(h, frame, n);
+    CHECK(h->npresence == 0 && State(h)->step == SDL_JVS_STEP_SCAN);
+    CHECK(strcmp(h->last_log, "No JVS board reports player switches") == 0);
+    H_SkipCalls(h);
+    H_Advance(h, 1659);
+    CHECK(H_NextCall(h) == NULL);
+    H_Advance(h, 1660);
+    CHECK(H_IsWrite(H_NextCall(h), reset_frame, 6, 1660));
+    /* The same answer again: its line is not logged on every scan */
+    logs = h->nlogs;
+    BringUpWith(h, frame, n);
+    CHECK(h->npresence == 0 && State(h)->step == SDL_JVS_STEP_SCAN && h->nlogs == logs + 1);
+    H_Advance(h, 3320);
+    BringUpWith(h, features_basic, sizeof(features_basic));
+    CHECK(h->presence[0] == 1 && h->presence[1] == 1 && State(h)->step == SDL_JVS_STEP_POLL);
+    H_Destroy(h);
+
+    /* A player whose board reports no switch, and nothing else to poll: the
+       joystick appears, and the bus is scanned again all the same */
+    {
+        static const uint8_t no_switches[7] = { 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00 };
+
+        h = H_Create(&SDL_SerialJVSModule);
+        H_Start(h);
+        BringUpWith(h, frame, Encode(0x00, no_switches, sizeof(no_switches), frame));
+        CHECK(h->presence[0] == 1 && State(h)->step == SDL_JVS_STEP_SCAN && !State(h)->awaiting);
+        H_SkipCalls(h);
+        H_Advance(h, 1659);
+        CHECK(H_NextCall(h) == NULL);
+        H_Advance(h, 1660);
+        CHECK(H_IsWrite(H_NextCall(h), reset_frame, 6, 1660));
+        H_Destroy(h);
+    }
+}
+
+/* A bus whose boards report no player, a coin board or an analog board
+   alone, gives no joystick whatever its polls return. It is scanned again
+   1000 ms after the identification, and a player board that answers a later
+   scan comes up. */
+static void TestNoPlayers(void)
+{
+    static const uint8_t coins_only[7] = { 0x01, 0x01, 0x02, 0x02, 0x00, 0x00, 0x00 };
+    static const uint8_t analog_only[7] = { 0x01, 0x01, 0x03, 0x08, 0x0A, 0x00, 0x00 };
+    const uint8_t *lists[2];
+    int i;
+
+    lists[0] = coins_only;
+    lists[1] = analog_only;
+    for (i = 0; i < 2; ++i) {
+        Harness *h = H_Create(&SDL_SerialJVSModule);
+        uint8_t frame[32];
+        const size_t n = Encode(0x00, lists[i], 7, frame);
+
+        H_Start(h);
+        BringUpWith(h, frame, n);
+        CHECK(h->npresence == 0 && State(h)->step == SDL_JVS_STEP_SCAN && !State(h)->awaiting);
+        CHECK(strcmp(h->last_log, "No JVS board reports player switches") == 0);
+        H_SkipCalls(h);
+        H_Advance(h, 1659);
+        CHECK(H_NextCall(h) == NULL);
+        H_Advance(h, 1660);
+        CHECK(H_IsWrite(H_NextCall(h), reset_frame, 6, 1660));
+        BringUpWith(h, features_basic, sizeof(features_basic));
+        CHECK(h->presence[0] == 1 && h->presence[1] == 1 && State(h)->step == SDL_JVS_STEP_POLL);
+        H_Destroy(h);
+    }
 }
 
 static void TestSwitches(void)
@@ -599,7 +681,8 @@ static void TestErrors(void)
         }
     }
 
-    /* A reply to node 00 with no request out, and a frame too short to hold a status, change nothing */
+    /* A reply to node 00 with no request out changes nothing. A frame too
+       short to hold a status is an error. */
     {
         Harness *h = PresentBoard();
         static const uint8_t short_frame[4] = { 0xE0, 0x00, 0x01, 0x01 };
@@ -716,6 +799,7 @@ static void TestTwoBoards(void)
     CHECK(h->presence[0] == 1 && h->presence[1] == 1 && h->presence[2] == 1 && h->presence[3] == 1);
     CHECK(State(h)->board_info[1].first_player == 3 && State(h)->board_info[1].mapped_players == 1);
     CHECK(strcmp(h->identity[3].name, "JVS I/O Player 4") == 0);
+    CHECK(h->identity[2].player_index == 2 && h->identity[3].player_index == 3);
     {
         static const uint8_t data[5] = { 0x20, 0x03, 0x02, 0x21, 0x03 };
         n = Encode(0x01, data, sizeof(data), poll2);
@@ -754,6 +838,91 @@ static void TestTwoBoards(void)
         CHECK(H_OnlyButton(h, 3, SDL_JVS_BUTTON_START) && H_OnlyButton(h, 2, SDL_JVS_BUTTON_START));
         CHECK(!H_Button(h, 3, SDL_JVS_BUTTON_TEST));
     }
+    H_Destroy(h);
+}
+
+/* Player 1 takes the first board's analog channels, as the part says, even
+   when a later board has the players */
+static void TestAnalogFirstBoard(void)
+{
+    Harness *h = H_Create(&SDL_SerialJVSModule);
+    static const uint8_t analog_only[7] = { 0x01, 0x01, 0x03, 0x08, 0x0A, 0x00, 0x00 };
+    static const uint8_t poll_analog_only[6] = { 0xE0, 0x01, 0x03, 0x22, 0x08, 0x2E };
+    uint8_t data[20], frame[48];
+    size_t n = 0;
+    int i;
+
+    H_Start(h);
+    H_Advance(h, 500);
+    Write(h, 510, address_ok, sizeof(address_ok));
+    Write(h, 520, address_ok, sizeof(address_ok));
+    H_Advance(h, 620);
+    Write(h, 630, ident_reply, sizeof(ident_reply));
+    Write(h, 640, rev_13, sizeof(rev_13));
+    Write(h, 650, rev_30, sizeof(rev_30));
+    Write(h, 660, rev_10, sizeof(rev_10));
+    Write(h, 670, frame, Encode(0x00, analog_only, sizeof(analog_only), frame));
+    Write(h, 680, ident_reply, sizeof(ident_reply));
+    Write(h, 690, rev_13, sizeof(rev_13));
+    Write(h, 700, rev_30, sizeof(rev_30));
+    Write(h, 710, rev_10, sizeof(rev_10));
+    Write(h, 720, features_basic, sizeof(features_basic));
+    /* Board 2's two players, player 1 with board 1's eight channels */
+    CHECK(h->presence[0] == 1 && h->presence[1] == 1 && h->presence[2] == 0);
+    CHECK(State(h)->board_info[0].mapped_players == 0 && State(h)->board_info[1].first_player == 0);
+    CHECK(h->identity[0].naxes == 8 && h->identity[1].naxes == 0);
+    h->cursor = h->ncalls - 1;
+    CHECK(H_IsWrite(H_NextCall(h), poll_analog_only, sizeof(poll_analog_only), 720));
+    /* Board 1's answer, channel 1 at 0000 */
+    data[n++] = 0x01;
+    data[n++] = 0x01;
+    for (i = 0; i < 8; ++i) {
+        data[n++] = (i == 0) ? 0x00 : 0x80;
+        data[n++] = 0x00;
+    }
+    Write(h, 730, frame, Encode(0x00, data, n, frame));
+    CHECK(H_Axis(h, 0, 0) == -32768 && H_Axis(h, 0, 1) == 0 && H_Axis(h, 1, 0) == 0);
+    /* Board 2's switches keep the axes */
+    Write(h, 740, idle, sizeof(idle));
+    CHECK(H_Axis(h, 0, 0) == -32768 && H_NoButtons(h, 0) && State(h)->errors == 0);
+    H_Destroy(h);
+}
+
+/* Board 1 reports no analog, and player 1 is on board 2, which does. Player
+   1 takes board 2's channels, since they come from the first board that
+   reports analog or rotary channels. */
+static void TestAnalogLaterBoard(void)
+{
+    static const uint8_t outputs_only[7] = { 0x01, 0x01, 0x12, 0x06, 0x00, 0x00, 0x00 };
+    static const uint8_t poll_data[7] = { 0x20, 0x02, 0x02, 0x21, 0x02, 0x22, 0x08 };
+    Harness *h = H_Create(&SDL_SerialJVSModule);
+    uint8_t frame[32], poll[16];
+    size_t n;
+
+    H_Start(h);
+    H_Advance(h, 500);
+    Write(h, 510, address_ok, sizeof(address_ok));
+    Write(h, 520, address_ok, sizeof(address_ok));
+    H_Advance(h, 620);
+    Write(h, 630, ident_reply, sizeof(ident_reply));
+    Write(h, 640, rev_13, sizeof(rev_13));
+    Write(h, 650, rev_30, sizeof(rev_30));
+    Write(h, 660, rev_10, sizeof(rev_10));
+    Write(h, 670, frame, Encode(0x00, outputs_only, sizeof(outputs_only), frame));
+    Write(h, 680, ident_reply, sizeof(ident_reply));
+    Write(h, 690, rev_13, sizeof(rev_13));
+    Write(h, 700, rev_30, sizeof(rev_30));
+    Write(h, 710, rev_10, sizeof(rev_10));
+    Write(h, 720, features_analog, sizeof(features_analog));
+    CHECK(h->presence[0] == 1 && h->presence[1] == 1 && h->presence[2] == 0);
+    CHECK(State(h)->board_info[1].first_player == 0 && h->identity[0].naxes == 8 && h->identity[1].naxes == 0);
+    /* Only board 2 has something to poll */
+    n = Encode(0x02, poll_data, sizeof(poll_data), poll);
+    h->cursor = h->ncalls - 1;
+    CHECK(H_IsWrite(H_NextCall(h), poll, n, 720));
+    /* Its answer, channel 1 at 0000 */
+    Write(h, 730, analog_min, sizeof(analog_min));
+    CHECK(H_Axis(h, 0, 0) == -32768 && H_Axis(h, 0, 1) == 0 && H_Axis(h, 1, 0) == 0 && State(h)->errors == 0);
     H_Destroy(h);
 }
 
@@ -830,12 +999,16 @@ int main(void)
     TestFraming();
     TestStartup();
     TestScan();
+    TestNothingToPoll();
+    TestNoPlayers();
     TestSwitches();
     TestCoins();
     TestAnalog();
     TestErrors();
     TestOutput();
     TestTwoBoards();
+    TestAnalogFirstBoard();
+    TestAnalogLaterBoard();
     TestBatteryB();
     TestBatteryA();
     return H_Finish();

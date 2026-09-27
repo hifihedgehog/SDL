@@ -24,7 +24,9 @@
 #include <string.h>
 
 /* A module that keeps a deadline in the past, or keeps queuing actions that
- * finish at once, cannot hold the port thread longer than this many steps */
+ * finish at once, cannot hold one engine call longer than this many steps.
+ * The deadline after such a call is 1 ms away, so the port thread waits
+ * between calls. */
 #define SERIAL_MAX_STEPS 256
 
 #define SERIAL_NS_PER_MS 1000000
@@ -187,6 +189,7 @@ static void Engine_Close(SDL_SerialEngine *engine)
     engine->configured = false;
     engine->busy = false;
     engine->breaking = false;
+    engine->stalled = false;
     Engine_ClearPresence(engine);
 }
 
@@ -288,7 +291,16 @@ static void Engine_Execute(SDL_SerialEngine *engine, const SDL_SerialAction *act
         break;
     case SDL_SERIAL_ACTION_BREAK:
         if (!engine->ops->Escape(engine->userdata, action->on ? SDL_SERIAL_SETBREAK : SDL_SERIAL_CLRBREAK)) {
-            Engine_Lose(engine);
+            /* A USB serial device without break support can refuse a
+             * break, and bemanitools ignores the result of both calls of its
+             * reset. A refused end of a break the port holds can leave the
+             * line in the break, so that is port loss, and the close tries
+             * once more. */
+            if (!action->on && engine->breaking) {
+                Engine_Lose(engine);
+                break;
+            }
+            Engine_Done(engine, false);
             break;
         }
         engine->breaking = action->on;
@@ -312,8 +324,10 @@ static bool Engine_CloseIfDone(SDL_SerialEngine *engine)
 
 static void Engine_Pump(SDL_SerialEngine *engine)
 {
+    const bool was_stalled = engine->stalled;
     int step;
 
+    engine->stalled = false;
     for (step = 0; step < SERIAL_MAX_STEPS && engine->open; ++step) {
         SDL_SerialAction action;
         uint64_t deadline;
@@ -331,7 +345,15 @@ static void Engine_Pump(SDL_SerialEngine *engine)
         }
         break;
     }
-    (void)Engine_CloseIfDone(engine);
+    if (Engine_CloseIfDone(engine)) {
+        return;
+    }
+    if (step == SERIAL_MAX_STEPS && engine->open) {
+        engine->stalled = true;
+        if (!was_stalled && engine->ops->Log) {
+            engine->ops->Log(engine->userdata, "The module used all 256 steps of one engine call, so the next call waits 1 ms");
+        }
+    }
 }
 
 static void Engine_TryOpen(SDL_SerialEngine *engine)
@@ -439,6 +461,11 @@ bool SDL_SerialEngine_GetDeadline(const SDL_SerialEngine *engine, uint64_t *dead
             return false;
         }
         *deadline = engine->retry_at;
+        return true;
+    }
+    if (engine->stalled) {
+        /* The last call ran out of steps with work left */
+        *deadline = engine->now + 1;
         return true;
     }
     if (!engine->configured) {
@@ -781,4 +808,127 @@ void SDL_Serial_DiffPorts(const SDL_SerialPortEntry *old_entries, int nold, cons
             }
         }
     }
+}
+
+/* Decisions of the Windows port layer */
+
+void SDL_Serial_ClearOutbox(SDL_SerialOutbox *outbox)
+{
+    memset(outbox, 0, sizeof(*outbox));
+}
+
+bool SDL_Serial_PostOutput(SDL_SerialOutbox *outbox, const SDL_SerialModule *module, const SDL_SerialOutput *request)
+{
+    if (request->sub < 0 || request->sub >= SDL_SERIAL_MAX_SUBDEVICES) {
+        return false;
+    }
+    if (request->kind == SDL_SERIAL_OUTPUT_EFFECT && module->queue_effects) {
+        if (outbox->count == SDL_SERIAL_OUTPUT_QUEUE) {
+            return false;
+        }
+        outbox->queued[(outbox->head + outbox->count) % SDL_SERIAL_OUTPUT_QUEUE] = *request;
+        ++outbox->count;
+        return true;
+    }
+    outbox->latest[request->sub] = *request;
+    outbox->latest_set[request->sub] = true;
+    return true;
+}
+
+/* A queued effect waits while the module has an action queued. A port that
+   does not read, or that closes, drops every request, so nothing waits for
+   it. */
+static bool Engine_OutputWaits(const SDL_SerialEngine *engine)
+{
+    if (engine->stopping || !SDL_SerialEngine_IsReading(engine)) {
+        return false;
+    }
+    return ((const SDL_SerialBase *)engine->state)->action_count > 0;
+}
+
+bool SDL_Serial_TakeOutput(SDL_SerialOutbox *outbox, const SDL_SerialEngine *engine, SDL_SerialOutput *request)
+{
+    int sub;
+
+    for (sub = 0; sub < SDL_SERIAL_MAX_SUBDEVICES; ++sub) {
+        if (outbox->latest_set[sub]) {
+            outbox->latest_set[sub] = false;
+            *request = outbox->latest[sub];
+            return true;
+        }
+    }
+    if (outbox->count == 0 || Engine_OutputWaits(engine)) {
+        return false;
+    }
+    *request = outbox->queued[outbox->head];
+    outbox->head = (outbox->head + 1) % SDL_SERIAL_OUTPUT_QUEUE;
+    --outbox->count;
+    return true;
+}
+
+SDL_SerialEffectCheck SDL_Serial_CheckEffect(const SDL_SerialModule *module, const uint8_t *data, size_t length)
+{
+    if (module->effect_max == 0) {
+        return SDL_SERIAL_EFFECT_UNSUPPORTED;
+    }
+    /* SDL_SerialOutput carries SDL_SERIAL_MAX_EFFECT bytes whatever the
+       module's range says */
+    if (!data || length < module->effect_min || length > module->effect_max || length > SDL_SERIAL_MAX_EFFECT) {
+        return SDL_SERIAL_EFFECT_BAD_SIZE;
+    }
+    if (module->ValidEffect && !module->ValidEffect(data, length)) {
+        return SDL_SERIAL_EFFECT_INVALID;
+    }
+    return SDL_SERIAL_EFFECT_OK;
+}
+
+uint32_t SDL_SerialEngine_GetWait(const SDL_SerialEngine *engine, uint64_t now, bool read_posted, bool read_idle)
+{
+    uint64_t deadline;
+    uint32_t wait = SDL_SERIAL_WAIT_FOREVER;
+
+    if (SDL_SerialEngine_GetDeadline(engine, &deadline)) {
+        wait = (deadline <= now) ? 0 : (uint32_t)((deadline - now < 0x7FFFFFFF) ? deadline - now : 0x7FFFFFFF);
+    }
+    if (!read_posted && SDL_SerialEngine_IsReading(engine)) {
+        if (!read_idle) {
+            wait = 0;
+        } else if (wait > SDL_SERIAL_IDLE_POLL_MS) {
+            wait = SDL_SERIAL_IDLE_POLL_MS;
+        }
+    }
+    return wait;
+}
+
+void SDL_Serial_GUIDKey(char *key, size_t size, uint16_t name_crc, int sub, const char *name)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char prefix[6];
+    size_t used, length = strlen(name);
+
+    if (size == 0) {
+        return;
+    }
+    prefix[0] = hex[(name_crc >> 12) & 0xF];
+    prefix[1] = hex[(name_crc >> 8) & 0xF];
+    prefix[2] = hex[(name_crc >> 4) & 0xF];
+    prefix[3] = hex[name_crc & 0xF];
+    prefix[4] = hex[sub & 0xF];
+    prefix[5] = ' ';
+    used = (size - 1 < sizeof(prefix)) ? size - 1 : sizeof(prefix);
+    memcpy(key, prefix, used);
+    if (length > size - 1 - used) {
+        length = size - 1 - used;
+    }
+    memcpy(key + used, name, length);
+    key[used + length] = '\0';
+}
+
+uint64_t SDL_Serial_EventStamp(uint64_t *last, uint64_t stamp)
+{
+    if (stamp < *last) {
+        stamp = *last;
+    }
+    *last = stamp;
+    return stamp;
 }

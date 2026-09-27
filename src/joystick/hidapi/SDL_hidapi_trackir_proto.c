@@ -328,10 +328,15 @@ static int16_t TrackIR_Axis(uint64_t sum, uint32_t pixels, uint16_t size)
 }
 
 /* A blob is done. The largest of the frame wins, and on a tie the one
- * closed later, as pose.c:414-431 keeps the later index. */
+ * closed later, as pose.c:414-431 keeps the later index. A blob larger than
+ * SDL_TRACKIR_MAX_BLOB_PIXELS never wins, as image_process.c:480-482 skips
+ * it. */
 static void TrackIR_Close(SDL_TrackIRState *state, SDL_TrackIRBlob *blob)
 {
     blob->open = false;
+    if (blob->pixels > SDL_TRACKIR_MAX_BLOB_PIXELS) {
+        return;
+    }
     if (!state->have_best || blob->pixels >= state->best.pixels) {
         state->best = *blob;
         state->have_best = true;

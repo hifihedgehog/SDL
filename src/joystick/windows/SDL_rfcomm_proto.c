@@ -23,7 +23,19 @@
 
 #include "SDL_rfcomm_proto.h"
 
+#include <stdio.h>
 #include <string.h>
+
+/* Each family's code in its GUID key (SDL_RFCOMM_GUIDKey), in the order of
+   SDL_RFCOMMFamily. Every GUID the driver makes carries one, so a code never
+   changes once shipped, and a new family takes a code no other has. */
+static const char *const rfcomm_guid_codes[SDL_RFCOMM_FAMILY_COUNT] = {
+    "",    /* None, which never runs */
+    "MOG", /* PowerA MOGA */
+    "ZEE", /* Zeemote JS1 */
+    "BGP", /* Chainpus BGP100 */
+    "PHJ"  /* Phonejoy */
+};
 
 static char RFCOMM_Upper(char c)
 {
@@ -119,7 +131,7 @@ static void RFCOMM_CopyName(char *dst, const char *src)
     SDL_RFCOMM_CopyText(dst, SDL_RFCOMM_NAME_LENGTH, src);
 }
 
-int SDL_RFCOMM_SelectDevices(const SDL_RFCOMMPaired *paired, int count, const bool *enabled, SDL_RFCOMMDevice *devices, int max)
+int SDL_RFCOMM_SelectDevices(const SDL_RFCOMMPaired *paired, int count, const bool *enabled, SDL_RFCOMMDevice *devices, int max, SDL_RFCOMMIgnoreFunc ignore, void *userdata)
 {
     int selected = 0, i, j;
 
@@ -149,6 +161,10 @@ int SDL_RFCOMM_SelectDevices(const SDL_RFCOMMPaired *paired, int count, const bo
         devices[selected].address = paired[i].address;
         devices[selected].family = family;
         RFCOMM_CopyName(devices[selected].name, name);
+        /* A device left out is written over by the next one */
+        if (ignore && ignore(userdata, &devices[selected])) {
+            continue;
+        }
         ++selected;
     }
     return selected;
@@ -209,12 +225,13 @@ void SDL_RFCOMM_End(SDL_RFCOMMBase *base)
     base->end = true;
 }
 
+/* NULL when the queue is full, a guard only: between two drains the link
+   queues at most one connect or close and the family module's few sends */
 static SDL_RFCOMMAction *RFCOMM_Append(SDL_RFCOMMLink *link, SDL_RFCOMMActionKind kind)
 {
     SDL_RFCOMMAction *action;
 
     if (link->action_count >= SDL_RFCOMM_MAX_ACTIONS) {
-        ++link->dropped_actions;
         return NULL;
     }
     action = &link->actions[(link->action_head + link->action_count) % SDL_RFCOMM_MAX_ACTIONS];
@@ -411,4 +428,23 @@ int16_t SDL_RFCOMM_AxisFromS8Negated(uint8_t value)
 int16_t SDL_RFCOMM_TriggerFromU8(uint8_t value)
 {
     return (int16_t)((int32_t)value * 257 - 32768);
+}
+
+void SDL_RFCOMM_GUIDKey(char *key, size_t size, SDL_RFCOMMFamily family, uint16_t name_crc, const char *name)
+{
+    const char *code = (family > SDL_RFCOMM_FAMILY_NONE && family < SDL_RFCOMM_FAMILY_COUNT) ? rfcomm_guid_codes[family] : "";
+
+    if (!key || size == 0) {
+        return;
+    }
+    (void)snprintf(key, size, "%s%04X %s", code, (unsigned int)name_crc, name ? name : "");
+}
+
+uint64_t SDL_RFCOMM_EventStamp(uint64_t *last, uint64_t stamp)
+{
+    if (stamp < *last) {
+        return *last;
+    }
+    *last = stamp;
+    return stamp;
 }

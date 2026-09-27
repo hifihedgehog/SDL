@@ -45,7 +45,7 @@
 #define SDL_BLE_BACKOFF_MS           15000  /* The first backoff, doubled each time */
 #define SDL_BLE_BACKOFF_MAX_MS       300000
 #define SDL_BLE_CONNECT_RETRY_MS     5000   /* The fixed wait after a failed connect */
-#define SDL_BLE_PAIRING_TRIES        3      /* Failed pairings before the backoff applies */
+#define SDL_BLE_PAIRING_TRIES        3      /* Failed pairings, or links lost during a bond removal, before the backoff applies */
 #define SDL_BLE_MAX_SESSION_ACTIONS  8
 #define SDL_BLE_START_TIMEOUT_MS     30000  /* A session not ready this long after its start ends */
 
@@ -100,9 +100,11 @@ typedef struct SDL_BLEHostEntry
 {
     uint64_t address;
     bool active;       /* A session runs for it */
+    bool restart_on_end; /* SDL_BLEHost_ClearBackoff ran during that session */
     uint64_t until;    /* No session starts before this time */
     uint8_t failures;  /* Backoffs in a row */
     uint8_t pairing_failures; /* Failed pairings since its last publish or SDL_BLEHost_ClearBackoff */
+    uint8_t removal_losses;   /* Links lost during a bond removal, counted the same way */
 } SDL_BLEHostEntry;
 
 typedef struct SDL_BLEHost
@@ -119,6 +121,7 @@ typedef struct SDL_BLEOutcome
     bool pairing_failed; /* A pairing failed, or the link dropped while one was out, and ended it */
     bool connect_failed; /* The connect failed, no session could run, or the link dropped before the joystick
                             appeared, in any phase but SDL_BLE_PHASE_REPAIRING */
+    bool removal_lost;   /* The link dropped while a bond removal was out, and ended it */
 } SDL_BLEOutcome;
 
 extern void SDL_BLEHost_Init(SDL_BLEHost *host);
@@ -129,20 +132,25 @@ extern bool SDL_BLEHost_Advertise(SDL_BLEHost *host, const SDL_BLEFamily *const 
                                   const bool *enabled, const SDL_BLEAdvertisement *ad, uint64_t now,
                                   SDL_BLEMatch *match);
 /* A session has ended and its address is free once its wait is over:
-   - A publish clears the schedule and the failed pairings.
+   - A publish clears the schedule and both counts below.
    - A backoff arms the next step of the schedule, 15 s doubling to 300 s.
    - A failed pairing counts. Once SDL_BLE_PAIRING_TRIES have failed since
      the last publish or SDL_BLEHost_ClearBackoff, each arms the schedule as
      a backoff does.
+   - A link lost during a bond removal counts the same way, apart from the
+     failed pairings.
    - Without a backoff, a failed connect, which includes most links lost
      before the joystick appeared (SDL_BLESession_Lost), waits
-     SDL_BLE_CONNECT_RETRY_MS, and the schedule does not advance. */
+     SDL_BLE_CONNECT_RETRY_MS, and the schedule does not advance.
+   - When SDL_BLEHost_ClearBackoff ran during the session, the address then
+     waits no more, and its schedule and counts start over. */
 extern void SDL_BLEHost_SessionEnded(SDL_BLEHost *host, uint64_t address, const SDL_BLEOutcome *outcome, uint64_t now);
 /* Every address without a session waits no more, and its schedule and its
-   failed pairings start over. An address with a session keeps its
-   reservation and its counts. The driver calls it when the pairing hint
-   changes, since a wait earned under the old setting says nothing under the
-   new one. */
+   counts start over. An address with a session keeps its reservation, and
+   its wait and counts start over when that session ends. The driver calls it
+   when the pairing hint changes, since a wait earned under the old setting
+   says nothing under the new one, and a session that runs as it changes
+   began under the old setting. */
 extern void SDL_BLEHost_ClearBackoff(SDL_BLEHost *host);
 extern bool SDL_BLEHost_IsActive(const SDL_BLEHost *host, uint64_t address);
 
@@ -258,6 +266,7 @@ typedef struct SDL_BLESession
     bool pairing_failed; /* The session ended on a failed pairing, or on a loss while one was out */
     bool connect_failed; /* The session ended without opening the device, or lost the link before the publish
                             outside SDL_BLE_PHASE_REPAIRING */
+    bool removal_lost;   /* The session ended on a loss while a bond removal was out */
     uint64_t start_deadline; /* The start's time plus SDL_BLE_START_TIMEOUT_MS */
     bool found[SDL_BLE_MAX_CHARS];
     uint8_t properties[SDL_BLE_MAX_CHARS];
@@ -310,7 +319,8 @@ extern void SDL_BLESession_Value(SDL_BLESession *session, int characteristic, co
                                  bool gap, uint64_t time_ns);
 /* The link dropped. Before the publish, in any phase but
    SDL_BLE_PHASE_REPAIRING, the outcome reports connect_failed. A loss while
-   a pairing is out also reports pairing_failed. */
+   a pairing is out also reports pairing_failed, and one while a bond removal
+   is out reports removal_lost. */
 extern void SDL_BLESession_Lost(SDL_BLESession *session, uint64_t now);
 /* End the session on purpose, sending the module's closing writes first */
 extern void SDL_BLESession_Close(SDL_BLESession *session, uint64_t now);

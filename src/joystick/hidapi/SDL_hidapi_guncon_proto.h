@@ -23,10 +23,11 @@
  * runtime and no I/O, so every decision here runs in the offline tests
  * exactly as it runs in the library.
  *
- * GunCon 2, 0B9A:016A, which the EMS LCD TopGun shares: one vendor-class
- * interface with one interrupt IN endpoint. The host sends one mode request
- * as a SET_REPORT control transfer, then reads 6-byte reports with the
- * buttons active low and the beam position in raw counts.
+ * GunCon 2, 0B9A:016A: one vendor-class interface with one interrupt IN
+ * endpoint. The host sends one mode request as a SET_REPORT control
+ * transfer, then reads 6-byte reports with the buttons active low and the
+ * beam position in raw counts. The EMS LCD TopGun shares the ID, and no
+ * source records its interface class.
  *
  * GunCon 3, 0B9A:0800: the host writes an 8-byte key to the interrupt OUT
  * endpoint, and the gun answers with 15-byte encrypted reports. This module

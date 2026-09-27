@@ -27,6 +27,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "../../hidapi/SDL_hidapi_c.h"
 #include "SDL_hidapi_dreamcheeky_proto.h"
+#include "../../hidapi/SDL_hidapi_collections.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_DREAMCHEEKY
 
@@ -52,9 +53,29 @@ static bool HIDAPI_DriverDreamCheeky_IsEnabled(void)
     return SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_DREAMCHEEKY, false);
 }
 
+/* Whether the collection declares an input report. Windows makes a device of
+   each top-level collection, and no source records the drum kit's. A
+   descriptor that cannot be read keeps the collection, as Android reads none
+   and makes one device per interface. */
+static bool HIDAPI_DriverDreamCheeky_DeclaresInput(SDL_hid_device *dev)
+{
+    unsigned char descriptor[4096];
+    SDL_HIDAPIReportIDs ids;
+    const int length = SDL_hid_get_report_descriptor(dev, descriptor, sizeof(descriptor));
+
+    if (length <= 0 || !SDL_HIDAPI_ParseReportIDs(descriptor, (size_t)length, &ids)) {
+        return true;
+    }
+    return SDL_HIDAPI_DeclaresInput(&ids);
+}
+
 static bool HIDAPI_DriverDreamCheeky_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
 {
-    return vendor_id == USB_VENDOR_DREAMCHEEKY && product_id == USB_PRODUCT_DREAMCHEEKY_DRUM_KIT;
+    if (vendor_id != USB_VENDOR_DREAMCHEEKY || product_id != USB_PRODUCT_DREAMCHEEKY_DRUM_KIT) {
+        return false;
+    }
+    // Once the collection is open, its descriptor decides
+    return !device || !device->dev || HIDAPI_DriverDreamCheeky_DeclaresInput(device->dev);
 }
 
 static bool HIDAPI_DriverDreamCheeky_InitDevice(SDL_HIDAPI_Device *device)

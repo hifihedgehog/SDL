@@ -135,9 +135,15 @@ static void BH_Sensor(void *userdata, int sensor, uint64_t time_ns, uint64_t sen
     memcpy(sample->data, data, sizeof(sample->data));
 }
 
+/* Lines the modules and the session logged, and the last of them */
+static int bh_log_lines;
+static char bh_log_last[128];
+
 static void BH_Log(void *userdata, const char *text)
 {
     (void)userdata;
+    ++bh_log_lines;
+    snprintf(bh_log_last, sizeof(bh_log_last), "%s", text);
     printf("  log: %s\n", text);
 }
 

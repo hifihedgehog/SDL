@@ -23,13 +23,14 @@
  * Part 14. Pure C99: no SDL runtime and no I/O, so every decision here runs in
  * the offline tests exactly as it runs in the library.
  *
- * Each camera has one vendor interface: commands go out on bulk OUT 0x02, and
- * bulk IN 0x82 carries a stream of packets. A packet starts with its total
- * size and a type: 1C holds stripes of bright pixels, 20 is status and 40 is
- * device information. The host starts the camera with a fixed sequence of
- * commands and delays, then joins the stripes of each frame into blobs. This
- * module times that sequence on an injected millisecond clock, parses the
- * stream, and keeps the largest blob of each frame.
+ * Each camera has one vendor interface: commands go out on OUT 0x02, and IN
+ * 0x82 carries a stream of packets, which linuxtrack reads with bulk calls.
+ * A packet starts with its total size and a type: 1C holds stripes of bright
+ * pixels, 20 is status and 40 is device information. The host starts the
+ * camera with a fixed sequence of commands and delays, then joins the stripes
+ * of each frame into blobs. This module times that sequence on an injected
+ * millisecond clock, parses the stream, and keeps the largest blob of each
+ * frame up to SDL_TRACKIR_MAX_BLOB_PIXELS.
  *
  * The protocol facts follow linuxtrack (MIT), which drives both cameras. No
  * code from it is copied.
@@ -59,6 +60,13 @@
 /* Every open blob belongs to a stripe of the previous line or of the newest
  * one, so this many slots never run out. */
 #define SDL_TRACKIR_OPEN_BLOBS (2 * SDL_TRACKIR_LINE_STRIPES)
+
+/* The largest blob that can be the dot, linuxtrack's default upper bound for
+ * the TrackIR (tir_driver_prefs.c:31), which image_process.c:480-482
+ * applies. A larger bright area, such as a lamp in view, never hides the
+ * dot. linuxtrack's lower bound of 4 pixels is not applied, so a blob of 1
+ * to 3 pixels still counts. */
+#define SDL_TRACKIR_MAX_BLOB_PIXELS 1024
 
 /* Start-up timing, in ms */
 #define SDL_TRACKIR_FLUSH_READS        3    /* Reads discarded before the information request */
@@ -136,7 +144,7 @@ typedef struct SDL_TrackIRState
     int previous;         /* ranges[previous] holds the line before blob_line */
     SDL_TrackIRBlob blobs[SDL_TRACKIR_OPEN_BLOBS];
     bool have_best;
-    SDL_TrackIRBlob best; /* The largest blob the frame closed so far */
+    SDL_TrackIRBlob best; /* The largest blob up to the size bound that the frame closed so far */
 
     /* What the joystick shows */
     int16_t axes[SDL_TRACKIR_AXES];

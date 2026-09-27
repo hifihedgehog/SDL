@@ -203,6 +203,7 @@ void SDL_Xbox360Acc_WiredStop(SDL_Xbox360AccWired *wired)
     wired->in_flight = false;
     wired->in_flight_extra = false;
     wired->send_1b = false;
+    wired->lamp_count = 0;
     Xbox360Acc_ChatpadGone(&wired->chatpad);
 }
 
@@ -216,6 +217,14 @@ bool SDL_Xbox360Acc_WiredNext(SDL_Xbox360AccWired *wired, uint64_t now_ms, SDL_X
         wired->in_flight = true;
         wired->in_flight_extra = true;
         Xbox360Acc_ChatpadCommand(control, 0x1B);
+        return true;
+    }
+    if (wired->lamp_count > 0) {
+        Xbox360Acc_ChatpadCommand(control, wired->lamps[0]);
+        --wired->lamp_count;
+        memmove(&wired->lamps[0], &wired->lamps[1], (size_t)wired->lamp_count);
+        wired->in_flight = true;
+        wired->in_flight_extra = true;
         return true;
     }
     if (now_ms < wired->due_ms) {
@@ -336,6 +345,18 @@ bool SDL_Xbox360Acc_WiredLamp(const uint8_t *effect, size_t size, SDL_Xbox360Acc
         return false;
     }
     Xbox360Acc_ChatpadCommand(control, effect[0]);
+    return true;
+}
+
+bool SDL_Xbox360Acc_WiredQueueLamp(SDL_Xbox360AccWired *wired, const uint8_t *effect, size_t size)
+{
+    SDL_Xbox360AccControl control;
+
+    if (!wired || !SDL_Xbox360Acc_WiredLamp(effect, size, &control) ||
+        wired->step == SDL_XBOX360ACC_WIRED_STOPPED || wired->lamp_count >= SDL_XBOX360ACC_WIRED_LAMP_QUEUE) {
+        return false;
+    }
+    wired->lamps[wired->lamp_count++] = effect[0];
     return true;
 }
 

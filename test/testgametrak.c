@@ -43,6 +43,8 @@ typedef struct TestUnit
     size_t length[MAX_WRITES];
     int after_report[MAX_WRITES]; /* The recording's report number the write followed, or 0 */
     int current_report;
+    uint64_t at_ms[MAX_WRITES]; /* The test clock at the write */
+    uint64_t now_ms;
 } TestUnit;
 
 static bool TestWrite(void *userdata, const uint8_t *data, size_t length)
@@ -54,6 +56,7 @@ static bool TestWrite(void *userdata, const uint8_t *data, size_t length)
         memcpy(unit->data[unit->writes], data, length);
         unit->length[unit->writes] = length;
         unit->after_report[unit->writes] = unit->current_report;
+        unit->at_ms[unit->writes] = unit->now_ms;
     }
     ++unit->writes;
     return true;
@@ -141,6 +144,32 @@ static void TestUnlock(void)
     memset(&unit, 0, sizeof(unit));
     SDL_Gametrak_Open(&session, 0, &sink);
     CHECK(session.key == 0x23 && session.sensor_reports == 0 && Written(&unit, 0, unlock, 8));
+
+    /* A unit that stays silent gets "Gametrak" again 1000 ms after each
+       45 23, three unlocks in all */
+    memset(&unit, 0, sizeof(unit));
+    SDL_Gametrak_Open(&session, 0, &sink);
+    for (t = 0; t <= 3500; ++t) {
+        unit.now_ms = t;
+        SDL_Gametrak_Update(&session, t, &sink);
+    }
+    CHECK(unit.writes == 6);
+    CHECK(Written(&unit, 0, unlock, 8) && unit.at_ms[0] == 0);
+    CHECK(Written(&unit, 1, start, 2) && unit.at_ms[1] == 10);
+    CHECK(Written(&unit, 2, unlock, 8) && unit.at_ms[2] == 1010);
+    CHECK(Written(&unit, 3, start, 2) && unit.at_ms[3] == 1020);
+    CHECK(Written(&unit, 4, unlock, 8) && unit.at_ms[4] == 2020);
+    CHECK(Written(&unit, 5, start, 2) && unit.at_ms[5] == 2030);
+
+    /* One sensor report after 45 23 ends the retries */
+    memset(&unit, 0, sizeof(unit));
+    SDL_Gametrak_Open(&session, 0, &sink);
+    CHECK(!Handle(&session, gametrak_capture[0], 16, &sink, &report));
+    CHECK(Handle(&session, gametrak_capture[1], 16, &sink, &report));
+    for (t = 0; t <= 3500; ++t) {
+        SDL_Gametrak_Update(&session, t, &sink);
+    }
+    CHECK(unit.writes == 2 && Written(&unit, 1, start, 2));
 }
 
 static void TestCapture(void)

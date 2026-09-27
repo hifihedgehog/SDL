@@ -99,6 +99,10 @@ DEFINE_GUID(GUID_Switch2VibeGC,   0x3f8fb670, 0xab25, 0x45bf, 0xb5, 0x40, 0x38, 
 // the effect without flooding the shared connection.
 #define BLE_RUMBLE_INTERVAL_MS 10
 
+// How often Detect has the transport check the shared watcher, the BLE GATT
+// driver's cadence (BLEGATT_WATCHER_CHECK_MS in SDL_blegattjoystick.c)
+#define BLE_WATCHER_CHECK_MS 2000
+
 // Per-axis stick calibration (reimplemented; the wired versions are file-static).
 typedef struct
 {
@@ -123,8 +127,8 @@ typedef struct BLE_Controller
     GattChar *vibration_char;
     EventRegistrationToken input_token;
     EventRegistrationToken response_token;
-    void *input_handler;    // heap delegate, freed in BLE_FreeController
-    void *response_handler; // heap delegate, freed in BLE_FreeController
+    void *input_handler;    // heap delegate, never freed, see BLE_FreeController
+    void *response_handler; // heap delegate, never freed, see BLE_FreeController
     EventRegistrationToken status_token;
     void *status_handler;   // ConnectionStatusChanged delegate, leaked like the others
     SDL_AtomicInt link_lost; // set by the status callback (MTA), drained by Detect
@@ -202,6 +206,7 @@ static struct
     bool initialized;
     bool transport; // holds a reference from SDL_BLEGATT_Init
     bool scanning;  // BLE_OnAdvertisement is added to the shared watcher
+    Uint64 watcher_checked; // when Detect last had the transport check the watcher
 
     BLE_Controller **controllers;
     int controller_count;
@@ -1301,9 +1306,11 @@ static bool BLE_JoystickInit(void)
     ble.transport = true;
 
     // Start the advertisement watcher, or join it when the generic BLE GATT
-    // driver started it first.
+    // driver started it first. A watcher whose start failed still counts,
+    // and Detect has it started again.
     if (SDL_BLEGATT_AddListener(BLE_OnAdvertisement, NULL)) {
         ble.scanning = true;
+        ble.watcher_checked = SDL_GetTicks();
     }
 
     ble.initialized = true;
@@ -1329,6 +1336,16 @@ static void BLE_JoystickDetect(void)
     // callback-touched state, so an in-flight callback on the dead controller
     // stays safe.
     int i;
+
+    // A watcher whose start failed, as with the radio off at Init, or one
+    // that aborted, as when the radio is turned off, never runs again by
+    // itself (SDL_ble_gatt.h). The transport puts a new one in place, as the
+    // BLE GATT driver's Detect has it do, since that driver checks the
+    // watcher only while one of its own families is on.
+    if (ble.scanning && SDL_GetTicks() - ble.watcher_checked >= BLE_WATCHER_CHECK_MS) {
+        ble.watcher_checked = SDL_GetTicks();
+        (void)SDL_BLEGATT_CheckWatcher();
+    }
     for (i = 0; i < ble.controller_count; ) {
         BLE_Controller *ctrl = ble.controllers[i];
         if (SDL_GetAtomicInt(&ctrl->link_lost)) {

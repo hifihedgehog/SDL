@@ -320,6 +320,12 @@ void SDL_IForce_QueryResult(SDL_IForceQueries *queries, const uint8_t *reply, si
     }
 }
 
+bool SDL_IForce_QueriesKnown(const SDL_IForceQueries *queries)
+{
+    /* iforce_queries[4] is N */
+    return queries->done || queries->step > 4;
+}
+
 void SDL_IForce_QuerySetup(uint8_t letter, SDL_IForceControlSetup *setup)
 {
     setup->request_type = SDL_IFORCE_QUERY_REQUEST_TYPE;
@@ -510,6 +516,7 @@ void SDL_IForce_InitFF(SDL_IForceFF *ff, int effects, uint16_t memory_end)
     memset(ff, 0, sizeof(*ff));
     ff->effects = (effects < 0) ? 0 : (effects > SDL_IFORCE_EFFECTS_MAX) ? SDL_IFORCE_EFFECTS_MAX : effects;
     ff->memory_end = memory_end;
+    ff->undo_index = -1;
 }
 
 /* First fit between 0 and memory_end, both included, as Linux's
@@ -762,7 +769,13 @@ static int IForce_Send(SDL_IForceSlot *slot, int index, const SDL_IForceEffect *
     }
     slot->effect = *effect;
     slot->used = true;
-    return (write[0] || write[1] || core) ? SDL_IFORCE_UPLOAD_SENT : SDL_IFORCE_UPLOAD_UNCHANGED;
+    if (!write[0] && !write[1] && !core) {
+        return SDL_IFORCE_UPLOAD_UNCHANGED;
+    }
+    /* A send starts the count of failed sends again, and SDL_IForce_Undo
+       puts the count back when it fails */
+    slot->failures = 0;
+    return SDL_IFORCE_UPLOAD_SENT;
 }
 
 static bool IForce_BlocksReady(const SDL_IForceSlot *slot, const bool write[2], uint64_t now, uint64_t *ready_at)
@@ -783,14 +796,30 @@ static bool IForce_BlocksReady(const SDL_IForceSlot *slot, const bool write[2], 
     return now >= latest;
 }
 
+/* Records the slot as it was before commands that change it, for
+   SDL_IForce_Undo */
+static void IForce_KeepUndo(SDL_IForceFF *ff, int index, const SDL_IForceSlot *before, const SDL_IForceCommands *commands)
+{
+    if (commands->count > 0) {
+        ff->undo_index = index;
+        ff->undo = *before;
+    }
+}
+
 int SDL_IForce_Upload(SDL_IForceFF *ff, int index, const SDL_IForceEffect *effect, uint64_t now,
                       SDL_IForceCommands *commands)
 {
     SDL_IForceSlot *slot;
+    SDL_IForceSlot before;
     bool write[2];
     bool core;
+    int result;
 
-    if (!ff || !effect || !commands || index < 0 || index >= ff->effects || !IForce_ValidEffect(effect)) {
+    if (!ff) {
+        return SDL_IFORCE_UPLOAD_INVALID;
+    }
+    ff->undo_index = -1;
+    if (!effect || !commands || index < 0 || index >= ff->effects || !IForce_ValidEffect(effect)) {
         return SDL_IFORCE_UPLOAD_INVALID;
     }
     commands->count = 0;
@@ -799,6 +828,7 @@ int SDL_IForce_Upload(SDL_IForceFF *ff, int index, const SDL_IForceEffect *effec
                        (effect->type == SDL_IFORCE_EFFECT_PERIODIC && slot->effect.waveform != effect->waveform))) {
         return SDL_IFORCE_UPLOAD_INVALID;
     }
+    before = *slot;
 
     if (!slot->used) {
         /* Linux keeps a first block whose second one found no room. It is
@@ -819,7 +849,9 @@ int SDL_IForce_Upload(SDL_IForceFF *ff, int index, const SDL_IForceEffect *effec
         return SDL_IFORCE_UPLOAD_DEFERRED;
     }
     slot->pending = false;
-    return IForce_Send(slot, index, effect, write, core, now, commands);
+    result = IForce_Send(slot, index, effect, write, core, now, commands);
+    IForce_KeepUndo(ff, index, &before, commands);
+    return result;
 }
 
 bool SDL_IForce_NextDeferred(SDL_IForceFF *ff, uint64_t now, SDL_IForceCommands *commands)
@@ -829,9 +861,11 @@ bool SDL_IForce_NextDeferred(SDL_IForceFF *ff, uint64_t now, SDL_IForceCommands 
     if (!ff || !commands) {
         return false;
     }
+    ff->undo_index = -1;
     commands->count = 0;
     for (i = 0; i < ff->effects; ++i) {
         SDL_IForceSlot *slot = &ff->slots[i];
+        SDL_IForceSlot before;
         bool write[2];
         bool core;
 
@@ -842,11 +876,52 @@ bool SDL_IForce_NextDeferred(SDL_IForceFF *ff, uint64_t now, SDL_IForceCommands 
         if (!IForce_BlocksReady(slot, write, now, NULL)) {
             continue;
         }
+        before = *slot;
         slot->pending = false;
         IForce_Send(slot, i, &slot->next, write, core, now, commands);
+        IForce_KeepUndo(ff, i, &before, commands);
         return true;
     }
     return false;
+}
+
+void SDL_IForce_Undo(SDL_IForceFF *ff)
+{
+    SDL_IForceSlot *slot;
+
+    if (!ff || ff->undo_index < 0 || ff->undo_index >= ff->effects) {
+        return;
+    }
+    slot = &ff->slots[ff->undo_index];
+    if (ff->undo.used) {
+        /* The blocks keep the time of the failed try */
+        slot->effect = ff->undo.effect;
+        slot->pending = ff->undo.pending;
+        slot->failures = ff->undo.failures;
+        slot->next = ff->undo.next;
+    } else {
+        *slot = ff->undo;
+    }
+    ff->undo_index = -1;
+}
+
+int SDL_IForce_DeferredFailed(SDL_IForceFF *ff)
+{
+    SDL_IForceSlot *slot;
+    int index;
+
+    if (!ff || ff->undo_index < 0 || ff->undo_index >= ff->effects) {
+        return -1;
+    }
+    index = ff->undo_index;
+    SDL_IForce_Undo(ff);
+    slot = &ff->slots[index];
+    if (!slot->pending || ++slot->failures < SDL_IFORCE_SEND_TRIES) {
+        return -1;
+    }
+    slot->pending = false;
+    slot->failures = 0;
+    return index;
 }
 
 bool SDL_IForce_DeferredDeadline(const SDL_IForceFF *ff, uint64_t *deadline)
@@ -887,5 +962,8 @@ void SDL_IForce_Erase(SDL_IForceFF *ff, int index)
 {
     if (ff && index >= 0 && index < ff->effects) {
         memset(&ff->slots[index], 0, sizeof(ff->slots[index]));
+        if (ff->undo_index == index) {
+            ff->undo_index = -1;
+        }
     }
 }

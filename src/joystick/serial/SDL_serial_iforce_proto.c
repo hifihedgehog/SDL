@@ -224,5 +224,7 @@ const SDL_SerialModule SDL_SerialIForceModule = {
     IForce_ActionDone,
     IForce_Output,
     IForce_GetDeadline,
-    SDL_Serial_GetSnapshot
+    SDL_Serial_GetSnapshot,
+    true,
+    SDL_IForce_IsCommand
 };

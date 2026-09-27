@@ -85,10 +85,15 @@ typedef struct SDL_RFCOMMDevice
     char name[SDL_RFCOMM_NAME_LENGTH];
 } SDL_RFCOMMDevice;
 
-/* The paired devices whose family is enabled, in list order. A repeated
- * address keeps its first entry. enabled is indexed by SDL_RFCOMMFamily.
- * Returns the number of devices. */
-extern int SDL_RFCOMM_SelectDevices(const SDL_RFCOMMPaired *paired, int count, const bool *enabled, SDL_RFCOMMDevice *devices, int max);
+/* Asked about each paired device the selection would take, with the family
+ * and the name it would run with. True leaves the device out. */
+typedef bool (*SDL_RFCOMMIgnoreFunc)(void *userdata, const SDL_RFCOMMDevice *device);
+
+/* The paired devices whose family is enabled and that ignore does not leave
+ * out, in list order. A device left out takes no place. A repeated address
+ * keeps its first entry. enabled is indexed by SDL_RFCOMMFamily, and ignore
+ * may be NULL. Returns the number of devices. */
+extern int SDL_RFCOMM_SelectDevices(const SDL_RFCOMMPaired *paired, int count, const bool *enabled, SDL_RFCOMMDevice *devices, int max, SDL_RFCOMMIgnoreFunc ignore, void *userdata);
 
 typedef enum SDL_RFCOMMChange
 {
@@ -149,7 +154,7 @@ typedef enum SDL_RFCOMMPhase
 typedef enum SDL_RFCOMMActionKind
 {
     SDL_RFCOMM_ACTION_CONNECT, /* channel 0 connects by the module's service UUID */
-    SDL_RFCOMM_ACTION_SEND,    /* A failure is reported with SDL_RFCOMMLink_Lost */
+    SDL_RFCOMM_ACTION_SEND,    /* A failed or short send, or one that would block, is reported with SDL_RFCOMMLink_Lost */
     SDL_RFCOMM_ACTION_CLOSE    /* Close the socket */
 } SDL_RFCOMMActionKind;
 
@@ -178,11 +183,10 @@ typedef struct SDL_RFCOMMLink
     uint64_t connect_at;
     uint8_t channel; /* Of the connect in progress, 0 for the service UUID */
     int player_index;
-    uint32_t connects; /* Connect actions queued, for the log */
+    uint32_t connects; /* Connect actions queued, read by the tests */
     SDL_RFCOMMAction actions[SDL_RFCOMM_MAX_ACTIONS];
     int action_head;
     int action_count;
-    uint32_t dropped_actions;
 } SDL_RFCOMMLink;
 
 /* Waiting, with the first connect due at once */
@@ -209,5 +213,24 @@ extern int16_t SDL_RFCOMM_AxisFromS8(uint8_t value);
 extern int16_t SDL_RFCOMM_AxisFromS8Negated(uint8_t value);
 /* An unsigned 8-bit trigger, 0 at rest, as -32768 to 32767 */
 extern int16_t SDL_RFCOMM_TriggerFromU8(uint8_t value);
+
+#define SDL_RFCOMM_GUID_KEY_LENGTH (SDL_SERIAL_NAME_LENGTH + 8)
+
+/* The product name in a joystick's GUID. The GUID has no vendor, so
+ * SDL_CreateJoystickGUID keeps only the first 9 bytes of that name, and SDL
+ * stores an automatic gamepad mapping without the name's CRC, so two
+ * joysticks whose names share those bytes, such as "Zeemote JS1" and
+ * "Zeemote JS1 H", share one mapping and its name. The key is the family's
+ * three-letter code, the name's CRC-16 (SDL_crc16) as four hex digits, a
+ * space, then the name, so two joysticks share the kept bytes only when
+ * their families, CRCs and first letters match. SDL_RFCOMM_GUID_KEY_LENGTH
+ * bytes hold the key of any identity's name, and a smaller buffer cuts the
+ * name. */
+extern void SDL_RFCOMM_GUIDKey(char *key, size_t size, SDL_RFCOMMFamily family, uint16_t name_crc, const char *name);
+
+/* The time of a joystick's next event: stamp, or the time of the event
+ * before it when that is later, so one joystick's events never go back in
+ * time. last holds the time of the event before and moves to the result. */
+extern uint64_t SDL_RFCOMM_EventStamp(uint64_t *last, uint64_t stamp);
 
 #endif /* SDL_rfcomm_proto_h_ */

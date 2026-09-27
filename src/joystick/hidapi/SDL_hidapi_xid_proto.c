@@ -142,6 +142,14 @@ bool SDL_XID_IsKnownID(uint16_t vendor, uint16_t product)
     return SDL_XID_FindKnownDevice(vendor, product) != NULL || SDL_XID_IsSteelBattalionID(vendor, product);
 }
 
+bool SDL_XID_IsXIDJoystick(int interface_class, uint16_t vendor, uint16_t product)
+{
+    if (interface_class >= 0) {
+        return interface_class == SDL_XID_INTERFACE_CLASS;
+    }
+    return SDL_XID_IsKnownID(vendor, product);
+}
+
 // The joystick type a gamepad-family subtype gives, or -1 when the subtype is not known
 static int XID_TypeForSubtype(uint8_t subtype)
 {
@@ -207,6 +215,10 @@ bool SDL_XID_Identify(uint16_t vendor, uint16_t product, const SDL_XIDDescriptor
         out->light_gun = (descriptor->subtype == SDL_XID_SUBTYPE_LIGHT_GUN);
         out->dance = (descriptor->subtype == SDL_XID_SUBTYPE_DANCE_PAD);
         out->guid_byte = descriptor->subtype;
+        // 0xFF is in no subtype list, and as a GUID byte it is the Steel Battalion's, which has no mapping
+        if (out->guid_byte == SDL_XID_GUID_STEEL_BATTALION) {
+            out->guid_byte = 0;
+        }
     }
     /* Linux applies these per ID, whatever the pad reports: a dance pad's
        arrows are four independent buttons, and its sticks are not read. */
@@ -491,20 +503,26 @@ bool SDL_XID_Open(SDL_XIDSession *session, uint16_t vendor, uint16_t product, ui
     SDL_XIDDescriptor descriptor;
     const SDL_XIDDescriptor *parsed = NULL;
     int received;
+    int attempt;
 
     if (!session || !sink) {
         return false;
     }
     memset(session, 0, sizeof(*session));
-    session->interface_number = interface_number;
 
-    memset(reply, 0, sizeof(reply));
-    received = sink->control_in(sink->userdata, SDL_XID_REQUEST_TYPE_VENDOR_IN, SDL_XID_REQUEST_GET_DESCRIPTOR,
-                                SDL_XID_DESCRIPTOR_VALUE, interface_number, reply, SDL_XID_DESCRIPTOR_LENGTH,
-                                SDL_XID_REQUEST_TIMEOUT_MS);
-    if (received > 0 && received <= SDL_XID_DESCRIPTOR_LENGTH &&
-        SDL_XID_ParseDescriptor(reply, (size_t)received, &descriptor)) {
-        parsed = &descriptor;
+    /* A reply that does not parse is asked for again, up to three requests
+       in all, the count Linux's usb_get_descriptor gives flaky devices.
+       Linux does not repeat a request that timed out after 5 seconds. These
+       time out after 100 ms, so a timeout is repeated too. */
+    for (attempt = 0; attempt < SDL_XID_DESCRIPTOR_ATTEMPTS && !parsed; ++attempt) {
+        memset(reply, 0, sizeof(reply));
+        received = sink->control_in(sink->userdata, SDL_XID_REQUEST_TYPE_VENDOR_IN, SDL_XID_REQUEST_GET_DESCRIPTOR,
+                                    SDL_XID_DESCRIPTOR_VALUE, interface_number, reply, SDL_XID_DESCRIPTOR_LENGTH,
+                                    SDL_XID_REQUEST_TIMEOUT_MS);
+        if (received > 0 && received <= SDL_XID_DESCRIPTOR_LENGTH &&
+            SDL_XID_ParseDescriptor(reply, (size_t)received, &descriptor)) {
+            parsed = &descriptor;
+        }
     }
     if (!SDL_XID_Identify(vendor, product, parsed, product_string, &session->identity)) {
         return false;

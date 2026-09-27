@@ -24,9 +24,10 @@
  *
  * Output report 6, 01 C1, starts the music keys. Report 3 carries note and
  * velocity pairs, a note byte below 0x81 a press and 0x81 and above a
- * release. Report 4 carries a 24-bit mask of extra keys. Report 1 stays with
- * Windows. The facts are from Linux hid-prodikeys and the linux-input and
- * alsa-devel threads. No code is copied.
+ * release. Report 4 carries a 24-bit mask of extra keys. Reports 1 and 2,
+ * the media and sleep keys, are not read. The facts are from Linux
+ * hid-prodikeys and the linux-input and alsa-devel threads. No code is
+ * copied.
  */
 
 #ifndef SDL_hidapi_prodikeys_proto_h_
@@ -58,7 +59,9 @@ extern void SDL_Prodikeys_BuildStart(uint8_t out[SDL_PRODIKEYS_START_LENGTH]);
  * key reports 3 or 4. The driver opens only that collection of interface 1. */
 extern bool SDL_Prodikeys_CarriesKeys(const uint8_t input_report_ids[32]);
 
-/* Applies one report. Returns true for report 3 or a complete report 4. */
+/* Applies one report. Returns true for report 3 and for a report 4 of 3
+ * bytes or more. Three bytes, the length its descriptor declares, carry mask
+ * bits 8-23 and leave bits 0-7 as they were. Four carry all 24. */
 extern bool SDL_Prodikeys_HandleReport(SDL_ProdikeysState *state, const uint8_t *report, size_t length);
 
 extern bool SDL_Prodikeys_IsButtonDown(const SDL_ProdikeysState *state, int button);

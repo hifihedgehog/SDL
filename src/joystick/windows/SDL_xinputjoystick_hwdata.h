@@ -37,6 +37,7 @@ struct joystick_hwdata
     DWORD dwPacketNumber;
     SDL_GUID guid;      // The enumerated GUID, for the paddle reader during Open
     int rb3pro_variant; // A Rock Band 3 Pro instrument, subtype 15 or 25
+    BYTE rb3pro_extra[6]; // Its six trailing XUSB bytes in the last state posted
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
     void *paddle_context;
 #endif

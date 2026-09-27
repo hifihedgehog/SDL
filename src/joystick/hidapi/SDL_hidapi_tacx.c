@@ -25,6 +25,7 @@
 #include "../../SDL_hints_c.h"
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
+#include "SDL_hidapi_rumble.h"
 #include "SDL_hidapi_tacx_proto.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_TACX
@@ -32,12 +33,14 @@
 /* Tacx trainer head units (hifihedgehog/SDL#33 Part 14): the T1904 and the
  * T1932. Their interface 0 is read through libusb once WinUSB is bound, with
  * the transfer type its endpoint descriptors give. The head unit asks the
- * brake only after a frame from the host, so the version request and then a
- * stop frame every 100 ms go out from UpdateDevice, which runs for every
- * device whether or not a joystick is open. The joystick appears with the
- * first data reply and goes 1000 ms after the last one. The driver never sets
- * a resistance. The protocol and its timing live in SDL_hidapi_tacx_proto.c,
- * where the offline tests run them. */
+ * brake only after a frame from the host, so UpdateDevice, which runs for
+ * every device whether or not a joystick is open, hands out the version
+ * request and then a stop frame every 100 ms. The HIDAPI rumble thread
+ * writes each frame, since UpdateDevice runs with the joystick lock held and
+ * a bulk write waits up to its 1000 ms timeout while the endpoint NAKs. The
+ * joystick appears with the first data reply and goes 1000 ms after the last
+ * one. The driver never sets a resistance. The protocol and its timing live
+ * in SDL_hidapi_tacx_proto.c, where the offline tests run them. */
 
 typedef struct
 {
@@ -169,11 +172,14 @@ static bool HIDAPI_DriverTacx_UpdateDevice(SDL_HIDAPI_Device *device)
 
     HIDAPI_DriverTacx_Apply(ctx, SDL_Tacx_Tick(&ctx->state, SDL_GetTicksNS()));
 
-    /* At most one frame per update, the next one due 100 ms after this
-       write completes */
+    /* At most one frame per update, queued for the rumble thread, and the
+       next one due 100 ms after this one is queued. The version request and
+       the stop frame differ in size, so the queue never merges one into the
+       other. */
     if (SDL_Tacx_NextFrame(&ctx->state, SDL_GetTicksNS(), frame, &length)) {
-        const int written = SDL_hid_write(device->dev, frame, length);
-        SDL_Tacx_FrameDone(&ctx->state, written, SDL_GetTicksNS());
+        const int queued = SDL_HIDAPI_SendRumble(device, frame, (int)length);
+
+        SDL_Tacx_FrameDone(&ctx->state, queued, SDL_GetTicksNS());
     }
     return true;
 }
@@ -237,6 +243,12 @@ static void HIDAPI_DriverTacx_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joyst
 
 static void HIDAPI_DriverTacx_FreeDevice(SDL_HIDAPI_Device *device)
 {
+    /* The backend closes the handle after this returns, and the rumble
+       thread writes a queued frame to that handle. The frames still queued
+       go out first, each within its 1000 ms timeout. */
+    while (SDL_GetAtomicInt(&device->rumble_pending) > 0) {
+        SDL_Delay(10);
+    }
 }
 
 SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverTacx = {

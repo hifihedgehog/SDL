@@ -145,6 +145,15 @@ bool SDL_DJITCP_DecodeControls(const uint8_t *payload, size_t length, SDL_Serial
     return true;
 }
 
+uint64_t SDL_DJITCP_EventStamp(uint64_t *last, uint64_t stamp)
+{
+    if (stamp < *last) {
+        return *last;
+    }
+    *last = stamp;
+    return stamp;
+}
+
 void SDL_DJITCP_Init(SDL_DJITCPState *s, const SDL_SerialSink *sink, uint64_t now)
 {
     int i;
@@ -206,7 +215,7 @@ static void DJITCP_OnFrame(void *userdata, const SDL_DJIFrame *frame)
     SDL_DJITCPState *s = batch->state;
     char model[SDL_DJI_MODEL_LENGTH];
 
-    /* A request that asks for an acknowledgement gets an empty response */
+    /* A request that asks for an acknowledgment gets an empty response */
     if (!(frame->type & SDL_DJI_TYPE_RESPONSE) && (frame->type & SDL_DJI_TYPE_ACK_MASK)) {
         uint8_t response[SDL_DJI_MIN_FRAME];
         const size_t length = SDL_DJI_BuildResponse(response, sizeof(response), frame);

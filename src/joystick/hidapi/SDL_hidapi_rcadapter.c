@@ -27,6 +27,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "../../hidapi/SDL_hidapi_c.h"
 #include "SDL_hidapi_rcadapter_proto.h"
+#include "../../hidapi/SDL_hidapi_collections.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_RC_ADAPTER
 
@@ -56,9 +57,29 @@ static bool HIDAPI_DriverRCAdapter_IsEnabled(void)
     return SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_RC_ADAPTER, SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI, SDL_HIDAPI_DEFAULT));
 }
 
+/* Whether the collection declares an input report. Windows makes a device of
+   each top-level collection, and no source records the adapter's. A
+   descriptor that cannot be read keeps the collection, as Android reads none
+   and makes one device per interface. */
+static bool HIDAPI_DriverRCAdapter_DeclaresInput(SDL_hid_device *dev)
+{
+    unsigned char descriptor[4096];
+    SDL_HIDAPIReportIDs ids;
+    const int length = SDL_hid_get_report_descriptor(dev, descriptor, sizeof(descriptor));
+
+    if (length <= 0 || !SDL_HIDAPI_ParseReportIDs(descriptor, (size_t)length, &ids)) {
+        return true;
+    }
+    return SDL_HIDAPI_DeclaresInput(&ids);
+}
+
 static bool HIDAPI_DriverRCAdapter_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
 {
-    return vendor_id == USB_VENDOR_MULTIPLE_1781 && product_id == USB_PRODUCT_PHOENIXRC_ADAPTER;
+    if (vendor_id != USB_VENDOR_MULTIPLE_1781 || product_id != USB_PRODUCT_PHOENIXRC_ADAPTER) {
+        return false;
+    }
+    // Once the collection is open, its descriptor decides
+    return !device || !device->dev || HIDAPI_DriverRCAdapter_DeclaresInput(device->dev);
 }
 
 static bool HIDAPI_DriverRCAdapter_InitDevice(SDL_HIDAPI_Device *device)

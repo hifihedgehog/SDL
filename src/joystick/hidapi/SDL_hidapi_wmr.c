@@ -27,6 +27,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "../../hidapi/SDL_hidapi_c.h"
 #include "SDL_hidapi_wmr_proto.h"
+#include "../../hidapi/SDL_hidapi_collections.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_WMR
 
@@ -71,9 +72,33 @@ static bool HIDAPI_DriverWMR_Write(void *userdata, const uint8_t *data, size_t l
     return SDL_hid_write(ctx->device->dev, data, length) >= 0;
 }
 
+/* Whether the collection declares status report 1 and command output report
+   6. Windows makes a device of each top-level collection, and no source
+   records the controllers'. A descriptor that cannot be read keeps the
+   collection, as Android reads none and makes one device per interface. */
+static bool HIDAPI_DriverWMR_CarriesController(SDL_hid_device *dev)
+{
+    unsigned char descriptor[4096];
+    SDL_HIDAPIReportIDs ids;
+    const int length = SDL_hid_get_report_descriptor(dev, descriptor, sizeof(descriptor));
+
+    if (length <= 0 || !SDL_HIDAPI_ParseReportIDs(descriptor, (size_t)length, &ids)) {
+        return true;
+    }
+    return SDL_WMR_CarriesController(ids.input, ids.output);
+}
+
 static bool HIDAPI_DriverWMR_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
 {
-    return SDL_WMR_IsControllerID(vendor_id, product_id, NULL);
+#ifdef SDL_PLATFORM_LINUX
+    // Monado drives the controllers through hidraw, and the start-up's reset would disturb it
+    return false;
+#endif
+    if (!SDL_WMR_IsControllerID(vendor_id, product_id, NULL)) {
+        return false;
+    }
+    // Once the collection is open, its descriptor decides
+    return !device || !device->dev || HIDAPI_DriverWMR_CarriesController(device->dev);
 }
 
 static const char *HIDAPI_DriverWMR_Name(SDL_WMRHand hand)
@@ -193,11 +218,16 @@ static bool HIDAPI_DriverWMR_UpdateDevice(SDL_HIDAPI_Device *device)
             ctx->reported = true;
             SDL_free(ctx->config);
             ctx->config = NULL;
+            // The session keeps no pointer to the freed buffer
+            ctx->session.config = NULL;
+            ctx->session.config_capacity = 0;
             HIDAPI_JoystickConnected(device, NULL);
         } else if (ctx->session.phase == SDL_WMR_PHASE_FAILED) {
             ctx->reported = true;
             SDL_free(ctx->config);
             ctx->config = NULL;
+            ctx->session.config = NULL;
+            ctx->session.config_capacity = 0;
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Windows Mixed Reality controller start-up failed: %s",
                          HIDAPI_DriverWMR_FailureText(ctx->session.failure));
         }

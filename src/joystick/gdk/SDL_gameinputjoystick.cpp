@@ -429,6 +429,13 @@ static bool GAMEINPUT_JoystickPrepareDevice(SDL_JoystickDevice *device)
         product_string = device->name;
         device->name = NULL;
     }
+    if (data->raw_type == SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR) {
+        // The guitar's name on every path, in the joystick name and the GUID's CRC
+        SDL_free(manufacturer_string);
+        SDL_free(product_string);
+        manufacturer_string = NULL;
+        product_string = SDL_strdup(SDL_GHL_DongleName(SDL_GHL_DONGLE_XBOXONE));
+    }
 
     device->name = SDL_CreateJoystickName(data->vendor, data->product, manufacturer_string, product_string);
     device->guid = SDL_CreateJoystickGUID(data->bus, data->vendor, data->product, version, manufacturer_string, product_string, 'g', data->subtype);
@@ -670,7 +677,7 @@ static void GAMEINPUT_UpdatePowerInfo(SDL_Joystick *joystick, IGameInputDevice *
 
 #if GAMEINPUT_API_VERSION >= 4
 /* The Guitar Hero Live guitar wants GIP message 0x22 every 8 s, or the strum
-   bar cuts out held frets. A failed send stays due for the next update.
+   bar cuts out held frets. A failed send goes again 1000 ms later.
    RB4InstrumentMapper counts E_NOTIMPL from SendRawDeviceOutput as sent. */
 static void GAMEINPUT_SendGuitarHeroLiveKeepAlive(GAMEINPUT_InternalJoystickHwdata *hwdata)
 {

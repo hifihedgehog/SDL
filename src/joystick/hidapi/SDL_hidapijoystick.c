@@ -25,8 +25,10 @@
 #include "../SDL_sysjoystick.h"
 #include "SDL_hidapijoystick_c.h"
 #include "SDL_hidapi_rumble.h"
+#include "SDL_hidapi_xid_proto.h"
 #include "../../SDL_hints_c.h"
 #include "../../hidapi/SDL_hidapi_collections.h"
+#include "../../hidapi/SDL_hidapi_vendorusb.h"
 
 #if defined(SDL_PLATFORM_WIN32) || defined(SDL_PLATFORM_WINGDK)
 #include "../../core/windows/SDL_hid.h"
@@ -34,6 +36,15 @@
 #include "../../core/linux/SDL_sysfs.h"
 #elif defined(SDL_PLATFORM_MACOS)
 #include "../../core/macos/SDL_ioreg.h"
+#endif
+
+// The platform as SDL_hidapi.c gives it to the vendor-USB rules
+#if defined(SDL_PLATFORM_WIN32)
+#define HIDAPI_VENDORUSB_PLATFORM SDL_VENDORUSB_PLATFORM_WINDOWS
+#elif defined(SDL_PLATFORM_MACOS)
+#define HIDAPI_VENDORUSB_PLATFORM SDL_VENDORUSB_PLATFORM_MACOS
+#else
+#define HIDAPI_VENDORUSB_PLATFORM SDL_VENDORUSB_PLATFORM_OTHER
 #endif
 
 
@@ -201,6 +212,8 @@ static int SDL_HIDAPI_numdrivers = 0;
 static SDL_AtomicInt SDL_HIDAPI_updating_devices;
 static bool SDL_HIDAPI_hints_changed = false;
 static bool SDL_HIDAPI_querying_devices = false;
+// The HID device change count of the current scan, which a path waiting to reopen compares with its own
+static Uint32 SDL_HIDAPI_change_count = 0;
 static SDL_HIDAPI_Device *SDL_HIDAPI_devices SDL_GUARDED_BY(SDL_joystick_lock);
 static bool SDL_HIDAPI_combine_joycons = true;
 static bool initialized = false;
@@ -464,24 +477,55 @@ static SDL_GamepadType SDL_GetJoystickGameControllerProtocol(const char *name, U
     return type;
 }
 
-/* Whether a HIDAPI driver can read the device, asked of every driver whether
- * or not its hint enables it. build-scripts/gen_community_mappings.c and its
- * test ask it, so that no community mapping is generated for a device a
- * HIDAPI driver can read. */
+/* Whether some driver reads this vendor and product, whether or not its
+ * hint enables it. build-scripts/gen_community_mappings.c and its test ask
+ * it, so that no community mapping is generated for a device a HIDAPI
+ * driver can read. Many drivers serve one interface of a device and answer
+ * only for its number, its class or, on the Multi Train Controller, the
+ * cartridge's bcdDevice. So every driver is asked at each interface number
+ * from -1, which a backend reports when it knows none, to 15, and with no
+ * class, as the platform HID backends report every interface, or with a
+ * vendor class a driver names: FF/00/00, or FF/43/00 for the DJI remote.
+ * Each of those goes at the caller's version and at each version
+ * SDL_Train_Identify tells apart. The Xbox protocol classes are not asked.
+ * A driver claims a whole vendor there, but only for an interface that
+ * speaks the Xbox protocol, and the DirectInput backend, where the community
+ * mappings apply, skips such a pad while XInput is on. The XID drivers read
+ * any device of the XID class, so for them an ID counts only when it is a
+ * known XID device. */
 bool HIDAPI_IsDeviceSupportedByAnyDriver(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
 {
+    static const int classes[][3] = {
+        { 0x00, 0x00, 0x00 },
+        { 0xFF, 0x00, 0x00 },
+        { 0xFF, 0x43, 0x00 },
+    };
+    static const Uint16 train_versions[] = { 0x0100, 0x0300, 0x0400, 0x0800, 0x0A00 };
     bool result = false;
-    int i;
+    size_t c, v;
+    int i, number;
+
+#ifdef SDL_JOYSTICK_HIDAPI_XID
+    if (SDL_XID_IsKnownID(vendor_id, product_id)) {
+        return true;
+    }
+#endif
 
     SDL_LockJoysticks();
-    {
-        SDL_GamepadType type = SDL_GetJoystickGameControllerProtocol(name, vendor_id, product_id, -1, 0, 0, 0);
+    for (c = 0; c < SDL_arraysize(classes) && !result; ++c) {
+        for (number = -1; number <= 15 && !result; ++number) {
+            const SDL_GamepadType type = SDL_GetJoystickGameControllerProtocol(name, vendor_id, product_id, number, classes[c][0], classes[c][1], classes[c][2]);
 
-        for (i = 0; i < SDL_arraysize(SDL_HIDAPI_drivers); ++i) {
-            SDL_HIDAPI_DeviceDriver *driver = SDL_HIDAPI_drivers[i];
-            if (driver->IsSupportedDevice(NULL, name, type, vendor_id, product_id, version, -1, 0, 0, 0)) {
-                result = true;
-                break;
+            for (v = 0; v <= SDL_arraysize(train_versions) && !result; ++v) {
+                const Uint16 asked = (v == 0) ? version : train_versions[v - 1];
+
+                for (i = 0; i < SDL_arraysize(SDL_HIDAPI_drivers); ++i) {
+                    SDL_HIDAPI_DeviceDriver *driver = SDL_HIDAPI_drivers[i];
+                    if (driver->IsSupportedDevice(NULL, name, type, vendor_id, product_id, asked, number, classes[c][0], classes[c][1], classes[c][2])) {
+                        result = true;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -592,6 +636,7 @@ static void HIDAPI_CleanupDeviceDriver(SDL_HIDAPI_Device *device)
         device->driver->FreeDevice(device);
     }
     device->driver = NULL;
+    device->reads_ended = false;
     // The joystick names come from the driver's context, freed below
     device->GetJoystickName = NULL;
     device->GetJoystickGUID = NULL;
@@ -600,6 +645,7 @@ static void HIDAPI_CleanupDeviceDriver(SDL_HIDAPI_Device *device)
         SDL_hid_close(device->dev);
         device->dev = NULL;
     }
+    device->is_libusb = false;
 
     if (device->context) {
         SDL_free(device->context);
@@ -657,11 +703,19 @@ static void HIDAPI_SetupDeviceDriver(SDL_HIDAPI_Device *device, bool *removed)
                 SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
                              "HIDAPI_SetupDeviceDriver() couldn't open %s: %s",
                              device->path, SDL_GetError());
+                // Tried again at the next device change, which a driver
+                // binding made while SDL runs raises
+                device->reopen = true;
+                device->reopen_change_count = SDL_HIDAPI_change_count;
                 return;
             }
+            // A device a driver then refuses is not opened again
+            device->reopen = false;
             SDL_hid_set_nonblocking(dev, 1);
 
             device->dev = dev;
+            // Only a libusb handle carries this property
+            device->is_libusb = (SDL_GetPointerProperty(SDL_hid_get_properties(dev), SDL_PROP_HIDAPI_LIBUSB_DEVICE_HANDLE_POINTER, NULL) != NULL);
         }
 
         device->driver = HIDAPI_GetDeviceDriver(device);
@@ -675,6 +729,7 @@ static void HIDAPI_SetupDeviceDriver(SDL_HIDAPI_Device *device, bool *removed)
             // No driver claimed this device, go ahead and close it
             SDL_hid_close(device->dev);
             device->dev = NULL;
+            device->is_libusb = false;
         }
     }
 }
@@ -1314,6 +1369,15 @@ static void HIDAPI_UpdateDeviceList(void)
                     if(HIDAPI_SerialIsEmpty(device)) {
                         HIDAPI_SetDeviceSerialW(device, info->serial_number);
                     }
+
+                    // A device whose open failed, or whose driver's reads
+                    // ended, is set up again once per device change. A count
+                    // of 0 asks for a rescan, which is no device change.
+                    if (device->reopen && SDL_HIDAPI_change_count != 0 &&
+                        device->reopen_change_count != SDL_HIDAPI_change_count) {
+                        bool removed;
+                        HIDAPI_SetupDeviceDriver(device, &removed);
+                    }
                 } else {
                     HIDAPI_AddDevice(info, 0, NULL);
                 }
@@ -1479,12 +1543,22 @@ void HIDAPI_UpdateDevices(void)
             if (device->driver) {
                 device->driver->UpdateDevice(device);
             }
+            if (device->reads_ended && SDL_GetAtomicInt(&device->rumble_pending) == 0) {
+                // The path can stay listed while the driver reads nothing, so
+                // the driver is released and the path reopens at the next
+                // device change. The release closes device->dev, which a
+                // request still queued on the rumble thread writes to, so it
+                // waits for a later update once that queue is empty.
+                HIDAPI_CleanupDeviceDriver(device);
+                device->reopen = true;
+                device->reopen_change_count = SDL_HIDAPI_change_count;
+            }
         }
         HIDAPI_FinishUpdatingDevices();
     }
 }
 
-static void HIDAPI_AddDeviceMatches(SDL_JoystickDevice *device, SDL_HIDAPI_Device *entry)
+static void HIDAPI_AddEntryMatches(SDL_JoystickDevice *device, SDL_HIDAPI_Device *entry)
 {
     SDL_AddJoystickDeviceMatchVIDPID(device, entry->vendor_id, entry->product_id);
 
@@ -1510,6 +1584,16 @@ static void HIDAPI_AddDeviceMatches(SDL_JoystickDevice *device, SDL_HIDAPI_Devic
     // The NVIDIA SHIELD controller has a separate Xbox interface
     if (SDL_IsJoystickNVIDIASHIELDController(entry->vendor_id, entry->product_id)) {
         SDL_AddJoystickDeviceMatchVIDPID(device, USB_VENDOR_NVIDIA, 0xb400);
+    }
+}
+
+static void HIDAPI_AddDeviceMatches(SDL_JoystickDevice *device, SDL_HIDAPI_Device *entry)
+{
+    // A device read through WinUSB, libusbK or libusb0 is on no driver
+    // another backend reads, so it hides nothing that backend lists, such
+    // as the Xbox 360 pads xusb22 keeps beside a pad bound to WinUSB
+    if (SDL_VendorUSB_ListedElsewhere(HIDAPI_VENDORUSB_PLATFORM, entry->is_libusb, (Uint8)entry->interface_class)) {
+        HIDAPI_AddEntryMatches(device, entry);
     }
 
     for (int i = 0; i < entry->num_children; ++i) {
@@ -1615,6 +1699,7 @@ static SDL_JoystickDevice *HIDAPI_JoystickQueryDevices(void)
     SDL_AssertJoysticksLocked();
 
     if (HIDAPI_StartUpdatingDevices()) {
+        SDL_HIDAPI_change_count = SDL_hid_device_change_count();
         SDL_HIDAPI_querying_devices = true;
         HIDAPI_UpdateDeviceList();
         SDL_HIDAPI_querying_devices = false;

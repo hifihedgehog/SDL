@@ -230,9 +230,10 @@ static bool HIDAPI_DriverXID_InitDevice(SDL_HIDAPI_Device *device)
 
     device->context = ctx;
 
-    /* One GET_DESCRIPTOR picks the decoder. Without an answer the ID tables
-     * decide. The gamepad family then reads its current report. These are
-     * the only control requests, so libusb is held just for them. */
+    /* GET_DESCRIPTOR picks the decoder, asked up to three times. Without an
+     * answer the ID tables decide. The gamepad family then reads its current
+     * report. These are the only control requests, so libusb is held just
+     * for them. */
     if (SDL_InitLibUSB(&ctx->libusb)) {
         ctx->handle = (libusb_device_handle *)SDL_GetPointerProperty(SDL_hid_get_properties(device->dev), SDL_PROP_HIDAPI_LIBUSB_DEVICE_HANDLE_POINTER, NULL);
     } else {

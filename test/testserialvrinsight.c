@@ -336,6 +336,37 @@ static void TestKeepAlive(void)
     H_Destroy(h);
 }
 
+/* A request cut short, as the port reports a write that ran into its write
+   timeout, takes the timeout path at once */
+static void TestShortWrite(void)
+{
+    Harness *h = H_Create(&SDL_SerialVRinsightModule);
+
+    h->pend_writes = true;
+    H_Start(h);
+    CHECK(H_ExpectOpened(h, 115200, 8, SDL_SERIAL_NOPARITY, 1, 0) && H_IsWrite(H_NextCall(h), connect, 16, 0));
+    H_Advance(h, 5);
+    H_CompleteWrite(h, false);
+    CHECK(H_IsWrite(H_NextCall(h), connect, 16, 5) && State(h)->step == SDL_VRINSIGHT_STEP_CONNECT);
+    H_CompleteWrite(h, true);
+    H_FeedAt(h, 10, con_reply, 8);
+    CHECK(H_IsWrite(H_NextCall(h), fun, 8, 10) && State(h)->step == SDL_VRINSIGHT_STEP_FUNCTION);
+    H_Advance(h, 20);
+    H_CompleteWrite(h, false);
+    CHECK(H_IsWrite(H_NextCall(h), connect, 16, 20) && State(h)->step == SDL_VRINSIGHT_STEP_CONNECT);
+    H_Destroy(h);
+
+    /* The keep-alive cut short: presence clears and the start-up runs again */
+    h = Present(cdu2);
+    h->pend_writes = true;
+    H_Advance(h, 60030);
+    CHECK(H_IsWrite(H_NextCall(h), keepalive, 8, 60030));
+    H_Advance(h, 60040);
+    H_CompleteWrite(h, false);
+    CHECK(h->presence[0] == 0 && H_IsWrite(H_NextCall(h), connect, 16, 60040));
+    H_Destroy(h);
+}
+
 static void TestOutput(void)
 {
     Harness *h = Present(fmer);
@@ -352,6 +383,8 @@ static void TestOutput(void)
     SDL_SerialEngine_Output(&h->engine, &request, H_NS(h->now));
     CHECK(H_NextCall(h) == NULL);
     CHECK(SDL_SerialVRinsightModule.effect_min == 8 && SDL_SerialVRinsightModule.effect_max == 8);
+    /* The driver sends every message, in order */
+    CHECK(SDL_SerialVRinsightModule.queue_effects && !SDL_SerialVRinsightModule.ValidEffect);
     H_Destroy(h);
 }
 
@@ -412,6 +445,7 @@ int main(void)
     TestCdu();
     TestCombo();
     TestKeepAlive();
+    TestShortWrite();
     TestOutput();
     TestBatteryB();
     TestBatteryA();

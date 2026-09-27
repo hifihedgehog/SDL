@@ -27,6 +27,7 @@
 #include "SDL_hidapijoystick_c.h"
 #include "../../hidapi/SDL_hidapi_c.h"
 #include "SDL_hidapi_riftdk1_proto.h"
+#include "../../hidapi/SDL_hidapi_collections.h"
 
 #ifdef SDL_JOYSTICK_HIDAPI_RIFT_DK1
 
@@ -82,13 +83,40 @@ static void HIDAPI_DriverRiftDK1_GetSink(SDL_DriverRiftDK1_Context *ctx, SDL_Rif
     sink->set_feature = HIDAPI_DriverRiftDK1_SetFeature;
 }
 
+/* Whether the collection declares input report 1 and features 2 and 8.
+   Windows makes a device of each top-level collection, and no source records
+   the tracker's. A descriptor that cannot be read keeps the collection, as
+   Android reads none and makes one device per interface. */
+static bool HIDAPI_DriverRiftDK1_CarriesTracker(SDL_hid_device *dev)
+{
+    unsigned char descriptor[4096];
+    SDL_HIDAPIReportIDs ids;
+    const int length = SDL_hid_get_report_descriptor(dev, descriptor, sizeof(descriptor));
+
+    if (length <= 0 || !SDL_HIDAPI_ParseReportIDs(descriptor, (size_t)length, &ids)) {
+        return true;
+    }
+    return SDL_RiftDK1_CarriesTracker(ids.input, ids.feature);
+}
+
 static bool HIDAPI_DriverRiftDK1_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
 {
+#ifdef SDL_PLATFORM_LINUX
+    // OpenHMD drives the tracker through hidraw, and the start-up rewrites its feature 2
+    return false;
+#endif
     if (vendor_id != USB_VENDOR_OCULUS || product_id != USB_PRODUCT_OCULUS_RIFT_DK1) {
         return false;
     }
-    // Without a device the question is only whether the ID could be one
-    return !device || SDL_RiftDK1_IsManufacturer(device->manufacturer_string);
+    if (!device) {
+        // Without a device the question is only whether the ID could be one
+        return true;
+    }
+    if (!SDL_RiftDK1_IsManufacturer(device->manufacturer_string)) {
+        return false;
+    }
+    // Once the collection is open, its descriptor decides
+    return !device->dev || HIDAPI_DriverRiftDK1_CarriesTracker(device->dev);
 }
 
 static bool HIDAPI_DriverRiftDK1_InitDevice(SDL_HIDAPI_Device *device)

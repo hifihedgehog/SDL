@@ -9,6 +9,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
 endif()
 
 option(SDL_SERIAL_TEST_ASAN "Instrument the offline test targets with AddressSanitizer" OFF)
+# 0 finishes each write inside the pump that started it. 1 and 2 hold it for
+# the harness's next call, which completes it after or before the bytes of a
+# feed. testserialharness.h describes the modes.
+set(SDL_SERIAL_TEST_DEFER_WRITES "0" CACHE STRING "Write completion mode of the replay harness: 0, 1 or 2")
+if(NOT SDL_SERIAL_TEST_DEFER_WRITES MATCHES "^[012]$")
+    message(FATAL_ERROR "SDL_SERIAL_TEST_DEFER_WRITES must be 0, 1 or 2.")
+endif()
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Offline test configuration" FORCE)
 endif()
@@ -41,6 +48,9 @@ enable_testing()
 function(serial_configure target)
     set_target_properties(${target} PROPERTIES
         C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    if(NOT SDL_SERIAL_TEST_DEFER_WRITES STREQUAL "0")
+        target_compile_definitions(${target} PRIVATE SDL_SERIAL_TEST_DEFER_WRITES=${SDL_SERIAL_TEST_DEFER_WRITES})
+    endif()
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /WX /utf-8)
         target_link_options(${target} PRIVATE /INCREMENTAL:NO)

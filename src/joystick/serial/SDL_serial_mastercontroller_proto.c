@@ -71,13 +71,18 @@ static void MasterController_Reset(void *state, const SDL_SerialSink *sink, uint
     SDL_Serial_QueueWrite(&s->base, 0, &start, 1);
 }
 
+/* A byte at a time, so each word commits on its own and a press and its
+   release in one read both reach the joystick */
 static void MasterController_Feed(void *state, const uint8_t *data, size_t length, uint64_t now)
 {
     SDL_MasterControllerState *s = (SDL_MasterControllerState *)state;
+    size_t i;
 
     (void)now;
-    if (SDL_Train_FeedLine(&s->parser, data, length, &s->input)) {
-        MasterController_Commit(s);
+    for (i = 0; i < length; ++i) {
+        if (SDL_Train_FeedLine(&s->parser, &data[i], 1, &s->input)) {
+            MasterController_Commit(s);
+        }
     }
 }
 

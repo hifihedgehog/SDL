@@ -77,9 +77,11 @@ Windows gives a device class's Raw Input to one window per process, the one
 registered last. With `SDL_HINT_JOYSTICK_ICADE_RAWINPUT` on, the default, the
 driver registers keyboards on its window, with `RIDEV_INPUTSINK` and
 `RIDEV_DEVNOTIFY`, only while at least one iCade is connected and no other
-window of the process holds the keyboard class. With no iCade, SDL leaves the
-process's keyboard registration alone. SDL removes its registration when the
-last iCade leaves, when the hint turns off and at `SDL_Quit`, and only if its
+window of the process holds the keyboard class. SDL counts a registration for
+all of usage page 1, made with `RIDEV_PAGEONLY`, as holding the keyboard
+class. With no iCade, SDL leaves the process's keyboard registration alone.
+SDL removes its registration when the last iCade leaves or SDL's ignore lists
+set it aside, when the hint turns off and at `SDL_Quit`, and only if its
 window still holds it. A window that registers keyboards while SDL holds the
 class takes the input from SDL.
 
@@ -120,6 +122,15 @@ one to four hex digits, spaces and tabs around the numbers are ignored, a
 malformed entry is skipped with a warning, vendor 0x0000 is refused, and at
 most 32 pairs are read.
 
+SDL's ignore lists apply to the keyboards by their IDs:
+`SDL_HINT_JOYSTICK_BLACKLIST_DEVICES`, `SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES`
+and `SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT`. SDL reads them when a
+device arrives, so a change reaches a device already there only when it
+arrives again. A device they rule out is no joystick, SDL keeps no keyboard
+registration for it, and `SDL_ICadeProcessRawKeyboard()` returns false for
+it. SDL sets such a device aside before `SDL_Init` returns, or at the first
+joystick update after it arrives, and until then it counts as an iCade.
+
 ## Known limits
 
 - No iCade ran here. No source shows whether Windows reports the cabinet's
@@ -138,12 +149,15 @@ most 32 pairs are read.
 
 ## Tests
 
-`test/controller-protocols` runs `testicadeproto`: the part's replay tests 1
-to 4 and 6, every make code, every flag word on a press and a release letter,
-the hat, both layouts, the devices hint parser and the queue. `test/icade-driver` runs the driver inside
+`test/controller-protocols` builds and runs `test/testicadeproto.c`: the
+part's replay tests 1 to 4 and 6, every make code, every flag word on a press
+and a release letter, the hat, both layouts, the devices hint parser and the
+queue. `test/icade-driver` runs the driver inside
 a static SDL against a fake Win32 system and fails its build if the test
 still imports a Win32 function that reaches a device or the Raw Input
 registration. It covers the part's tests 5 and 7 to 9, the device list, the
 driver switched off and on, a full queue, keyboard traffic that never waits
-for the joystick lock, and a registration that exists only while an iCade
-does. Both run in the normal and AddressSanitizer builds.
+for the joystick lock, a registration that exists only while an iCade does,
+leaves the class to another window and returns once that window gives it
+up, and SDL's ignore lists. Both run in the normal and AddressSanitizer
+builds.

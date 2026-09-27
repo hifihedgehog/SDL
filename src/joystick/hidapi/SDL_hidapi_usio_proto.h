@@ -186,7 +186,7 @@ typedef struct SDL_USIOState
     bool quiet;          /* The next command waits for quiet_until */
     uint64_t quiet_until;
     int failures;        /* Abandoned reads in a row, up to SDL_USIO_MAX_FAILURES */
-    uint32_t dropped;    /* Bytes dropped since the start, for the log */
+    uint32_t dropped;    /* Bytes dropped since the start, which only the tests read */
     uint8_t reply[SDL_USIO_MAX_LENGTH];
 
     /* Coin slot 0 is the Taiko counter and the Tekken counter of players 1
@@ -258,7 +258,10 @@ extern bool SDL_USIO_NextCommand(SDL_USIOState *state, uint64_t now, uint8_t com
 
 /* Completes the write of the command handed out last. written is the byte
  * count the write reported, or a negative value when it failed. The reply
- * wait starts here. A failed or short write abandons the read. */
+ * wait starts here. A failed or short write abandons the read. The driver's
+ * writer thread reports a write at the next update, and a result that comes
+ * after the reply was whole, or after the reply timeout abandoned the read,
+ * changes nothing. */
 extern void SDL_USIO_CommandDone(SDL_USIOState *state, int written, uint64_t now, const SDL_USIOSink *sink);
 
 /* Takes one IN transfer. Reads nothing at or past length. A transfer of 0

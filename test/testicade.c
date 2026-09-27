@@ -21,7 +21,8 @@
    which sees only SDL's public headers. Each scenario starts SDL, reaches
    the device through SDL's joystick and gamepad API, and quits SDL. The
    scenarios follow the part's replay tests 1 to 9, then the rules for the
-   keyboard registration, the window class, hid.dll and logging.
+   keyboard registration, the window class, hid.dll, logging and SDL's
+   ignore lists.
 
    The driver in this file calls the fake, not Windows. Each name through
    which the driver reaches a device, hid.dll, its module or the Raw Input
@@ -237,6 +238,10 @@ typedef struct FakeSystem
     bool register_reports;
     int leave_on_register;
     int arrive_on_register;
+    /* A new class goes in usage page and usage order, as Wine keeps the
+       table (dlls/win32u/rawinput.c, register_rawinput_device), not at the
+       end. Microsoft documents no order. */
+    bool registered_sorted;
     int bad_register_calls;
     RAWINPUTDEVICE last_register;
     DWORD register_thread;
@@ -371,6 +376,15 @@ static BOOL WINAPI Fake_RegisterRawInputDevices(PCRAWINPUTDEVICE devices, UINT c
                 if (fake.nregistered == FAKE_MAX_REGISTERED) {
                     result = FALSE;
                     break;
+                }
+                if (fake.registered_sorted) {
+                    for (j = 0; j < fake.nregistered; ++j) {
+                        if (fake.registered[j].usUsagePage > device->usUsagePage ||
+                            (fake.registered[j].usUsagePage == device->usUsagePage && fake.registered[j].usUsage > device->usUsage)) {
+                            break;
+                        }
+                    }
+                    SDL_memmove(&fake.registered[j + 1], &fake.registered[j], (size_t)(fake.nregistered - j) * sizeof(fake.registered[0]));
                 }
                 ++fake.nregistered;
             }
@@ -2462,7 +2476,8 @@ done:
 
 /* Registers a class of usage page 1 for another window of the process, or
    with no window, which follows the keyboard focus. RIDEV_REMOVE takes it
-   away. Usage 6 is the keyboard, usage 2 the mouse. */
+   away. Usage 6 is the keyboard, usage 2 the mouse, and usage 0 with
+   RIDEV_PAGEONLY the whole page. */
 static bool DT_OtherRegistration(HWND window, USHORT usage, DWORD flags)
 {
     RAWINPUTDEVICE theirs;
@@ -2626,6 +2641,206 @@ done:
     DT_End();
 }
 
+/* Scenario (n): another window takes the keyboard class from SDL and gives
+   it up again, as SDL video does when SDL_HINT_WINDOWS_RAW_KEYBOARD turns on
+   and then off. Windows tells SDL's window neither, so SDL registers again
+   at its next update. */
+static void ScenarioReleased(void)
+{
+    const HWND other = (HWND)(uintptr_t)0x4343;
+    RAWINPUTDEVICE registration;
+    int adds;
+
+    DT_Begin("n", "another window takes the keyboard class from SDL and gives it up");
+    (void)DT_AddUsualDevices();
+    if (!DT_Start(NULL, NULL, NULL)) {
+        goto done;
+    }
+    DT_CHECK(DT_KeyboardRegistration(&registration) && registration.hwndTarget == DT_Window(), "SDL does not hold the keyboard class at start");
+
+    /* SDL video registers keyboards with no flags on a window of its own
+       (SDL_windowsrawinput.c:121-133). An update leaves the class to it. */
+    DT_CHECK(DT_OtherRegistration(other, 6, 0), "the fake refused the other window");
+    adds = DT_Fake(&fake.add_calls);
+    DT_CHECK(DT_ListTwice(DBT_DEVICEARRIVAL), "the timers did not list");
+    DT_CHECK(DT_Fake(&fake.add_calls) == adds && DT_KeyboardRegistration(&registration) && registration.hwndTarget == other,
+             "SDL took the keyboard class back from the other window");
+
+    /* SDL video removes its registration (SDL_windowsrawinput.c:134-137).
+       Nothing registers until the next update. */
+    DT_CHECK(DT_OtherRegistration(NULL, 6, RIDEV_REMOVE), "the fake refused the removal");
+    DT_PumpFor(100);
+    DT_CHECK(DT_Fake(&fake.add_calls) == adds && !DT_KeyboardRegistration(NULL), "SDL registered with no update");
+
+    /* The next device change registers again, once */
+    DT_CHECK(DT_ListTwice(DBT_DEVICEARRIVAL), "the timers did not list");
+    DT_CHECK(DT_KeyboardRegistration(&registration) && registration.hwndTarget == DT_Window(),
+             "no registration at the device change after the other window gave up the class");
+    DT_CHECK(DT_Fake(&fake.add_calls) == adds + 1, "%d registrations at the device change", DT_Fake(&fake.add_calls) - adds);
+
+    /* Taken and given up again, and the next hint change registers again.
+       The devices hint names a pad that is not there, so the cabinet stays. */
+    DT_CHECK(DT_OtherRegistration(other, 6, 0) && DT_OtherRegistration(NULL, 6, RIDEV_REMOVE), "the fake refused the other window");
+    DT_SetHint(DT_HINT_DEVICES, "0x2dc8/0x9021");
+    DT_CHECK(DT_WaitRegistration(true, DT_WAIT_MS), "no registration at the hint change after the other window gave up the class");
+    DT_CHECK(DT_KeyboardRegistration(&registration) && registration.hwndTarget == DT_Window() && DT_Joysticks(NULL, 0) == 1,
+             "the hint change registered for another window or changed the joysticks");
+
+done:
+    DT_Stop();
+    DT_CHECK(!DT_KeyboardRegistration(NULL), "the registration outlived SDL_Quit");
+    DT_End();
+}
+
+/* The keyboard leaves and arrives again, a new device to the driver. False
+   when the driver did not drop it or did not list it again. */
+static bool DT_Rearrive(int fake_device, HANDLE handle)
+{
+    bool left, back;
+
+    DT_SetPresent(fake_device, false);
+    left = DT_SendMessage(WM_INPUT_DEVICE_CHANGE, GIDC_REMOVAL, (LPARAM)handle) && DT_Slot(handle) < 0;
+    DT_SetPresent(fake_device, true);
+    back = DT_SendMessage(WM_INPUT_DEVICE_CHANGE, GIDC_ARRIVAL, (LPARAM)handle) && DT_Slot(handle) >= 0;
+    DT_PumpFor(50);
+    return left && back;
+}
+
+/* Scenario (o): SDL's ignore lists. A device that
+   SDL_HINT_JOYSTICK_BLACKLIST_DEVICES or SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES
+   names, or that SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT leaves out, is
+   no joystick, the host feed does not claim it, and SDL keeps no keyboard
+   registration for it. The lists count when a device arrives. */
+static void ScenarioIgnored(void)
+{
+    static const char pad_name[] = "iCade Controller (0x2dc8/0x9021)";
+    int cabinet, pad;
+
+    DT_Begin("o", "SDL's ignore lists");
+    cabinet = DT_AddUsualDevices();
+    pad = DT_AddDevice(DT_PAD, RIM_TYPEKEYBOARD, DT_PAD_NAME, 0x2DC8, 0x9021, 0x0100);
+    DT_SetPresent(pad, false);
+    DT_SetHint(SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, "0x15e4/0x0132");
+    if (!DT_Start(NULL, NULL, "0x2dc8/0x9021")) {
+        goto done;
+    }
+
+    /* The blacklisted cabinet is listed and identified, and nothing more.
+       SDL reads the lists after the first list, which registers keyboards,
+       so that registration goes a moment later. */
+    DT_CHECK(DT_Slot(DT_CABINET) >= 0, "the driver did not identify the cabinet");
+    DT_CHECK(DT_Joysticks(NULL, 0) == 0, "the cabinet SDL_HINT_JOYSTICK_BLACKLIST_DEVICES names is a joystick");
+    DT_CHECK(!TestICade_HostFeed(DT_CABINET, 0, RI_KEY_BREAK), "the host feed claimed the blacklisted cabinet");
+    DT_CHECK(DT_WaitRegistration(false, DT_WAIT_MS), "SDL kept the keyboard class for the blacklisted cabinet");
+
+    /* A pad no list names arrives: a joystick, claimed by the host feed, and
+       registered for */
+    DT_SetPresent(pad, true);
+    DT_CHECK(DT_ListTwice(DBT_DEVICEARRIVAL), "the timers did not list");
+    DT_CHECK(DT_WaitJoysticks(1, DT_WAIT_MS) && DT_FindJoystick(pad_name) != 0, "the pad is not the only joystick");
+    DT_CHECK(TestICade_HostFeed(DT_PAD, 0, RI_KEY_BREAK) && !TestICade_HostFeed(DT_CABINET, 0, RI_KEY_BREAK),
+             "the host feed did not claim the pad alone");
+    DT_CHECK(DT_WaitRegistration(true, DT_WAIT_MS), "no registration with the pad present");
+
+    /* The pad leaves, and the blacklisted cabinet keeps no registration */
+    DT_SetPresent(pad, false);
+    DT_CHECK(DT_SendMessage(WM_INPUT_DEVICE_CHANGE, GIDC_REMOVAL, (LPARAM)DT_PAD), "the window did not take GIDC_REMOVAL");
+    DT_CHECK(DT_WaitJoysticks(0, DT_WAIT_MS), "the pad stayed");
+    DT_CHECK(DT_WaitRegistration(false, DT_WAIT_MS), "the blacklisted cabinet kept the registration");
+
+    /* An emptied blacklist takes the cabinet back only when it arrives again */
+    DT_SetHint(SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, "");
+    DT_PumpFor(100);
+    DT_CHECK(DT_Joysticks(NULL, 0) == 0, "a list change took the cabinet back before it arrived again");
+
+    /* The allow list names only another pad */
+    DT_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, "0x045e/0x028e");
+    DT_CHECK(DT_Rearrive(cabinet, DT_CABINET), "the cabinet did not leave and come back");
+    DT_CHECK(DT_Joysticks(NULL, 0) == 0, "the cabinet outside SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT is a joystick");
+    DT_CHECK(!TestICade_HostFeed(DT_CABINET, 0, RI_KEY_BREAK), "the host feed claimed the cabinet outside the allow list");
+    DT_CHECK(DT_WaitRegistration(false, DT_WAIT_MS), "SDL kept the keyboard class for the cabinet outside the allow list");
+
+    /* The ignore list names the cabinet */
+    DT_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, "");
+    DT_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, "0x15e4/0x0132");
+    DT_CHECK(DT_Rearrive(cabinet, DT_CABINET), "the cabinet did not leave and come back");
+    DT_CHECK(DT_Joysticks(NULL, 0) == 0, "the cabinet SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES names is a joystick");
+    DT_CHECK(!TestICade_HostFeed(DT_CABINET, 0, RI_KEY_BREAK), "the host feed claimed the ignored cabinet");
+
+    /* With every list empty the cabinet arrives as usual */
+    DT_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, "");
+    DT_CHECK(DT_Rearrive(cabinet, DT_CABINET), "the cabinet did not leave and come back");
+    DT_CHECK(DT_WaitJoysticks(1, DT_WAIT_MS) && DT_FindJoystick("ION iCade") != 0, "the cabinet no list names is no joystick");
+    DT_CHECK(TestICade_HostFeed(DT_CABINET, 0, RI_KEY_BREAK), "the host feed did not claim the cabinet no list names");
+    DT_CHECK(DT_WaitRegistration(true, DT_WAIT_MS), "no registration for the cabinet no list names");
+
+done:
+    DT_Stop();
+    DT_CHECK(!DT_KeyboardRegistration(NULL), "the registration outlived SDL_Quit");
+    DT_End();
+}
+
+/* Scenario (p): another window registered for all of usage page 1 with
+   RIDEV_PAGEONLY, which covers keyboards (RAWINPUTDEVICE), so SDL leaves the
+   keyboard class alone. A keyboard registration still decides first, so
+   SDL's own reads as SDL's beside a page registration, listed before or
+   after it. */
+static void ScenarioPageOnly(void)
+{
+    const HWND other = (HWND)(uintptr_t)0x4444;
+    RAWINPUTDEVICE registration;
+    int cabinet, adds, removes, pass;
+
+    DT_Begin("p", "another window's registration for all of usage page 1");
+    (void)DT_AddDevice(DT_KEYBOARD, RIM_TYPEKEYBOARD, DT_KEYBOARD_NAME, 0x046D, 0xC31C, 0x6400);
+    cabinet = DT_AddDevice(DT_CABINET, RIM_TYPEKEYBOARD, DT_CABINET_NAME, 0x15E4, 0x0132, DT_CABINET_VERSION);
+    DT_SetPresent(cabinet, false);
+    DT_CHECK(DT_OtherRegistration(other, 0, RIDEV_PAGEONLY | RIDEV_INPUTSINK), "the fake refused the page registration");
+    adds = DT_Fake(&fake.add_calls);
+    if (!DT_Start(NULL, NULL, NULL)) {
+        goto done;
+    }
+
+    /* The cabinet arrives and is decoded, but SDL does not take the class */
+    DT_SetPresent(cabinet, true);
+    DT_CHECK(DT_ListTwice(DBT_DEVICEARRIVAL), "the timers did not list");
+    DT_CHECK(DT_WaitJoysticks(1, DT_WAIT_MS), "the cabinet did not arrive");
+    DT_CHECK(DT_Fake(&fake.add_calls) == adds, "SDL registered keyboards while another window held all of usage page 1");
+    DT_CHECK(DT_LogCount("iCade: another window holds keyboard Raw Input") >= 1, "the refusal was not logged");
+    DT_CHECK(TestICade_HostFeed(DT_CABINET, 0x15, 0), "the host feed did not take the cabinet");
+
+    /* A page registration made while SDL holds the keyboard class, listed
+       after SDL's and then before it. The page registration goes, the next
+       device change registers, and the cabinet leaving removes only SDL's
+       registration. */
+    for (pass = 0; pass < 2; ++pass) {
+        DT_CHECK(DT_OtherRegistration(NULL, 0, RIDEV_REMOVE), "the fake refused the removal");
+        DT_SetPresent(cabinet, true);
+        DT_CHECK(DT_ListTwice(DBT_DEVICEARRIVAL), "the timers did not list");
+        DT_CHECK(DT_KeyboardRegistration(&registration) && registration.hwndTarget == DT_Window(),
+                 "no registration after the page registration went");
+        SDL_LockMutex(fake.mutex);
+        fake.registered_sorted = (pass == 1);
+        SDL_UnlockMutex(fake.mutex);
+        DT_CHECK(DT_OtherRegistration(other, 0, RIDEV_PAGEONLY | RIDEV_INPUTSINK), "the fake refused the page registration");
+        SDL_LockMutex(fake.mutex);
+        DT_CHECK(fake.nregistered == 2 && fake.registered[pass ? 0 : 1].usUsage == 0, "the page registration is not listed %s SDL's",
+                 pass ? "before" : "after");
+        SDL_UnlockMutex(fake.mutex);
+        removes = DT_Fake(&fake.remove_calls);
+        DT_SetPresent(cabinet, false);
+        DT_CHECK(DT_SendMessage(WM_INPUT_DEVICE_CHANGE, GIDC_REMOVAL, (LPARAM)DT_CABINET), "the window did not take GIDC_REMOVAL");
+        DT_CHECK(DT_WaitJoysticks(0, DT_WAIT_MS), "the cabinet stayed");
+        DT_CHECK(!DT_KeyboardRegistration(NULL) && DT_Fake(&fake.remove_calls) == removes + 1,
+                 "SDL kept its keyboard registration beside a page registration listed %s it", pass ? "before" : "after");
+    }
+
+done:
+    DT_Stop();
+    DT_CHECK(!DT_KeyboardRegistration(NULL), "SDL's keyboard registration outlived SDL_Quit");
+    DT_End();
+}
+
 static bool DT_Wanted(const char *only, char id)
 {
     return !only || SDL_strchr(only, id) != NULL;
@@ -2680,6 +2895,15 @@ int main(int argc, char *argv[])
     }
     if (DT_Wanted(only, 'm')) {
         ScenarioNoFunction();
+    }
+    if (DT_Wanted(only, 'n')) {
+        ScenarioReleased();
+    }
+    if (DT_Wanted(only, 'o')) {
+        ScenarioIgnored();
+    }
+    if (DT_Wanted(only, 'p')) {
+        ScenarioPageOnly();
     }
 
     printf("%s: %d checks, %d failures\n", dt_failures ? "FAILED" : "PASSED", dt_checks, dt_failures);

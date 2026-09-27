@@ -68,6 +68,11 @@ typedef struct SDL_RiftDK1Report
 
 extern bool SDL_RiftDK1_IsManufacturer(const char *manufacturer);
 
+/* Whether a collection's report IDs, one bit per ID, include input report 1
+ * and features 2 and 8, as the Oculus SDK uses them on one Windows handle.
+ * The driver opens only such a collection. */
+extern bool SDL_RiftDK1_CarriesTracker(const uint8_t input_report_ids[32], const uint8_t feature_report_ids[32]);
+
 /* Three signed 21-bit values packed most significant bit first in 8 bytes */
 extern void SDL_RiftDK1_Unpack21(const uint8_t block[8], int32_t out[3]);
 

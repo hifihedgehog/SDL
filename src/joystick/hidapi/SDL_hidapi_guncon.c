@@ -30,14 +30,15 @@
 
 #ifdef SDL_JOYSTICK_HIDAPI_GUNCON
 
-/* The Namco GunCon 2, 0B9A:016A, and the EMS LCD TopGun that shares its ID
- * (hifihedgehog/SDL#33 Part 9): one vendor-class interface, read through
- * libusb once WinUSB is bound. The mode request goes out once as a
- * SET_REPORT through hid_write, and the reports carry the raw beam position,
- * which the application calibrates to its screen. The GunCon 3 is not
- * claimed: its reports are encrypted with a table no zlib-compatible source
- * carries. The protocol lives in SDL_hidapi_guncon_proto.c, where the
- * offline tests run it. */
+/* The Namco GunCon 2, 0B9A:016A (hifihedgehog/SDL#33 Part 9): one
+ * vendor-class interface, class 0xFF, read through libusb once WinUSB is
+ * bound. The EMS LCD TopGun shares the ID and is read only if its interface
+ * has the same class. No descriptor dump of a TopGun records its class. The
+ * mode request goes out once as a SET_REPORT through hid_write, and the
+ * reports carry the raw beam position, which the application calibrates to
+ * its screen. The GunCon 3 is not claimed: its reports are encrypted with a
+ * table no zlib-compatible source carries. The protocol lives in
+ * SDL_hidapi_guncon_proto.c, where the offline tests run it. */
 
 SDL_COMPILE_TIME_ASSERT(guncon_hat_up, SDL_GUNCON_HAT_UP == SDL_HAT_UP);
 SDL_COMPILE_TIME_ASSERT(guncon_hat_right, SDL_GUNCON_HAT_RIGHT == SDL_HAT_RIGHT);

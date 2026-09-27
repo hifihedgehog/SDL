@@ -110,7 +110,7 @@ static void TestSelect(void)
     paired[6] = Paired(0x666666666666ull, "Zeemote: SteelSeries FREE", true);
     paired[7] = Paired(0x777777777777ull, "BD&A", true);
 
-    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, SDL_RFCOMM_MAX_DEVICES);
+    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, SDL_RFCOMM_MAX_DEVICES, NULL, NULL);
     CHECK(count == 4);
     CHECK(devices[0].address == 0x111111111111ull && devices[0].family == SDL_RFCOMM_FAMILY_MOGA && strcmp(devices[0].name, "MOGA Pro") == 0);
     CHECK(devices[1].address == 0x333333333333ull && devices[1].family == SDL_RFCOMM_FAMILY_ZEEMOTE);
@@ -119,20 +119,20 @@ static void TestSelect(void)
 
     /* A family turned off is left out */
     enabled[SDL_RFCOMM_FAMILY_MOGA] = false;
-    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, SDL_RFCOMM_MAX_DEVICES);
+    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, SDL_RFCOMM_MAX_DEVICES, NULL, NULL);
     CHECK(count == 2 && devices[0].family == SDL_RFCOMM_FAMILY_ZEEMOTE && devices[1].family == SDL_RFCOMM_FAMILY_PHONEJOY);
     /* NONE is never enabled, whatever the table says */
     enabled[SDL_RFCOMM_FAMILY_NONE] = true;
-    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, SDL_RFCOMM_MAX_DEVICES);
+    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, SDL_RFCOMM_MAX_DEVICES, NULL, NULL);
     CHECK(count == 2);
     /* The limit */
     enabled[SDL_RFCOMM_FAMILY_MOGA] = true;
-    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, 2);
+    count = SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, 2, NULL, NULL);
     CHECK(count == 2 && devices[1].family == SDL_RFCOMM_FAMILY_ZEEMOTE);
-    CHECK(SDL_RFCOMM_SelectDevices(paired, 0, enabled, devices, 2) == 0);
-    CHECK(SDL_RFCOMM_SelectDevices(NULL, 8, enabled, devices, 2) == 0);
-    CHECK(SDL_RFCOMM_SelectDevices(paired, 8, NULL, devices, 2) == 0);
-    CHECK(SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, 0) == 0);
+    CHECK(SDL_RFCOMM_SelectDevices(paired, 0, enabled, devices, 2, NULL, NULL) == 0);
+    CHECK(SDL_RFCOMM_SelectDevices(NULL, 8, enabled, devices, 2, NULL, NULL) == 0);
+    CHECK(SDL_RFCOMM_SelectDevices(paired, 8, NULL, devices, 2, NULL, NULL) == 0);
+    CHECK(SDL_RFCOMM_SelectDevices(paired, 8, enabled, devices, 0, NULL, NULL) == 0);
 
     /* A name that fills the field is cut, and still matched */
     {
@@ -142,9 +142,60 @@ static void TestSelect(void)
         memcpy(longname.name, "MOGA", 4);
         longname.address = 1;
         longname.paired = true;
-        count = SDL_RFCOMM_SelectDevices(&longname, 1, enabled, devices, 1);
+        count = SDL_RFCOMM_SelectDevices(&longname, 1, enabled, devices, 1, NULL, NULL);
         CHECK(count == 1 && strlen(devices[0].name) == SDL_RFCOMM_NAME_LENGTH - 1);
     }
+}
+
+/* The questions the selection asks, and the one device it leaves out */
+typedef struct IgnoreLog
+{
+    int calls;
+    uint64_t addresses[8];
+    SDL_RFCOMMFamily families[8];
+} IgnoreLog;
+
+static bool IgnoreMogaPro(void *userdata, const SDL_RFCOMMDevice *device)
+{
+    IgnoreLog *log = (IgnoreLog *)userdata;
+
+    if (log->calls < 8) {
+        log->addresses[log->calls] = device->address;
+        log->families[log->calls] = device->family;
+    }
+    ++log->calls;
+    return strcmp(device->name, "MOGA Pro") == 0;
+}
+
+/* SDL's device lists reach the selection through the driver's predicate. A
+   device they name is never connected and takes no place. */
+static void TestSelectIgnored(void)
+{
+    bool enabled[SDL_RFCOMM_FAMILY_COUNT] = { false, true, true, true, true };
+    SDL_RFCOMMPaired paired[5];
+    SDL_RFCOMMDevice devices[SDL_RFCOMM_MAX_DEVICES];
+    IgnoreLog log;
+    int count;
+
+    paired[0] = Paired(0x111111111111ull, "MOGA Pro", true);
+    paired[1] = Paired(0x222222222222ull, "Xbox Wireless Controller", true);
+    paired[2] = Paired(0x333333333333ull, "Zeemote JS1", true);
+    paired[3] = Paired(0x444444444444ull, "GAMEPAD", false); /* Only connected */
+    paired[4] = Paired(0x555555555555ull, "Phonejoy", true);
+
+    memset(&log, 0, sizeof(log));
+    count = SDL_RFCOMM_SelectDevices(paired, 5, enabled, devices, SDL_RFCOMM_MAX_DEVICES, IgnoreMogaPro, &log);
+    CHECK(count == 2 && devices[0].address == 0x333333333333ull && devices[1].address == 0x555555555555ull);
+    /* Asked only about the devices the selection would take, with their families */
+    CHECK(log.calls == 3 && log.addresses[0] == 0x111111111111ull && log.families[0] == SDL_RFCOMM_FAMILY_MOGA &&
+          log.families[1] == SDL_RFCOMM_FAMILY_ZEEMOTE && log.families[2] == SDL_RFCOMM_FAMILY_PHONEJOY);
+    /* With room for one device, the one after the device left out gets it */
+    memset(&log, 0, sizeof(log));
+    count = SDL_RFCOMM_SelectDevices(paired, 5, enabled, devices, 1, IgnoreMogaPro, &log);
+    CHECK(count == 1 && devices[0].address == 0x333333333333ull);
+    /* Without a predicate nothing is left out */
+    count = SDL_RFCOMM_SelectDevices(paired, 5, enabled, devices, SDL_RFCOMM_MAX_DEVICES, NULL, &log);
+    CHECK(count == 3 && devices[0].address == 0x111111111111ull);
 }
 
 static SDL_RFCOMMDevice Device(uint64_t address, SDL_RFCOMMFamily family, const char *name)
@@ -497,10 +548,98 @@ static void TestHelpers(void)
     CHECK(SDL_RFCOMM_TriggerFromU8(0) == -32768 && SDL_RFCOMM_TriggerFromU8(255) == 32767);
 }
 
+/* The CRC-16 SDL_crc16 computes, CRC-16/ARC */
+static uint16_t Crc16(const char *text)
+{
+    uint16_t crc = 0;
+    size_t i;
+    int bit;
+
+    for (i = 0; text[i]; ++i) {
+        crc ^= (uint8_t)text[i];
+        for (bit = 0; bit < 8; ++bit) {
+            crc = (uint16_t)((crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1));
+        }
+    }
+    return crc;
+}
+
+/* The product name in the joystick's GUID. SDL_CreateJoystickGUID keeps its
+   first 9 bytes, and SDL looks up an automatic mapping by those bytes alone,
+   so joysticks that should not share a mapping must not share them. */
+static void TestGUIDKey(void)
+{
+    /* Joystick names each family can present, and one name in two families */
+    static const struct
+    {
+        SDL_RFCOMMFamily family;
+        const char *name;
+    } identities[] = {
+        { SDL_RFCOMM_FAMILY_MOGA, "PowerA MOGA" },
+        { SDL_RFCOMM_FAMILY_MOGA, "MOGA Pro" },
+        { SDL_RFCOMM_FAMILY_MOGA, "MOGA Pro 2" },
+        { SDL_RFCOMM_FAMILY_ZEEMOTE, "Zeemote JS1" },
+        { SDL_RFCOMM_FAMILY_ZEEMOTE, "Zeemote JS1 H" },
+        { SDL_RFCOMM_FAMILY_BGP100, "Chainpus BGP100" },
+        { SDL_RFCOMM_FAMILY_PHONEJOY, "Phonejoy" },
+        { SDL_RFCOMM_FAMILY_MOGA, "Phonejoy" },
+    };
+    char key[SDL_RFCOMM_GUID_KEY_LENGTH], other[SDL_RFCOMM_GUID_KEY_LENGTH], expected[SDL_RFCOMM_GUID_KEY_LENGTH];
+    char small[10], longest[SDL_SERIAL_NAME_LENGTH];
+    size_t i, j;
+    int family;
+
+    CHECK(Crc16("123456789") == 0xBB3D);
+    SDL_RFCOMM_GUIDKey(key, sizeof(key), SDL_RFCOMM_FAMILY_ZEEMOTE, Crc16("Zeemote JS1 H"), "Zeemote JS1 H");
+    (void)snprintf(expected, sizeof(expected), "ZEE%04X Zeemote JS1 H", (unsigned int)Crc16("Zeemote JS1 H"));
+    CHECK(strcmp(key, expected) == 0);
+    for (i = 0; i < sizeof(identities) / sizeof(identities[0]); ++i) {
+        SDL_RFCOMM_GUIDKey(key, sizeof(key), identities[i].family, Crc16(identities[i].name), identities[i].name);
+        for (j = i + 1; j < sizeof(identities) / sizeof(identities[0]); ++j) {
+            SDL_RFCOMM_GUIDKey(other, sizeof(other), identities[j].family, Crc16(identities[j].name), identities[j].name);
+            if (strncmp(key, other, 9) == 0) {
+                printf("FAILED: \"%s\" and \"%s\" share the 9 bytes the GUID keeps\n", identities[i].name, identities[j].name);
+                H_Fail("two joysticks share a GUID's name bytes");
+            }
+        }
+    }
+    /* Every family has its own three-letter code, and then the CRC */
+    for (family = SDL_RFCOMM_FAMILY_NONE + 1; family < SDL_RFCOMM_FAMILY_COUNT; ++family) {
+        SDL_RFCOMM_GUIDKey(key, sizeof(key), (SDL_RFCOMMFamily)family, 0xBEEF, "x");
+        CHECK(strlen(key) == 9 && key[0] >= 'A' && key[0] <= 'Z' && key[1] >= 'A' && key[1] <= 'Z' && key[2] >= 'A' &&
+              key[2] <= 'Z' && strcmp(key + 3, "BEEF x") == 0);
+        for (j = SDL_RFCOMM_FAMILY_NONE + 1; j < (size_t)family; ++j) {
+            SDL_RFCOMM_GUIDKey(other, sizeof(other), (SDL_RFCOMMFamily)j, 0xBEEF, "x");
+            CHECK(strncmp(key, other, 3) != 0);
+        }
+    }
+    /* A small buffer cuts the name, and the longest name fits the full size */
+    SDL_RFCOMM_GUIDKey(small, sizeof(small), SDL_RFCOMM_FAMILY_MOGA, 0x0001, "MOGA Pro");
+    CHECK(strcmp(small, "MOG0001 M") == 0);
+    memset(longest, 'L', sizeof(longest) - 1);
+    longest[sizeof(longest) - 1] = '\0';
+    SDL_RFCOMM_GUIDKey(key, sizeof(key), SDL_RFCOMM_FAMILY_PHONEJOY, 0xFFFF, longest);
+    CHECK(strlen(key) == 8 + strlen(longest) && strcmp(key + 8, longest) == 0);
+}
+
+/* The state Open took goes out stamped at the Open, and a change the device
+   thread stamped just before the Open, but queued after it, carries an
+   earlier time. One joystick's events keep their order in time. */
+static void TestEventStamp(void)
+{
+    uint64_t last = 0;
+
+    CHECK(SDL_RFCOMM_EventStamp(&last, 116650000) == 116650000 && last == 116650000);
+    CHECK(SDL_RFCOMM_EventStamp(&last, 111610000) == 116650000 && last == 116650000);
+    CHECK(SDL_RFCOMM_EventStamp(&last, 116650000) == 116650000 && last == 116650000);
+    CHECK(SDL_RFCOMM_EventStamp(&last, 120000000) == 120000000 && last == 120000000);
+}
+
 int main(void)
 {
     TestMatch();
     TestSelect();
+    TestSelectIgnored();
     TestDiff();
     TestConnectOnce();
     TestFallback();
@@ -510,5 +649,7 @@ int main(void)
     TestHandOff();
     TestStop();
     TestHelpers();
+    TestGUIDKey();
+    TestEventStamp();
     return H_Finish();
 }

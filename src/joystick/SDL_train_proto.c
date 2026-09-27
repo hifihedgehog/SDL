@@ -457,7 +457,7 @@ static void Train_ShinkansenOutput(SDL_TrainControl *out, const uint8_t payload[
     Train_SetControl(out, 0x40, 0x09, 0x0301, payload, 8);
 }
 
-int SDL_Train_Rumble(int model, SDL_TrainOutputs *outputs, uint16_t low, uint16_t high, SDL_TrainControl out[2])
+int SDL_Train_Rumble(int model, const SDL_TrainOutputs *outputs, uint16_t low, uint16_t high, SDL_TrainControl out[2])
 {
     const bool left = (low != 0);
     const bool right = (high != 0);
@@ -467,20 +467,20 @@ int SDL_Train_Rumble(int model, SDL_TrainOutputs *outputs, uint16_t low, uint16_
     case SDL_TRAIN_TYPE2:
         if (left != outputs->left_motor) {
             Train_Type2Output(&out[count++], left ? 0x01 : 0x00, 0x01);
-            outputs->left_motor = left;
         }
         if (right != outputs->right_motor) {
             Train_Type2Output(&out[count++], right ? 0x01 : 0x00, 0x02);
-            outputs->right_motor = right;
         }
         return count;
     case SDL_TRAIN_SHINKANSEN:
         if (left != outputs->left_motor || right != outputs->right_motor) {
-            outputs->left_motor = left;
-            outputs->right_motor = right;
-            outputs->shinkansen[0] = left ? 0x01 : 0x00;
-            outputs->shinkansen[1] = right ? 0x01 : 0x00;
-            Train_ShinkansenOutput(&out[count++], outputs->shinkansen);
+            uint8_t payload[8];
+
+            /* The accepted displays with the new motor bytes */
+            memcpy(payload, outputs->shinkansen, sizeof(payload));
+            payload[0] = left ? 0x01 : 0x00;
+            payload[1] = right ? 0x01 : 0x00;
+            Train_ShinkansenOutput(&out[count++], payload);
         }
         return count;
     default:
@@ -488,7 +488,7 @@ int SDL_Train_Rumble(int model, SDL_TrainOutputs *outputs, uint16_t low, uint16_
     }
 }
 
-int SDL_Train_Effect(int model, SDL_TrainOutputs *outputs, const uint8_t *data, size_t size, SDL_TrainControl *out)
+int SDL_Train_Effect(int model, const uint8_t *data, size_t size, SDL_TrainControl *out)
 {
     if (!data) {
         return -1;
@@ -500,20 +500,12 @@ int SDL_Train_Effect(int model, SDL_TrainOutputs *outputs, const uint8_t *data, 
             return -1;
         }
         Train_Type2Output(out, data[0], data[1]);
-        if (data[1] == 0x01) {
-            outputs->left_motor = (data[0] != 0);
-        } else if (data[1] == 0x02) {
-            outputs->right_motor = (data[0] != 0);
-        }
         return 1;
     case SDL_TRAIN_SHINKANSEN:
         if (size != 8) {
             return -1;
         }
-        memcpy(outputs->shinkansen, data, 8);
-        outputs->left_motor = (data[0] != 0);
-        outputs->right_motor = (data[1] != 0);
-        Train_ShinkansenOutput(out, outputs->shinkansen);
+        Train_ShinkansenOutput(out, data);
         return 1;
     case SDL_TRAIN_MTC_P4B7:
     case SDL_TRAIN_MTC_P4B2B7:
@@ -528,6 +520,33 @@ int SDL_Train_Effect(int model, SDL_TrainOutputs *outputs, const uint8_t *data, 
         return 1;
     default:
         return -1;
+    }
+}
+
+void SDL_Train_Sent(int model, SDL_TrainOutputs *outputs, const SDL_TrainControl *control)
+{
+    if (!outputs || !control) {
+        return;
+    }
+    switch (model) {
+    case SDL_TRAIN_TYPE2:
+    case SDL_TRAIN_MTC_P5B8:
+        /* Status, then function: 1 the left motor, 2 the right one */
+        if (control->length == 2 && control->data[1] == 0x01) {
+            outputs->left_motor = (control->data[0] != 0);
+        } else if (control->length == 2 && control->data[1] == 0x02) {
+            outputs->right_motor = (control->data[0] != 0);
+        }
+        break;
+    case SDL_TRAIN_SHINKANSEN:
+        if (control->length == 8) {
+            memcpy(outputs->shinkansen, control->data, 8);
+            outputs->left_motor = (control->data[0] != 0);
+            outputs->right_motor = (control->data[1] != 0);
+        }
+        break;
+    default:
+        break;
     }
 }
 
