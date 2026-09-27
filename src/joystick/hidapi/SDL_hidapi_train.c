@@ -46,6 +46,10 @@ SDL_COMPILE_TIME_ASSERT(train_hat_right, SDL_TRAIN_HAT_RIGHT == SDL_HAT_RIGHT);
 SDL_COMPILE_TIME_ASSERT(train_hat_down, SDL_TRAIN_HAT_DOWN == SDL_HAT_DOWN);
 SDL_COMPILE_TIME_ASSERT(train_hat_left, SDL_TRAIN_HAT_LEFT == SDL_HAT_LEFT);
 
+/* An output runs under the joystick lock, so each transfer waits at most
+ * this long, as the fork's other short control requests do */
+#define TRAIN_CONTROL_TIMEOUT_MS 100
+
 typedef struct
 {
     SDL_HIDAPI_Device *device;
@@ -121,7 +125,7 @@ static bool HIDAPI_DriverTrain_Send(SDL_DriverTrain_Context *ctx, const SDL_Trai
     }
     SDL_memcpy(data, control->data, sizeof(data));
     result = ctx->libusb->control_transfer(ctx->handle, control->request_type, control->request, control->value, control->index,
-                                           control->length ? data : NULL, control->length, 1000);
+                                           control->length ? data : NULL, control->length, TRAIN_CONTROL_TIMEOUT_MS);
     if (result < 0 || result != control->length) {
         return SDL_SetError("Couldn't send the train controller's output");
     }
@@ -209,10 +213,12 @@ static bool HIDAPI_DriverTrain_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Joy
     if (count < 0) {
         return SDL_Unsupported();
     }
+    // A transfer is recorded once the controller accepts it, so a failed one is built again on the next call
     for (i = 0; i < count; ++i) {
         if (!HIDAPI_DriverTrain_Send(ctx, &controls[i])) {
             return false;
         }
+        SDL_Train_Sent(ctx->model, &ctx->outputs, &controls[i]);
     }
     return true;
 }
@@ -245,10 +251,14 @@ static bool HIDAPI_DriverTrain_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL
     SDL_DriverTrain_Context *ctx = (SDL_DriverTrain_Context *)device->context;
     SDL_TrainControl control;
 
-    if (size <= 0 || SDL_Train_Effect(ctx->model, &ctx->outputs, (const Uint8 *)data, (size_t)size, &control) < 0) {
+    if (size <= 0 || SDL_Train_Effect(ctx->model, (const Uint8 *)data, (size_t)size, &control) < 0) {
         return SDL_SetError("The train controller takes no effect of %d bytes", size);
     }
-    return HIDAPI_DriverTrain_Send(ctx, &control);
+    if (!HIDAPI_DriverTrain_Send(ctx, &control)) {
+        return false;
+    }
+    SDL_Train_Sent(ctx->model, &ctx->outputs, &control);
+    return true;
 }
 
 static bool HIDAPI_DriverTrain_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, bool enabled)

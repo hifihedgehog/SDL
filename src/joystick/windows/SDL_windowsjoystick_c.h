@@ -93,6 +93,7 @@ struct joystick_hwdata
     Uint8 userid;           // XInput userid index for this joystick
     DWORD dwPacketNumber;
     int rb3pro_variant;     // A Rock Band 3 Pro instrument, subtype 15 or 25
+    BYTE rb3pro_extra[6];   // Its six trailing XUSB bytes in the last state posted
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
     void *paddle_context;
 #endif

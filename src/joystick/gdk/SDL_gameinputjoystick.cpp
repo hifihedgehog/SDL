@@ -214,6 +214,13 @@ static void GAMEINPUT_InternalAddOrFind(IGameInputDevice *pDevice)
     raw_type = GAMEINPUT_GetDeviceRawType(info);
 
     QueryDeviceName(info, vendor, product, &manufacturer_string, &product_string);
+    if (raw_type == SDL_GAMEINPUT_RAWTYPE_GUITAR_HERO_LIVE_GUITAR) {
+        // The guitar's name on every path, in the joystick name and the GUID's CRC
+        SDL_free(manufacturer_string);
+        SDL_free(product_string);
+        manufacturer_string = NULL;
+        product_string = SDL_strdup(SDL_GHL_DongleName(SDL_GHL_DONGLE_XBOXONE));
+    }
 
     if (IsXbox360WirelessAdapter(vendor, product) ||
         SDL_ShouldIgnoreJoystick(vendor, product, version, product_string) ||
@@ -592,7 +599,7 @@ static void CALLBACK GAMEINPUT_InternalSystemButtonCallback(
 
 #if GAMEINPUT_API_VERSION >= 3
 /* The Guitar Hero Live guitar wants GIP message 0x22 every 8 s, or the strum
-   bar cuts out held frets. A failed send stays due for the next update.
+   bar cuts out held frets. A failed send goes again 1000 ms later.
    RB4InstrumentMapper counts E_NOTIMPL from SendRawDeviceOutput as sent. */
 static void GAMEINPUT_SendGuitarHeroLiveKeepAlive(GAMEINPUT_InternalJoystickHwdata *hwdata)
 {

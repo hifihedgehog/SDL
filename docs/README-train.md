@@ -58,6 +58,12 @@ hard press of A to Misc2. The D-pad is hat 0.
   Type 2 (function 1 and 2 the motors, 3 the door lamp), the 8 output bytes
   on the Shinkansen, and one lamp byte on the Multi Train Controller and the
   Train Mascon (bit 4 the door lamp, the low nibble the signal lamp).
+- A rumble sends a transfer only for a motor whose state differs from the
+  state the controller last accepted, so repeating a request whose transfer
+  failed sends it again.
+- Each transfer waits at most 100 ms for the controller, since the call
+  holds SDL's joystick lock. A transfer that fails or times out makes the
+  call return false.
 - Closing the joystick turns the motors off and blanks the displays and
   lamps.
 
@@ -94,7 +100,8 @@ share the name "Pony Canyon Master Controller".
 ## Tests
 
 The protocol module is C99 with no SDL runtime and no I/O, and the USB and
-serial drivers share it. `test/controller-protocols` runs `testtrain` against
-every notch of every table, the buttons, the outputs and the event decoder,
-and `test/serial-joystick` runs `testserialmastercontroller` against the
-port, in normal and AddressSanitizer builds.
+serial drivers share it. `test/controller-protocols` builds and runs
+`test/testtrain.c` against every notch of every table, the buttons, the
+outputs and the event decoder, and `test/serial-joystick` runs
+`testserialmastercontroller` against the port, in normal and
+AddressSanitizer builds.

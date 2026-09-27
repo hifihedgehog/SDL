@@ -263,7 +263,8 @@ static void TestUDraw(void)
     CHECK(Posted(&idle, SDL_PS3EXT_UDRAW_AXIS_PRESSURE) && idle.axes[SDL_PS3EXT_UDRAW_AXIS_PRESSURE] == 0);
     CHECK(Posted(&idle, SDL_PS3EXT_UDRAW_AXIS_DISTANCE) && idle.axes[SDL_PS3EXT_UDRAW_AXIS_DISTANCE] == 0);
     CHECK(idle.has_accel);
-    CHECK(idle.accel[0] == 0 && idle.accel[1] == 0 && idle.accel[2] == 0x1EC - 0x200);
+    /* Lying face up, gravity reads +1 g on Y, out of the face */
+    CHECK(idle.accel[0] == 0 && idle.accel[1] == 0x200 - 0x1EC && idle.accel[2] == 0);
 
     /* 2. Pen at the origin */
     memcpy(report, udraw_idle, 27);
@@ -387,7 +388,9 @@ static void TestUDraw(void)
         }
     }
 
-    /* The accelerometer words */
+    /* The accelerometer words, in SDL's frame for a controller held in front
+       of you: X is the word at 19 less 0x200, Y 0x200 less the word at 23 and
+       Z 0x200 less the word at 21 */
     memcpy(report, udraw_idle, 27);
     report[19] = 0x15;
     report[20] = 0x02;
@@ -396,8 +399,34 @@ static void TestUDraw(void)
     report[23] = 0x17;
     report[24] = 0x02;
     CHECK(Decode(SDL_PS3EXT_UDRAW, report, 27, &out));
-    CHECK(out.accel[0] == 0x15 && out.accel[1] == 0x1E6 - 0x200 && out.accel[2] == 0x17);
+    CHECK(out.accel[0] == 21 && out.accel[1] == -23 && out.accel[2] == 26);
     CHECK(out.buttons == 0);
+    /* brandonw.net's readings: the axis that points up reads positive */
+    {
+        static const struct
+        {
+            uint16_t x, y, z; /* The words at 19, 21 and 23 */
+            int16_t accel[3];
+        } poses[] = {
+            { 0x200, 0x200, 0x217, { 0, -23, 0 } },   /* Upside down */
+            { 0x200, 0x1E6, 0x200, { 0, 0, 26 } },    /* The far edge down */
+            { 0x200, 0x215, 0x200, { 0, 0, -21 } },   /* The near edge down */
+            { 0x215, 0x200, 0x200, { 21, 0, 0 } },    /* The left edge down */
+            { 0x1EA, 0x200, 0x200, { -22, 0, 0 } },   /* The right edge down */
+        };
+        for (i = 0; i < (int)(sizeof(poses) / sizeof(poses[0])); ++i) {
+            memcpy(report, udraw_idle, 27);
+            report[19] = (uint8_t)(poses[i].x & 0xFF);
+            report[20] = (uint8_t)(poses[i].x >> 8);
+            report[21] = (uint8_t)(poses[i].y & 0xFF);
+            report[22] = (uint8_t)(poses[i].y >> 8);
+            report[23] = (uint8_t)(poses[i].z & 0xFF);
+            report[24] = (uint8_t)(poses[i].z >> 8);
+            CHECK(Decode(SDL_PS3EXT_UDRAW, report, 27, &out));
+            CHECK(out.accel[0] == poses[i].accel[0] && out.accel[1] == poses[i].accel[1] &&
+                  out.accel[2] == poses[i].accel[2]);
+        }
+    }
 
     /* 9. Only 27 bytes, as Linux requires */
     CheckTruncations(SDL_PS3EXT_UDRAW, udraw_idle);

@@ -43,11 +43,15 @@ Input needs no command. The device's ID picks the layout. A thread asks the
 queries Linux asks, `O` until the device answers, 20 times at most, then `M`,
 `P`, `B`, `N`, `C`, `E`, `O` and `V`, each a vendor control request with a
 1000 ms timeout. A device that never answers `O` keeps its input and has no
-force feedback. Opening the joystick waits up to 1000 ms for the queries, so
-that a haptic device opened next knows the effect count and memory size.
+force feedback. Opening the joystick waits until `N` has been asked, up to
+1000 ms, so that a haptic device opened next knows the effect count and
+memory size. An unanswered `O` ends the wait, and `C`, `E`, the second `O`
+and `V` never hold it up.
 
-The driver serves only devices the libusb backend opens. A device that a
-platform HID backend opens stays with the other joystick backends.
+The driver serves only devices that libusb opens through WinUSB. A device
+that a platform HID backend opens stays with the other joystick backends, and
+so does one that libusb reaches through Windows' HID driver before WinUSB is
+bound, since that driver refuses the queries.
 
 ## RS-232
 
@@ -62,7 +66,8 @@ that arrives before the answers is dropped, as Linux drops it.
 
 The SDL haptic API serves the USB models only. On a serial device
 `SDL_SendJoystickEffect` takes one whole I-Force command, the command byte and
-exactly its data, and the driver frames it.
+exactly its data, and the driver frames it. Any other bytes fail the call.
+Commands go out in the order sent, and the call fails while 16 wait.
 
 ## Controls
 
@@ -113,6 +118,17 @@ the centering it powers up with.
   updates, and an update that comes sooner waits for its turn, replaced by
   any later one. Linux instead waits for a status packet that names the
   block.
+- An update whose commands fail to send is undone, and the call fails. The
+  same update sent again goes out, its parameter blocks no sooner than 20 ms
+  after the failed try, since the device may hold them. A waiting update
+  whose send fails waits again, three times in a row at most. Each try holds
+  the joystick lock for as long as the write takes, up to 1000 ms on an
+  endpoint that refuses data. After the third failed send the update is
+  dropped with a debug log line, and the next update of that effect is built
+  against the parameters the device held. A send that goes through starts
+  the count again.
+- The haptic functions can be called under the joystick lock, from an event
+  watcher or after `SDL_LockJoysticks`.
 - A trigger button n is the device's button n - 1, as SDL's DirectInput
   backend numbers them. 15 is the highest.
 - More than 255 iterations play 255 times.
@@ -140,7 +156,9 @@ the centering it powers up with.
 ## Tests
 
 The protocol module is C99 with no SDL runtime and no I/O, and both drivers
-share it. `test/controller-protocols` runs `testiforce` against the packets
-and commands, and `test/serial-joystick` runs `testserialiforce` against the
-framing and the query sequence on a scripted port, in normal and
-AddressSanitizer builds.
+share it. `test/controller-protocols` builds and runs `test/testiforce.c`
+against the packets and commands, and `test/serial-joystick` runs
+`testserialiforce` against the framing and the query sequence on a scripted
+port. `test/libusb-backend` runs `testiforcedriver`: the USB joystick driver
+against a fake libusb, and the haptic driver against a joystick that records
+its commands. All three run in normal and AddressSanitizer builds.

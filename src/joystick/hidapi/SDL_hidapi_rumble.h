@@ -46,7 +46,16 @@ void SDL_HIDAPI_UnlockRumble(void) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
    outlive an in-flight request. */
 typedef int (*SDL_HIDAPI_RumbleWriteFunc)(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
 
-// Simple API, will replace any pending rumble with the new data
+/* Queues a request with a send override after every pending request. Like
+   SDL_HIDAPI_SendRumbleAndUnlock it never merges into a pending request, so
+   requests of the same size and first byte go out in order, one each. A
+   later SDL_HIDAPI_SendRumble merges only into a request with its own write
+   function, so a rumble never overwrites one of these. */
+int SDL_HIDAPI_SendRumbleWithWriteFuncAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleWriteFunc write_func) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
+
+// Simple API, will replace the device's newest pending request with the new
+// data when both have the same size, first byte and write function, and
+// queues the data otherwise
 int SDL_HIDAPI_SendRumble(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
 int SDL_HIDAPI_SendRumbleWithWriteFunc(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleWriteFunc write_func);
 void SDL_HIDAPI_QuitRumble(void);

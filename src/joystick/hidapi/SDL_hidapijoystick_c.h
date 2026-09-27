@@ -155,6 +155,7 @@ typedef struct SDL_HIDAPI_Device
     struct SDL_HIDAPI_DeviceDriver *driver;
     void *context;
     SDL_hid_device *dev;
+    bool is_libusb; // dev came from the libusb backend
     SDL_AtomicInt rumble_pending;
     int num_joysticks;
     SDL_JoystickID *joysticks;
@@ -172,6 +173,18 @@ typedef struct SDL_HIDAPI_Device
     // Used to flag devices that failed open
     // This can happen on Windows with Bluetooth devices that have turned off
     bool broken;
+
+    // The path is opened again at the next device change, after its open
+    // failed or its driver's reads ended, as when WinUSB is bound to the
+    // device while SDL runs. reopen_change_count is the device change count
+    // the scan had then.
+    bool reopen;
+    Uint32 reopen_change_count;
+
+    // Set by a driver whose reads ended while its path can stay listed, as a
+    // receiver slot's path does while the receiver's other slots read. The
+    // driver is released after its update, and the path reopens as above.
+    bool reads_ended;
 
     struct SDL_HIDAPI_Device *parent;
     int num_children;
@@ -271,7 +284,10 @@ extern SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverTacx;
 // Return true if a HID device is present and supported as a joystick of the given type
 extern bool HIDAPI_IsDeviceTypePresent(SDL_GamepadType type);
 
-// Return true if a HID device is present and supported as a joystick
+// Return true if a HID device is present and supported as a joystick. On
+// Windows a device read through libusb on an interface other than a HID
+// interface does not count, since it is bound to a driver no other joystick
+// backend reads.
 extern bool HIDAPI_IsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
 extern bool HIDAPI_IsDeviceSupportedByAnyDriver(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
 

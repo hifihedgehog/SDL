@@ -26,6 +26,7 @@
 
 #include "../src/hidapi/SDL_hidapi_vendorusb.h"
 #include "../src/joystick/usb_ids.h"
+#include "../src/joystick/dji/SDL_dji_remote_proto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,10 +208,11 @@ static void TestRules(void)
     CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
 
     /* Part 6: the DJI RC's DUML interface, class 0xFF and subclass 0x43 on
-       any interface number and with any protocol. MTP and ADB stay out. */
+       any interface number and with any protocol. MTP and ADB stay out. Its
+       driver builds only on Windows, so the rule serves Windows only. */
     rule = SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01);
     CHECK(rule && (rule->flags & SDL_VENDORUSB_MATCH_CLASS) && (rule->flags & SDL_VENDORUSB_ANY_PROTOCOL) &&
-          (rule->flags & SDL_VENDORUSB_RAW_OUTPUT) && !(rule->flags & SDL_VENDORUSB_WINDOWS_ONLY));
+          (rule->flags & SDL_VENDORUSB_RAW_OUTPUT) && (rule->flags & SDL_VENDORUSB_WINDOWS_ONLY));
     CHECK(rule && rule->in_endpoint == 0x83 && rule->out_endpoint == 0x02 && rule->alternate == 0);
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 0, 0xFF, 0x43, 0x00) == rule);
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x7F) == rule);
@@ -218,7 +220,8 @@ static void TestRules(void)
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 0, 0x06, 0x01, 0x01) == NULL);
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFE, 0x43, 0x01) == NULL);
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_DJI, 0x1021, 0, 0xFF, 0x43, 0x01) == NULL);
-    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER));
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
+    CHECK(!SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && !SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
     CHECK(SDL_VendorUSB_IsVendorDevice(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330));
     /* Without the flag the protocol still counts, as for the Big Button receiver */
     CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_MICROSOFT, USB_PRODUCT_XBOX360_BIGBUTTON_RECEIVER, 0, 0xFF, 0x5D, 0x05) == NULL);
@@ -499,7 +502,9 @@ static void TestOtherSelections(void)
 
     /* Constructed from dji-rc-joystick's endpoints: the DJI RC's bulk
      * interface 1, bulk OUT 0x02 and bulk IN 0x83 of 512 bytes at high
-     * speed. */
+     * speed. The rule leaves the read size to the endpoint, so a read takes
+     * one 512-byte packet, as dji-rc-joystick and DJI-RC-Emulator read it,
+     * and the driver's buffer holds it. */
     {
         static const unsigned char rm330[] = {
             9, 4, 1, 0, 2, 0xFF, 0x43, 0x01, 0,
@@ -508,11 +513,33 @@ static void TestOtherSelections(void)
         };
         const SDL_VendorUSBRule *dji = SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01);
 
+        CHECK(dji && dji->read_size == 0);
         CHECK(dji && Select(dji, 1, rm330, sizeof(rm330), &selection));
-        CHECK(selection.in.address == 0x83 && selection.in.transfer == SDL_VENDORUSB_TRANSFER_BULK && selection.in.read_size == 512);
+        CHECK(selection.in.address == 0x83 && selection.in.transfer == SDL_VENDORUSB_TRANSFER_BULK &&
+              selection.in.max_packet_size == 512 && selection.in.read_size == 512);
+        CHECK(selection.in.read_size <= SDL_DJI_BULK_READ_SIZE);
         CHECK(selection.out.address == 0x02 && selection.out.transfer == SDL_VENDORUSB_TRANSFER_BULK);
         /* Without its IN endpoint the interface cannot be used */
         CHECK(dji && !SDL_VendorUSB_SelectEndpoints(dji, 1, rm330, 16, &selection));
+    }
+
+    /* The same interface at SuperSpeed, where both endpoints have 1024-byte
+     * packets and each carries a companion descriptor. No source records
+     * the remote's bus speed. A read takes one 1024-byte packet, and the
+     * driver's buffer must hold it. */
+    {
+        static const unsigned char rm330_superspeed[] = {
+            9, 4, 1, 0, 2, 0xFF, 0x43, 0x01, 0,
+            7, 5, 0x02, 2, 0x00, 0x04, 0,
+            6, 0x30, 0, 0, 0, 0,
+            7, 5, 0x83, 2, 0x00, 0x04, 0,
+            6, 0x30, 0, 0, 0, 0,
+        };
+        const SDL_VendorUSBRule *dji = SDL_VendorUSB_FindRule(USB_VENDOR_DJI, USB_PRODUCT_DJI_RC_RM330, 1, 0xFF, 0x43, 0x01);
+
+        CHECK(dji && Select(dji, 1, rm330_superspeed, sizeof(rm330_superspeed), &selection));
+        CHECK(selection.in.address == 0x83 && selection.in.max_packet_size == 1024 && selection.in.read_size == 1024);
+        CHECK(selection.in.read_size <= SDL_DJI_BULK_READ_SIZE);
     }
 
     /* Constructed from the emulators' descriptors for the Namco USIO.
@@ -997,14 +1024,48 @@ static void TestEarlierRules(void)
         if (rule) {
             CHECK(!(rule->flags & SDL_VENDORUSB_IN_INTERRUPT));
             CHECK(rule->read_size == 0);
+            CHECK(rule->in_timeout == 0);
         }
     }
-    /* The trailing member follows the members every earlier initializer
+    /* The trailing members follow the members every earlier initializer
      * fills, so their values land where they did */
     {
         const SDL_VendorUSBRule *intel = IntelRule();
-        CHECK(intel && intel->in_size == 27 && intel->out_size == 25 && intel->read_size == 0);
+        CHECK(intel && intel->in_size == 27 && intel->out_size == 25 && intel->read_size == 0 && intel->in_timeout == 0);
         CHECK(offsetof(SDL_VendorUSBRule, read_size) > offsetof(SDL_VendorUSBRule, out_size));
+        CHECK(offsetof(SDL_VendorUSBRule, in_timeout) > offsetof(SDL_VendorUSBRule, read_size));
+    }
+}
+
+/* Only the Tacx rules end their IN transfers before the backend's 5000 ms.
+ * Every other rule of Part 14 leaves in_timeout 0. */
+static void TestInTimeout(void)
+{
+    static const struct
+    {
+        uint16_t vendor, product;
+        uint8_t number;
+    } others[] = {
+        { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_USIO, 0 },
+        { USB_VENDOR_NAMCO, USB_PRODUCT_NAMCO_H050_USJC, 0 },
+        { USB_VENDOR_KONAMI, USB_PRODUCT_KONAMI_P3IO, 0 },
+        { USB_VENDOR_KONAMI, USB_PRODUCT_KONAMI_P4IO, 0 },
+        { USB_VENDOR_CH_PRODUCTS, USB_PRODUCT_CH_PRODUCTS_MFP, 0 },
+        { USB_VENDOR_ERGODEX, USB_PRODUCT_ERGODEX_DX1, 1 },
+        { USB_VENDOR_NATURALPOINT, USB_PRODUCT_NATURALPOINT_TRACKIR2, 0 },
+        { USB_VENDOR_NATURALPOINT, USB_PRODUCT_NATURALPOINT_TRACKIR3, 0 },
+    };
+    static const uint16_t tacx[] = { USB_PRODUCT_TACX_T1904, USB_PRODUCT_TACX_T1932 };
+    size_t i;
+
+    for (i = 0; i < sizeof(others) / sizeof(others[0]); ++i) {
+        const SDL_VendorUSBRule *rule = SDL_VendorUSB_FindRule(others[i].vendor, others[i].product, others[i].number,
+                                                               0xFF, 0, 0);
+        CHECK(rule != NULL && rule->in_timeout == 0);
+    }
+    for (i = 0; i < sizeof(tacx) / sizeof(tacx[0]); ++i) {
+        const SDL_VendorUSBRule *rule = SDL_VendorUSB_FindRule(USB_VENDOR_TACX, tacx[i], 0, 0xFF, 0, 0);
+        CHECK(rule != NULL && rule->in_timeout != 0);
     }
 }
 
@@ -1233,15 +1294,18 @@ static void TestRoutingTable(void)
     CHECK(!OnLibUSB(M, "Gametrak", true));
     CHECK(!PlatformIgnores(M, "Gametrak"));
 
-    /* Part 6: the DJI RC's bulk interface reaches libusb on every platform,
-     * its MTP and ADB interfaces never do. */
+    /* Part 6: the DJI RC's bulk interface reaches libusb on Windows, where
+     * its driver builds, and its MTP and ADB interfaces never do. On Linux
+     * and macOS no interface of the remote reaches libusb, and the platform
+     * backend keeps it. */
     CHECK(OnLibUSB(W, "DJI RC bulk", true));
     CHECK(!OnLibUSB(W, "DJI RC MTP", true));
     CHECK(!OnLibUSB(W, "DJI RC ADB", true));
     CHECK(PlatformIgnores(W, "DJI RC bulk"));
-    CHECK(OnLibUSB(L, "DJI RC bulk", true));
-    CHECK(OnLibUSB(M, "DJI RC bulk", true));
+    CHECK(!OnLibUSB(L, "DJI RC bulk", true));
+    CHECK(!OnLibUSB(M, "DJI RC bulk", true));
     CHECK(!OnLibUSB(L, "DJI RC ADB", true));
+    CHECK(!PlatformIgnores(L, "DJI RC bulk") && !PlatformIgnores(M, "DJI RC bulk"));
 
     /* Part 8: the I-Force devices reach libusb on Windows once WinUSB is
        bound, and the platform backend leaves them. Elsewhere nothing changes,
@@ -1454,6 +1518,62 @@ static void TestHeldInterfaces(void)
             CHECK(SDL_VendorUSB_FindRule(d->vendor, d->product, d->number, d->cls, d->subclass, d->protocol) == NULL);
         }
     }
+}
+
+/* A device SDL reads through libusb on Windows on an interface that is not
+ * HID class is bound to WinUSB, libusbK or libusb0, which no other Windows
+ * backend reads, so it is never the pad that XInput, RawInput,
+ * Windows.Gaming.Input, DirectInput or GameInput asks HIDAPI about. Every
+ * other device can be. */
+static void TestListedElsewhere(void)
+{
+    static const SDL_VendorUSBPlatform platforms[] = {
+        SDL_VENDORUSB_PLATFORM_OTHER, SDL_VENDORUSB_PLATFORM_WINDOWS, SDL_VENDORUSB_PLATFORM_MACOS
+    };
+    static const uint8_t classes[] = { 0x03, 0xFF, 0x58, 0x00 };
+    static const char *const bound[] = {
+        "Xbox 360 wired pad", "Xbox 360 wireless receiver", "Xbox One pad"
+    };
+    const SDL_VendorUSBPlatform W = SDL_VENDORUSB_PLATFORM_WINDOWS;
+    size_t p, c, i;
+    int libusb;
+
+    for (p = 0; p < sizeof(platforms) / sizeof(platforms[0]); ++p) {
+        for (libusb = 0; libusb < 2; ++libusb) {
+            for (c = 0; c < sizeof(classes) / sizeof(classes[0]); ++c) {
+                const bool expected = !(platforms[p] == W && libusb && classes[c] != 0x03);
+                const bool listed = SDL_VendorUSB_ListedElsewhere(platforms[p], libusb != 0, classes[c]);
+
+                if (listed != expected) {
+                    printf("  platform %d, libusb %d, class 0x%02X: listed %d, expected %d\n",
+                           (int)platforms[p], libusb, classes[c], listed, expected);
+                }
+                CHECK(listed == expected);
+            }
+        }
+    }
+
+    /* The wired pad, the receiver and an Xbox One pad bound to WinUSB reach
+       libusb on Windows and hide no pad that xusb22 or the GIP driver keeps.
+       Elsewhere nothing changes. */
+    for (i = 0; i < sizeof(bound) / sizeof(bound[0]); ++i) {
+        const Device *d = Find(bound[i]);
+
+        CHECK(OnLibUSB(W, bound[i], true));
+        CHECK(!SDL_VendorUSB_ListedElsewhere(W, true, d->cls));
+        CHECK(SDL_VendorUSB_ListedElsewhere(W, false, d->cls));
+        CHECK(SDL_VendorUSB_ListedElsewhere(SDL_VENDORUSB_PLATFORM_MACOS, true, d->cls));
+        CHECK(SDL_VendorUSB_ListedElsewhere(SDL_VENDORUSB_PLATFORM_OTHER, true, d->cls));
+    }
+    /* So does a vendor interface bound to WinUSB */
+    CHECK(!SDL_VendorUSB_ListedElsewhere(W, true, Find("Konami P3IO")->cls));
+    CHECK(!SDL_VendorUSB_ListedElsewhere(W, true, Find("Multi Train Controller")->cls));
+    /* A HID interface stays equivalent, whichever backend opened it: the
+       GameCube adapter's, and a HID pad libusb reaches with the whitelist
+       off */
+    CHECK(SDL_VendorUSB_ListedElsewhere(W, true, Find("GameCube adapter")->cls));
+    CHECK(SDL_VendorUSB_ListedElsewhere(W, true, Find("DualShock 4")->cls));
+    CHECK(SDL_VendorUSB_ListedElsewhere(W, false, Find("DualShock 4")->cls));
 }
 
 /* Part 15: libusb 1.0.29 claiming the interfaces of a device bound whole to
@@ -1767,6 +1887,70 @@ static void TestKonamiP4IO(void)
     }
 }
 
+/* The Creative Prodikeys PC-MIDI's interface 1 on Windows: interrupt IN 0x82
+ * and interrupt OUT 0x03, the endpoints Prodikeys64 reads and writes over
+ * WinUSB (prodikeys64.cpp:82, prodikeys-core.cpp:27). The descriptor below is
+ * constructed: its packet sizes are not on record. */
+static void TestProdikeysRule(void)
+{
+    const SDL_VendorUSBPlatform W = SDL_VENDORUSB_PLATFORM_WINDOWS;
+    const SDL_VendorUSBPlatform L = SDL_VENDORUSB_PLATFORM_OTHER;
+    const SDL_VendorUSBPlatform M = SDL_VENDORUSB_PLATFORM_MACOS;
+    static const Device keys = { "Prodikeys interface 1", USB_VENDOR_CREATIVE, USB_PRODUCT_CREATIVE_PRODIKEYS, 1, 0x03, 0x00, 0x00, false };
+    static const Device typing = { "Prodikeys interface 0", USB_VENDOR_CREATIVE, USB_PRODUCT_CREATIVE_PRODIKEYS, 0, 0x03, 0x01, 0x01, false };
+    static const unsigned char interface1[] = {
+        9, 4, 1, 0, 2, 0x03, 0x00, 0x00, 0,
+        9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0xB2, 0x00,
+        7, 5, 0x82, 3, 8, 0, 10,
+        7, 5, 0x03, 3, 8, 0, 10,
+    };
+    static const unsigned char in_only[] = {
+        9, 4, 1, 0, 1, 0x03, 0x00, 0x00, 0,
+        9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0xB2, 0x00,
+        7, 5, 0x82, 3, 8, 0, 10,
+    };
+    const SDL_VendorUSBRule *rule;
+    SDL_VendorUSBSelection selection;
+    SDL_VendorUSBRouting r;
+
+    CHECK(USB_VENDOR_CREATIVE == 0x041E && USB_PRODUCT_CREATIVE_PRODIKEYS == 0x2801);
+    rule = SDL_VendorUSB_FindRule(USB_VENDOR_CREATIVE, USB_PRODUCT_CREATIVE_PRODIKEYS, 1, 0x03, 0x00, 0x00);
+    CHECK(rule && rule->flags == SDL_VENDORUSB_WINDOWS_ONLY && rule->interface_number == 1 && rule->alternate == 0);
+    CHECK(rule && rule->in_endpoint == 0x82 && rule->out_endpoint == 0x03 && rule->in_size == 0 &&
+          rule->out_size == 0 && rule->read_size == 0);
+    CHECK(SDL_VendorUSB_FindRule(USB_VENDOR_CREATIVE, USB_PRODUCT_CREATIVE_PRODIKEYS, 0, 0x03, 0x01, 0x01) == NULL);
+    CHECK(SDL_VendorUSB_RuleApplies(rule, W) && !SDL_VendorUSB_RuleApplies(rule, L) && !SDL_VendorUSB_RuleApplies(rule, M));
+    CHECK(SDL_VendorUSB_IsVendorDevice(USB_VENDOR_CREATIVE, USB_PRODUCT_CREATIVE_PRODIKEYS));
+
+    /* Output report 6 keeps its ID byte, so 06 01 C1 leaves on 0x03 whole */
+    if (rule) {
+        memset(&selection, 0, sizeof(selection));
+        CHECK(Select(rule, 1, interface1, sizeof(interface1), &selection));
+        CHECK(selection.alternate == 0);
+        CHECK(selection.in.address == 0x82 && selection.in.transfer == SDL_VENDORUSB_TRANSFER_INTERRUPT && selection.in.read_size == 8);
+        CHECK(selection.out.address == 0x03 && selection.out.transfer == SDL_VENDORUSB_TRANSFER_INTERRUPT);
+        CHECK(!Select(rule, 1, in_only, sizeof(in_only), &selection));
+    }
+
+    /* On Windows libusb takes interface 1 and leaves interface 0, the typing
+       keys, and the platform backend skips the whole device. Elsewhere the
+       platform backend keeps it and libusb leaves it. */
+    r = Route(W, true, &keys);
+    CHECK(NewLibUSBEnumerates(&r, &keys, true));
+    r = Route(W, true, &typing);
+    CHECK(!NewLibUSBEnumerates(&r, &typing, true));
+    r = Route(W, false, &keys);
+    CHECK(SDL_VendorUSB_Ignore(&r));
+    r = Route(L, true, &keys);
+    CHECK(!NewLibUSBEnumerates(&r, &keys, true));
+    r = Route(M, true, &keys);
+    CHECK(!NewLibUSBEnumerates(&r, &keys, true));
+    r = Route(L, false, &keys);
+    CHECK(!SDL_VendorUSB_Ignore(&r));
+    r = Route(M, false, &keys);
+    CHECK(!SDL_VendorUSB_Ignore(&r));
+}
+
 /* The documented differences from the old rules. Every case where the new
  * rules differ from the old ones must be one of these. */
 static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
@@ -1789,12 +1973,12 @@ static bool ExpectedChange(const SDL_VendorUSBRouting *r, const Device *d)
     const bool tacx = (d->vendor == USB_VENDOR_TACX && (d->product == USB_PRODUCT_TACX_T1904 ||
                                                         d->product == USB_PRODUCT_TACX_T1932));
 
-    if (intel || dji || guncon2 || train) {
+    if (intel || guncon2 || train) {
         return true; /* A new member of the path */
     }
-    if ((gametrak || iforce || usio || p3io || p4io || keypad || trackir || tacx) &&
+    if ((gametrak || dji || iforce || usio || p3io || p4io || keypad || trackir || tacx) &&
         r->platform == SDL_VENDORUSB_PLATFORM_WINDOWS) {
-        return true; /* Parts 7, 8 and 14: on the path on Windows only */
+        return true; /* Parts 6, 7, 8 and 14: on the path on Windows only */
     }
     if (bigbutton && d->protocol != 0x04) {
         return true; /* Only the receiver's own interface is enumerated */
@@ -1861,11 +2045,14 @@ int main(void)
     TestInterruptRule();
     TestReadSize();
     TestEarlierRules();
+    TestInTimeout();
     TestRoutingTable();
     TestHeldInterfaces();
+    TestListedElsewhere();
     TestClaimOrder();
     TestKonamiP4IO();
     TestAgainstOldRules();
+    TestProdikeysRule();
     printf("%s: %d checks, %d failures\n", failures ? "FAILED" : "PASSED", checks, failures);
     return failures ? 1 : 0;
 }

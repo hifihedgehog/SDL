@@ -123,7 +123,7 @@ static void JVS_StartReset(SDL_JVSState *s)
     s->boards = 0;
     s->board = 0;
     s->players = 0;
-    s->poll_board_of_player1 = -1;
+    s->analog_board = -1;
     s->awaiting = false;
     s->step = SDL_JVS_STEP_RESET1;
     JVS_Send(s, SDL_JVS_BROADCAST, reset, sizeof(reset));
@@ -209,8 +209,19 @@ static void JVS_Poll(SDL_JVSState *s, int board)
     JVS_Request(s, (uint8_t)(board + 1), data, n);
 }
 
-/* The next board with something to poll after the one just polled */
-static void JVS_NextPoll(SDL_JVSState *s)
+/* The bus is scanned again in 1000 ms, as when no board answers, so a board
+ * that joins later is found */
+static void JVS_Rescan(SDL_JVSState *s, uint64_t now)
+{
+    s->awaiting = false;
+    s->step = SDL_JVS_STEP_SCAN;
+    JVS_SetTimer(s, now + SDL_JVS_SCAN_MS);
+}
+
+/* The next board with something to poll after the one just polled. With
+ * none, which an identification can leave when its players report no
+ * switch and no board reports another input, the bus is scanned again. */
+static void JVS_NextPoll(SDL_JVSState *s, uint64_t now)
 {
     int i;
 
@@ -222,25 +233,24 @@ static void JVS_NextPoll(SDL_JVSState *s)
             return;
         }
     }
-    s->step = SDL_JVS_STEP_POLL;
-    s->awaiting = false;
+    JVS_Rescan(s, now);
 }
 
 static void JVS_PresentPlayers(SDL_JVSState *s)
 {
     int board, total = 0, g;
 
-    s->poll_board_of_player1 = -1;
+    s->analog_board = -1;
     for (board = 0; board < s->boards; ++board) {
         SDL_JVSBoard *b = &s->board_info[board];
         const int room = SDL_JVS_MAX_PLAYERS - total;
 
         b->first_player = (uint8_t)total;
         b->mapped_players = (uint8_t)((b->players < room) ? b->players : room);
-        if (b->mapped_players && total == 0) {
-            s->poll_board_of_player1 = board;
-        }
         total += b->mapped_players;
+        if (s->analog_board < 0 && (b->analog || b->rotary)) {
+            s->analog_board = board;
+        }
     }
     s->players = total;
     for (g = 0; g < total; ++g) {
@@ -248,8 +258,10 @@ static void JVS_PresentPlayers(SDL_JVSState *s)
         char name[SDL_SERIAL_NAME_LENGTH];
         int naxes = 0;
 
-        if (g == 0) {
-            const SDL_JVSBoard *b = &s->board_info[s->poll_board_of_player1];
+        if (g == 0 && s->analog_board >= 0) {
+            /* The channels of the first board that reports any, whichever
+               board has player 1 */
+            const SDL_JVSBoard *b = &s->board_info[s->analog_board];
             const int analog = (b->analog < 8) ? b->analog : 8;
             const int rotary = (analog + b->rotary > SDL_SERIAL_MAX_AXES) ? SDL_SERIAL_MAX_AXES - analog : b->rotary;
 
@@ -257,6 +269,8 @@ static void JVS_PresentPlayers(SDL_JVSState *s)
         }
         (void)snprintf(name, sizeof(name), "JVS I/O Player %d", g + 1);
         SDL_Serial_SetIdentity(&identity, name, SDL_SERIAL_TYPE_ARCADE_STICK, naxes, (g == 0) ? 14 : 13, 1, 0);
+        /* Player N is player index N - 1 */
+        identity.player_index = (int8_t)g;
         /* JoypadOS's arcade layout. Analog and rotary axes stay out. */
         identity.has_mapping = true;
         identity.mapping.x = SDL_Serial_MapButton(0);
@@ -281,17 +295,26 @@ static void JVS_PresentPlayers(SDL_JVSState *s)
         identity.mapping.dpright = SDL_Serial_MapHat(0, SDL_SERIAL_HAT_RIGHT);
         SDL_Serial_Present(&s->base, g, &identity);
     }
-    if (total == 0) {
+    /* Once, and again only after players were found, so the scans that
+       repeat for a bus with no player do not log it each time */
+    if (total == 0 && !s->logged_no_players) {
         SDL_Serial_Log(&s->base, "No JVS board reports player switches");
     }
+    s->logged_no_players = (total == 0);
 }
 
-/* Every board answered 10 to 14: joysticks, then the polls */
-static void JVS_FinishIdentify(SDL_JVSState *s)
+/* Every board answered 10 to 14: joysticks, then the polls. With no player
+ * on any board, nothing a poll returns reaches a joystick, since coins and
+ * analog channels go to players, so the bus is scanned again instead. */
+static void JVS_FinishIdentify(SDL_JVSState *s, uint64_t now)
 {
     JVS_PresentPlayers(s);
     s->board = s->boards - 1;
-    JVS_NextPoll(s);
+    if (s->players == 0) {
+        JVS_Rescan(s, now);
+        return;
+    }
+    JVS_NextPoll(s, now);
 }
 
 static bool JVS_ParseFeatures(SDL_JVSBoard *b, const uint8_t *entries, size_t length)
@@ -395,7 +418,7 @@ static void JVS_IdentifyReply(SDL_JVSState *s, const uint8_t *data, size_t lengt
     } else if (s->board + 1 < s->boards) {
         JVS_Identify(s, s->board + 1, JVS_CMD_IDENTIFY);
     } else {
-        JVS_FinishIdentify(s);
+        JVS_FinishIdentify(s, now);
     }
 }
 
@@ -407,11 +430,27 @@ static int16_t JVS_Centered(uint16_t value)
     return (int16_t)((v >= 0x8000) ? v - 0x10000 : v);
 }
 
+/* Player 1's axes from the answer of the board that carries them: its analog
+ * channels, up to 8, then its rotary channels */
+static void JVS_Axes(const SDL_JVSBoard *b, const uint8_t *data, size_t analog_at, size_t rotary_at, SDL_SerialControls *controls)
+{
+    const int analog = (b->analog < 8) ? b->analog : 8;
+    int axis = 0, c;
+
+    for (c = 0; c < analog; ++c) {
+        controls->axes[axis++] = JVS_Centered((uint16_t)((data[analog_at + 2 * (size_t)c] << 8) | data[analog_at + 2 * (size_t)c + 1]));
+    }
+    for (c = 0; c < b->rotary && axis < SDL_SERIAL_MAX_AXES; ++c) {
+        controls->axes[axis++] = JVS_Centered((uint16_t)((data[rotary_at + 2 * (size_t)c] << 8) | data[rotary_at + 2 * (size_t)c + 1]));
+    }
+}
+
 static void JVS_PollReply(SDL_JVSState *s, const uint8_t *data, size_t length, uint64_t now)
 {
     SDL_JVSBoard *b = &s->board_info[s->board];
     const int bytes = JVS_SwitchBytes(b);
     size_t p = 1, switch_at = 0, coin_at = 0, analog_at = 0, rotary_at = 0;
+    bool axes_done = false;
     int i;
 
     /* Check the whole answer before using any of it */
@@ -459,7 +498,10 @@ static void JVS_PollReply(SDL_JVSState *s, const uint8_t *data, size_t length, u
         return;
     }
 
-    /* Switches, and for player 1 TEST, analog and rotary */
+    /* Switches, and for player 1 TEST. Player 1 also takes the analog and
+     * rotary channels of the first board that reports any, in the same
+     * snapshot as its switches when that board has player 1, and alone when
+     * it does not. */
     if (b->players && bytes) {
         const uint8_t system = data[switch_at];
 
@@ -495,19 +537,18 @@ static void JVS_PollReply(SDL_JVSState *s, const uint8_t *data, size_t length, u
             if (g == 0) {
                 SDL_Serial_SetButton(&controls, SDL_JVS_BUTTON_TEST, (system & 0x80) != 0);
             }
-            if (g == 0 && s->board == s->poll_board_of_player1) {
-                const int analog = (b->analog < 8) ? b->analog : 8;
-                int axis = 0, c;
-
-                for (c = 0; c < analog; ++c) {
-                    controls.axes[axis++] = JVS_Centered((uint16_t)((data[analog_at + 2 * (size_t)c] << 8) | data[analog_at + 2 * (size_t)c + 1]));
-                }
-                for (c = 0; c < b->rotary && axis < SDL_SERIAL_MAX_AXES; ++c) {
-                    controls.axes[axis++] = JVS_Centered((uint16_t)((data[rotary_at + 2 * (size_t)c] << 8) | data[rotary_at + 2 * (size_t)c + 1]));
-                }
+            if (g == 0 && s->board == s->analog_board) {
+                JVS_Axes(b, data, analog_at, rotary_at, &controls);
+                axes_done = true;
             }
             SDL_Serial_Commit(&s->base, g, &controls);
         }
+    }
+    if (s->board == s->analog_board && s->players > 0 && !axes_done) {
+        SDL_SerialControls controls = s->base.snapshots[0].controls;
+
+        JVS_Axes(b, data, analog_at, rotary_at, &controls);
+        SDL_Serial_Commit(&s->base, 0, &controls);
     }
 
     /* Coins: a count that rose pulses the coin button once per coin. The
@@ -537,7 +578,7 @@ static void JVS_PollReply(SDL_JVSState *s, const uint8_t *data, size_t length, u
         }
     }
 
-    JVS_NextPoll(s);
+    JVS_NextPoll(s, now);
 }
 
 static void JVS_Frame(SDL_JVSState *s, uint64_t now)
@@ -676,7 +717,7 @@ static void JVS_Tick(void *state, uint64_t now)
         if (s->board > 0 && s->command == JVS_CMD_IDENTIFY) {
             s->awaiting = false;
             s->boards = s->board;
-            JVS_FinishIdentify(s);
+            JVS_FinishIdentify(s, now);
         } else {
             JVS_Error(s, now);
         }

@@ -100,7 +100,14 @@ protocol_test(xid "${PROTOCOL_TESTS}/testxid.c"
 
 # hifihedgehog/SDL#33 Part 7: HID devices the fork can already open.
 protocol_test(hidcollections "${PROTOCOL_TESTS}/testhidcollections.c"
-    "${PROTOCOL_HIDAPI}/SDL_hidapi_collections.c")
+    "${PROTOCOL_HIDAPI}/SDL_hidapi_collections.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_riftdk1_proto.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_riftdk1_fusion.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_wmr_proto.c"
+    "${PROTOCOL_JOYSTICK}/SDL_hidapi_wmr_key.c")
+if(NOT MSVC)
+    target_link_libraries(testprotocolhidcollections PRIVATE m)
+endif()
 
 protocol_test(speedforce "${PROTOCOL_TESTS}/testspeedforce.c"
     "${PROTOCOL_JOYSTICK}/SDL_hidapi_speedforce_proto.c")

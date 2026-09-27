@@ -31,12 +31,12 @@
 
 /* The NaturalPoint TrackIR 2, 131D:0150, and TrackIR 3, 131D:0155
  * (hifihedgehog/SDL#33 Part 14): one vendor interface, read through libusb
- * once WinUSB is bound. Commands go out on bulk OUT 0x02 through hid_write,
- * and the vendor rule reads bulk IN 0x82 16384 bytes at a time, as
- * linuxtrack does. The camera starts on a timed command sequence, which runs
- * in UpdateDevice, since SDL calls that for every device, and stops on
- * another in FreeDevice. The protocol lives in SDL_hidapi_trackir_proto.c,
- * where the offline tests run it. */
+ * once WinUSB is bound. Commands go out on OUT 0x02 through hid_write, and
+ * the vendor rule reads IN 0x82 16384 bytes at a time when the descriptor
+ * makes it bulk, as linuxtrack does. The camera starts on a timed command
+ * sequence, which runs in UpdateDevice, since SDL calls that for every
+ * device, and stops on another in FreeDevice. The protocol lives in
+ * SDL_hidapi_trackir_proto.c, where the offline tests run it. */
 
 typedef struct
 {

@@ -91,13 +91,23 @@ uint32_t SDL_Gametrak_NextKey(uint32_t key)
     return next & 0xFFFFFF;
 }
 
-static void Gametrak_SendStart(SDL_GametrakSession *session, const SDL_GametrakSink *sink)
+static void Gametrak_SendUnlock(SDL_GametrakSession *session, uint64_t now_ms, const SDL_GametrakSink *sink)
+{
+    session->phase = SDL_GAMETRAK_PHASE_UNLOCK;
+    session->answer_due_ms = now_ms + SDL_GAMETRAK_ANSWER_WAIT_MS;
+    session->key = SDL_GAMETRAK_INITIAL_KEY;
+    --session->unlocks_left;
+    sink->write(sink->userdata, gametrak_unlock, sizeof(gametrak_unlock));
+}
+
+static void Gametrak_SendStart(SDL_GametrakSession *session, uint64_t now_ms, const SDL_GametrakSink *sink)
 {
     uint8_t report[2];
 
     report[0] = 0x45;
     report[1] = SDL_GAMETRAK_INITIAL_KEY;
     session->phase = SDL_GAMETRAK_PHASE_STREAMING;
+    session->start_ms = now_ms;
     session->key = SDL_GAMETRAK_INITIAL_KEY;
     session->sensor_reports = 0;
     sink->write(sink->userdata, report, sizeof(report));
@@ -106,16 +116,18 @@ static void Gametrak_SendStart(SDL_GametrakSession *session, const SDL_GametrakS
 void SDL_Gametrak_Open(SDL_GametrakSession *session, uint64_t now_ms, const SDL_GametrakSink *sink)
 {
     memset(session, 0, sizeof(*session));
-    session->phase = SDL_GAMETRAK_PHASE_UNLOCK;
-    session->answer_due_ms = now_ms + SDL_GAMETRAK_ANSWER_WAIT_MS;
-    session->key = SDL_GAMETRAK_INITIAL_KEY;
-    sink->write(sink->userdata, gametrak_unlock, sizeof(gametrak_unlock));
+    session->unlocks_left = SDL_GAMETRAK_UNLOCK_ATTEMPTS;
+    Gametrak_SendUnlock(session, now_ms, sink);
 }
 
 void SDL_Gametrak_Update(SDL_GametrakSession *session, uint64_t now_ms, const SDL_GametrakSink *sink)
 {
     if (session->phase == SDL_GAMETRAK_PHASE_UNLOCK && now_ms >= session->answer_due_ms) {
-        Gametrak_SendStart(session, sink);
+        Gametrak_SendStart(session, now_ms, sink);
+    } else if (session->phase == SDL_GAMETRAK_PHASE_STREAMING && session->unlocks_left > 0 &&
+               now_ms >= session->start_ms + SDL_GAMETRAK_START_WAIT_MS) {
+        /* No sensor report since 45 23 */
+        Gametrak_SendUnlock(session, now_ms, sink);
     }
 }
 
@@ -124,9 +136,8 @@ bool SDL_Gametrak_HandleReport(SDL_GametrakSession *session, uint64_t now_ms, co
 {
     uint8_t expected;
 
-    (void)now_ms;
     if (session->phase == SDL_GAMETRAK_PHASE_UNLOCK && SDL_Gametrak_IsUnlockAnswer(report, length)) {
-        Gametrak_SendStart(session, sink);
+        Gametrak_SendStart(session, now_ms, sink);
         return false;
     }
     if (!SDL_Gametrak_DecodeReport(report, length, out)) {
@@ -135,6 +146,8 @@ bool SDL_Gametrak_HandleReport(SDL_GametrakSession *session, uint64_t now_ms, co
     if (session->phase != SDL_GAMETRAK_PHASE_STREAMING) {
         return true;
     }
+    /* The unit streams, so the unlock went through */
+    session->unlocks_left = 0;
 
     /* The key bits show the byte the unit expects in the next keep-alive */
     expected = (uint8_t)(SDL_Gametrak_NextKey(session->key) & 0xFF);

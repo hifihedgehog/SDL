@@ -27,8 +27,10 @@
  * SDL_HINT_JOYSTICK_SERIAL. Each port gets a thread that owns the handle and
  * runs one protocol module through the engine in src/joystick/serial. The
  * engine and the modules are pure C, tested offline. The thread hands
- * presence and snapshots to the joystick thread under the port's mutex, and
- * never takes the joystick lock.
+ * presence, snapshots and its log lines to the joystick thread under the
+ * port's mutex, and never takes the joystick lock. A port that stops is
+ * freed once its thread has ended, so the joystick thread waits for a close
+ * only in SDL_Quit.
  */
 
 #include "SDL_internal.h"
@@ -36,6 +38,7 @@
 #ifdef SDL_JOYSTICK_SERIAL
 
 #include "../SDL_sysjoystick.h"
+#include "../usb_ids.h"
 #include "../../SDL_hints_c.h"
 #include "../../core/windows/SDL_windows.h"
 #include "../serial/SDL_serial_engine.h"
@@ -79,6 +82,7 @@ SDL_COMPILE_TIME_ASSERT(serial_clrdtr, CLRDTR == SDL_SERIAL_CLRDTR);
 SDL_COMPILE_TIME_ASSERT(serial_setbreak, SETBREAK == SDL_SERIAL_SETBREAK);
 SDL_COMPILE_TIME_ASSERT(serial_clrbreak, CLRBREAK == SDL_SERIAL_CLRBREAK);
 SDL_COMPILE_TIME_ASSERT(serial_maxdword, MAXDWORD == SDL_SERIAL_MAXDWORD);
+SDL_COMPILE_TIME_ASSERT(serial_infinite, INFINITE == SDL_SERIAL_WAIT_FOREVER);
 SDL_COMPILE_TIME_ASSERT(serial_hat_up, SDL_HAT_UP == SDL_SERIAL_HAT_UP);
 SDL_COMPILE_TIME_ASSERT(serial_hat_right, SDL_HAT_RIGHT == SDL_SERIAL_HAT_RIGHT);
 SDL_COMPILE_TIME_ASSERT(serial_hat_down, SDL_HAT_DOWN == SDL_SERIAL_HAT_DOWN);
@@ -191,18 +195,27 @@ static const SDL_SerialModule *const serial_acio_modules[] = {
 /* Ports whose device identifies itself, by device instance ID prefix. The
  * parts that add such devices add rows. The last row is empty. */
 static const SDL_SerialAutoRule serial_auto_rules[] = {
-    /* The protocol port of the DJI RC-N1 family, interface 2. DJI's VCOM
-       driver binds it on PIDs 1020 and 1030, and other RC-N1 PIDs are not
-       recorded, so any DJI PID matches (hifihedgehog/SDL#33 Part 6). */
-    { "USB\\VID_2CA3&PID_????&MI_02\\", "dji", 0x2CA3, 0 },
+    /* The protocol port of the DJI RC-N1 family, interface 2 of the three
+       PIDs on which DJI's VCOM driver names it "DJI USB VCOM For Protocol".
+       Other DJI products carry a "DJI USB Virtual COM" port on interface 2,
+       which SDL leaves alone, and the hint reaches a remote on another PID
+       (hifihedgehog/SDL#33 Part 6). */
+    { "USB\\VID_2CA3&PID_1010&MI_02\\", "dji", 0x2CA3, 0x1010 },
+    { "USB\\VID_2CA3&PID_1020&MI_02\\", "dji", 0x2CA3, 0x1020 },
+    { "USB\\VID_2CA3&PID_1030&MI_02\\", "dji", 0x2CA3, 0x1030 },
     /* The Konami BIO2, a COM port on Windows' own USB serial driver. A row
        matches the device and any interface of it, as bemanitools' search by
        ID does. Token bio2 takes its mode from
        SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE (hifihedgehog/SDL#33 Part 14). */
-    { "USB\\VID_1CCF&PID_804C", "bio2", 0x1CCF, 0x804C },
-    { "USB\\VID_1CCF&PID_8040", "bio2", 0x1CCF, 0x8040 },
+    { "USB\\VID_1CCF&PID_804C", "bio2", USB_VENDOR_KONAMI, USB_PRODUCT_KONAMI_BIO2_804C },
+    { "USB\\VID_1CCF&PID_8040", "bio2", USB_VENDOR_KONAMI, USB_PRODUCT_KONAMI_BIO2_8040 },
     { NULL, NULL, 0, 0 }
 };
+
+#define SERIAL_NOTE_ENTRIES 16   /* Port thread log lines kept for the joystick thread */
+#define SERIAL_NOTE_LENGTH  160
+#define SERIAL_POLL_MS      3000 /* Automatic ports are scanned this often without COM port notifications */
+#define SERIAL_GATHER_SIZE  (17 * SDL_SERIAL_READ_SIZE) /* A finished read and sixteen that finish at once */
 
 typedef struct SERIAL_Sub
 {
@@ -211,8 +224,6 @@ typedef struct SERIAL_Sub
     SDL_SerialIdentity identity;
     SDL_SerialControls latest;
     uint64_t latest_sequence;
-    bool output_set;
-    SDL_SerialOutput output;
 
     /* The joystick thread's */
     uint32_t registered; /* The generation it has a joystick for, 0 when none */
@@ -229,11 +240,13 @@ typedef struct SERIAL_Port
     uint16_t usb_vendor;            /* For a port that identifies itself */
     uint16_t usb_product;
     bool auto_seen;                 /* Its device was present at the last scan */
+    bool stopping;                  /* Stopped: its joysticks are gone and its thread is told to end */
     void *module_state;
     SDL_SerialEngine engine;
     SDL_Thread *thread;
     SDL_Mutex *mutex;
     SDL_AtomicInt presence_changed;
+    SDL_AtomicInt exited; /* The port thread has ended, so the join returns at once */
 
     /* The port thread's */
     HANDLE handle;
@@ -251,11 +264,17 @@ typedef struct SERIAL_Port
     DWORD logged_error;
     uint8_t read_buffer[SDL_SERIAL_READ_SIZE];
     uint8_t write_buffer[SDL_SERIAL_MAX_WRITE];
+    uint8_t gathered[SERIAL_GATHER_SIZE]; /* Read and not yet handed to the engine */
+    size_t gathered_length;
 
     /* Under the mutex */
     SDL_SerialSnapshotQueue queue;
     uint64_t sequence;
     SERIAL_Sub subs[SDL_SERIAL_MAX_SUBDEVICES];
+    SDL_SerialOutbox outbox;
+    char notes[SERIAL_NOTE_ENTRIES][SERIAL_NOTE_LENGTH]; /* The port thread's log lines */
+    int note_count;
+    Uint32 notes_dropped;
 
     struct SERIAL_Port *next;
 } SERIAL_Port;
@@ -268,6 +287,7 @@ struct joystick_hwdata
     uint64_t sequence; /* The last snapshot sent */
     bool send_initial; /* The state Open took is not sent yet */
     Uint64 initial_stamp;
+    Uint64 last_stamp; /* Of the last event sent */
     SDL_SerialControls initial;
 };
 
@@ -288,21 +308,70 @@ static SERIAL_CM_Open_DevNode_Key serial_open_devnode_key;
 static SERIAL_CM_Register_Notification serial_register_notification;
 static SERIAL_CM_Unregister_Notification serial_unregister_notification;
 static SERIAL_HCMNOTIFICATION serial_notification;
+static Uint64 serial_last_poll; /* The last scan SERIAL_POLL_MS asked for */
 static SERIAL_CancelIoEx serial_cancel_io_ex;
 
-static void SERIAL_Log(const SERIAL_Port *port, const char *text)
+/* A log line from the port thread. SDL_LockJoysticks locks SDL_event_lock,
+   which an application's log callback also takes when it pushes an event,
+   and SDL_Quit waits for this thread with that lock held. So this thread
+   keeps its lines here and the joystick thread logs them, as the iCade
+   driver's thread does. */
+static void SERIAL_Note(SERIAL_Port *port, const char *format, ...)
 {
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Serial joystick %s (%s): %s", port->key, port->module->token, text);
+    va_list ap;
+
+    SDL_LockMutex(port->mutex);
+    if (port->note_count < SERIAL_NOTE_ENTRIES) {
+        va_start(ap, format);
+        (void)SDL_vsnprintf(port->notes[port->note_count], SERIAL_NOTE_LENGTH, format, ap);
+        va_end(ap);
+        ++port->note_count;
+    } else {
+        ++port->notes_dropped;
+    }
+    SDL_UnlockMutex(port->mutex);
 }
 
-/* A failing call is logged once until the error changes */
+/* On the joystick thread: logs the port thread's lines in order, with none
+   of the port's locks held */
+static void SERIAL_FlushNotes(SERIAL_Port *port)
+{
+    char notes[SERIAL_NOTE_ENTRIES][SERIAL_NOTE_LENGTH];
+    Uint32 dropped;
+    int count, i;
+
+    SDL_LockMutex(port->mutex);
+    count = port->note_count;
+    for (i = 0; i < count; ++i) {
+        SDL_memcpy(notes[i], port->notes[i], SERIAL_NOTE_LENGTH);
+    }
+    dropped = port->notes_dropped;
+    port->note_count = 0;
+    port->notes_dropped = 0;
+    SDL_UnlockMutex(port->mutex);
+
+    for (i = 0; i < count; ++i) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Serial joystick %s (%s): %s", port->key, port->module->token, notes[i]);
+    }
+    if (dropped) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Serial joystick %s (%s): %u more lines dropped", port->key, port->module->token, (unsigned int)dropped);
+    }
+}
+
+/* On the port thread */
+static void SERIAL_Log(SERIAL_Port *port, const char *text)
+{
+    SERIAL_Note(port, "%s", text);
+}
+
+/* On the port thread. A failing call is logged once until the error changes. */
 static void SERIAL_LogError(SERIAL_Port *port, const char *call, DWORD error)
 {
     if (error == port->logged_error) {
         return;
     }
     port->logged_error = error;
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Serial joystick %s (%s): %s failed with error %lu", port->key, port->module->token, call, (unsigned long)error);
+    SERIAL_Note(port, "%s failed with error %lu", call, (unsigned long)error);
 }
 
 static DWORD CALLBACK SERIAL_Notification(SERIAL_HCMNOTIFICATION notification, PVOID context, DWORD action, PVOID data, DWORD size)
@@ -512,6 +581,7 @@ static bool SERIAL_Open(void *userdata)
     port->read_pending = false;
     port->write_pending = false;
     port->read_idle = false;
+    port->gathered_length = 0;
     ResetEvent(port->read_event);
     ResetEvent(port->write_event);
     SERIAL_Log(port, "opened");
@@ -656,6 +726,8 @@ static void SERIAL_Close(void *userdata)
     }
     CloseHandle(port->handle);
     port->handle = INVALID_HANDLE_VALUE;
+    /* Bytes read and not yet fed belong to the closed port */
+    port->gathered_length = 0;
     SERIAL_Log(port, "closed");
 }
 
@@ -709,8 +781,34 @@ static const SDL_SerialPortOps serial_ops = {
     SERIAL_ModuleLog
 };
 
+/* Hands every byte read since the last call to the engine in one piece. A
+ * module runs its due deadlines after each piece it is fed, so bytes that
+ * waited in the driver while the thread did not run all reach it before
+ * any of its silence limits. */
+static void SERIAL_FeedGathered(SERIAL_Port *port)
+{
+    const size_t length = port->gathered_length;
+
+    if (length > 0) {
+        port->gathered_length = 0;
+        SDL_SerialEngine_Received(&port->engine, port->gathered, length, SDL_GetTicksNS());
+    }
+}
+
+/* The bytes of a finished read, kept for SERIAL_FeedGathered */
+static void SERIAL_Gather(SERIAL_Port *port, DWORD length)
+{
+    if (length > sizeof(port->gathered) - port->gathered_length) {
+        SERIAL_FeedGathered(port);
+    }
+    SDL_memcpy(port->gathered + port->gathered_length, port->read_buffer, length);
+    port->gathered_length += length;
+}
+
 /* Keeps one read posted while the engine reads. Reads that finish at once
- * are fed here. */
+ * are gathered here. After sixteen of them in a row with bytes it returns
+ * with no read posted, so the thread sees its events, and
+ * SDL_SerialEngine_GetWait then brings it back at once. */
 static void SERIAL_ReadMore(SERIAL_Port *port)
 {
     int rounds;
@@ -730,7 +828,7 @@ static void SERIAL_ReadMore(SERIAL_Port *port)
                 port->read_idle = true;
                 return;
             }
-            SDL_SerialEngine_Received(&port->engine, port->read_buffer, transferred, SDL_GetTicksNS());
+            SERIAL_Gather(port, transferred);
             continue;
         }
         if (GetLastError() == ERROR_IO_PENDING) {
@@ -738,11 +836,14 @@ static void SERIAL_ReadMore(SERIAL_Port *port)
             return;
         }
         SERIAL_LogError(port, "ReadFile", GetLastError());
+        SERIAL_FeedGathered(port);
         SDL_SerialEngine_Lost(&port->engine, SDL_GetTicksNS());
         return;
     }
 }
 
+/* Takes a posted read that has finished. Its bytes are gathered, and the
+ * thread feeds them on its next pass. */
 static void SERIAL_ReadDone(SERIAL_Port *port)
 {
     DWORD transferred = 0;
@@ -755,13 +856,14 @@ static void SERIAL_ReadDone(SERIAL_Port *port)
         }
         port->read_pending = false;
         SERIAL_LogError(port, "ReadFile", error);
+        SERIAL_FeedGathered(port);
         SDL_SerialEngine_Lost(&port->engine, SDL_GetTicksNS());
         return;
     }
     port->read_pending = false;
     /* 0 bytes is the 1000 ms read timeout. The next read goes out. */
     if (transferred > 0) {
-        SDL_SerialEngine_Received(&port->engine, port->read_buffer, transferred, SDL_GetTicksNS());
+        SERIAL_Gather(port, transferred);
     }
 }
 
@@ -785,23 +887,23 @@ static void SERIAL_WriteDone(SERIAL_Port *port)
     SDL_SerialEngine_WriteDone(&port->engine, transferred == port->write_length, SDL_GetTicksNS());
 }
 
+/* Hands the module every output request it can take now. A queued effect
+ * waits until the module's actions before it have gone out, so this runs on
+ * every pass of the thread. */
 static void SERIAL_TakeOutput(SERIAL_Port *port)
 {
-    SDL_SerialOutput requests[SDL_SERIAL_MAX_SUBDEVICES];
-    bool set[SDL_SERIAL_MAX_SUBDEVICES];
-    int sub;
+    SDL_SerialOutput request;
 
-    SDL_LockMutex(port->mutex);
-    for (sub = 0; sub < SDL_SERIAL_MAX_SUBDEVICES; ++sub) {
-        set[sub] = port->subs[sub].output_set;
-        requests[sub] = port->subs[sub].output;
-        port->subs[sub].output_set = false;
-    }
-    SDL_UnlockMutex(port->mutex);
-    for (sub = 0; sub < SDL_SERIAL_MAX_SUBDEVICES; ++sub) {
-        if (set[sub]) {
-            SDL_SerialEngine_Output(&port->engine, &requests[sub], SDL_GetTicksNS());
+    for (;;) {
+        bool taken;
+
+        SDL_LockMutex(port->mutex);
+        taken = SDL_Serial_TakeOutput(&port->outbox, &port->engine, &request);
+        SDL_UnlockMutex(port->mutex);
+        if (!taken) {
+            break;
         }
+        SDL_SerialEngine_Output(&port->engine, &request, SDL_GetTicksNS());
     }
 }
 
@@ -817,7 +919,8 @@ typedef enum SERIAL_Wake
 /* Only this thread touches the handle and the module state. A module whose
  * device must hear from the host before the port closes, such as a
  * streaming PANB, keeps the thread through its close sequence, which
- * SDL_SERIAL_CLOSE_MS bounds. */
+ * SDL_SERIAL_CLOSE_MS bounds. Once exited is set, the joystick thread joins
+ * it and frees the port. */
 static int SDLCALL SERIAL_PortThread(void *data)
 {
     SERIAL_Port *port = (SERIAL_Port *)data;
@@ -827,26 +930,31 @@ static int SDLCALL SERIAL_PortThread(void *data)
     for (;;) {
         HANDLE handles[5];
         SERIAL_Wake wakes[5];
-        DWORD count = 0, timeout = INFINITE, result;
-        uint64_t deadline;
+        DWORD count = 0, timeout, result;
 
+        /* Bytes that came while the thread waited, or went unscheduled,
+           reach the module in one piece before Run runs its deadlines, so a
+           device whose bytes wait in the driver is never taken for silent. A
+           read that finished while another event woke the thread is taken
+           first. */
+        if (port->read_pending) {
+            SERIAL_ReadDone(port);
+        }
+        SERIAL_ReadMore(port);
+        SERIAL_FeedGathered(port);
         SDL_SerialEngine_Run(&port->engine, SDL_GetTicksNS());
         SERIAL_ReadMore(port);
+        SERIAL_FeedGathered(port);
+        SERIAL_TakeOutput(port);
         if (stopping && !SDL_SerialEngine_IsStopping(&port->engine)) {
             /* The close sequence ended, or the port was lost during it. A
                read that finished at once can end it, so this follows the
                reads: a closed port has nothing left to wait for. */
             SDL_SerialEngine_Stop(&port->engine);
+            SDL_SetAtomicInt(&port->exited, 1);
             return 0;
         }
-        if (SDL_SerialEngine_GetDeadline(&port->engine, &deadline)) {
-            const Uint64 now = SDL_GetTicks();
-
-            timeout = (deadline <= now) ? 0 : (DWORD)SDL_min(deadline - now, (Uint64)0x7FFFFFFF);
-        }
-        if (port->read_idle && timeout > 10) {
-            timeout = 10;
-        }
+        timeout = SDL_SerialEngine_GetWait(&port->engine, SDL_GetTicks(), port->read_pending, port->read_idle);
         if (!stopping) {
             handles[count] = port->stop_event;
             wakes[count++] = SERIAL_WAKE_STOP;
@@ -877,11 +985,12 @@ static int SDLCALL SERIAL_PortThread(void *data)
             stopping = true;
             if (!SDL_SerialEngine_BeginStop(&port->engine, SDL_GetTicksNS())) {
                 SDL_SerialEngine_Stop(&port->engine);
+                SDL_SetAtomicInt(&port->exited, 1);
                 return 0;
             }
             break;
         case SERIAL_WAKE_OUTPUT:
-            SERIAL_TakeOutput(port);
+            /* The next pass takes the requests */
             break;
         case SERIAL_WAKE_RESCAN:
             SDL_SerialEngine_Rescan(&port->engine, SDL_GetTicksNS());
@@ -920,6 +1029,19 @@ static void SERIAL_FreePort(SERIAL_Port *port)
     SDL_free(port);
 }
 
+/* The USB IDs of a port that identifies itself: its row's, with the product
+   ID taken from the instance ID when the row gives none */
+static void SERIAL_AutoIds(const SDL_SerialAutoRule *rule, const char *instance_id, uint16_t *vendor_id, uint16_t *product_id)
+{
+    uint16_t vendor, product;
+
+    *vendor_id = rule->vendor_id;
+    *product_id = rule->product_id;
+    if (!*product_id && SDL_Serial_ParseUSBIds(instance_id, &vendor, &product)) {
+        *product_id = product;
+    }
+}
+
 static SERIAL_Port *SERIAL_StartPort(const char *key, const SDL_SerialModule *module, const SDL_SerialAutoRule *rule)
 {
     SERIAL_Port *port = (SERIAL_Port *)SDL_calloc(1, sizeof(*port));
@@ -933,15 +1055,7 @@ static SERIAL_Port *SERIAL_StartPort(const char *key, const SDL_SerialModule *mo
     port->module = module;
     port->rule = rule;
     if (rule) {
-        port->usb_vendor = rule->vendor_id;
-        port->usb_product = rule->product_id;
-        if (!port->usb_product) {
-            uint16_t vendor, product;
-
-            if (SDL_Serial_ParseUSBIds(key, &vendor, &product)) {
-                port->usb_product = product;
-            }
-        }
+        SERIAL_AutoIds(rule, key, &port->usb_vendor, &port->usb_product);
     }
     port->handle = INVALID_HANDLE_VALUE;
     port->module_state = SDL_calloc(1, module->state_size);
@@ -957,6 +1071,7 @@ static SERIAL_Port *SERIAL_StartPort(const char *key, const SDL_SerialModule *mo
         return NULL;
     }
     SDL_Serial_ClearQueue(&port->queue);
+    SDL_Serial_ClearOutbox(&port->outbox);
     SERIAL_LoadConfigManager();
 
     SDL_LockMutex(serial_lock);
@@ -982,10 +1097,13 @@ static SERIAL_Port *SERIAL_StartPort(const char *key, const SDL_SerialModule *mo
     return port;
 }
 
-/* Removes the port's joysticks, stops its thread and frees it */
+/* Removes the port's joysticks and tells its thread to end. The port stays
+   in the list, skipped as stopping, until SERIAL_ReapPorts frees it after
+   its thread has ended. So a hint change or a scan never waits for a close
+   sequence or an open that blocks, as the RFCOMM driver never waits for a
+   connect. Only SDL_Quit waits for the threads. */
 static void SERIAL_StopPort(SERIAL_Port *port, bool notify)
 {
-    SERIAL_Port **link;
     int sub;
 
     for (sub = 0; sub < SDL_SERIAL_MAX_SUBDEVICES; ++sub) {
@@ -1003,19 +1121,34 @@ static void SERIAL_StopPort(SERIAL_Port *port, bool notify)
             s->registered = 0;
         }
     }
+    port->stopping = true;
     SetEvent(port->stop_event);
-    SDL_WaitThread(port->thread, NULL);
-    port->thread = NULL;
+}
 
-    SDL_LockMutex(serial_lock);
-    for (link = &serial_ports; *link; link = &(*link)->next) {
-        if (*link == port) {
-            *link = port->next;
-            break;
+/* Frees the stopping ports whose thread has ended, or waits for every one */
+static void SERIAL_ReapPorts(bool wait)
+{
+    SERIAL_Port *port, *next, **link;
+
+    for (port = serial_ports; port; port = next) {
+        next = port->next;
+        if (!port->stopping || (!wait && !SDL_GetAtomicInt(&port->exited))) {
+            continue;
         }
+        SDL_WaitThread(port->thread, NULL);
+        port->thread = NULL;
+        SERIAL_FlushNotes(port);
+
+        SDL_LockMutex(serial_lock);
+        for (link = &serial_ports; *link; link = &(*link)->next) {
+            if (*link == port) {
+                *link = port->next;
+                break;
+            }
+        }
+        SDL_UnlockMutex(serial_lock);
+        SERIAL_FreePort(port);
     }
-    SDL_UnlockMutex(serial_lock);
-    SERIAL_FreePort(port);
 }
 
 static void SERIAL_LogHintEntry(void *userdata, const char *entry, size_t length, const char *reason)
@@ -1097,7 +1230,7 @@ static void SERIAL_ApplyHint(void)
     nnew = SERIAL_ResolveEntries(entries, nnew);
 
     for (port = serial_ports; port && nold < SDL_SERIAL_MAX_PORTS; port = port->next) {
-        if (!port->rule) {
+        if (!port->rule && !port->stopping) {
             SDL_strlcpy(old_entries[nold].key, port->key, sizeof(old_entries[nold].key));
             old_entries[nold].module = port->module;
             old_ports[nold++] = port;
@@ -1156,7 +1289,7 @@ static bool SERIAL_HintClaims(const char *instance_id)
     bool have_number = false, checked_number = false;
 
     for (port = serial_ports; port; port = port->next) {
-        if (port->rule) {
+        if (port->rule || port->stopping) {
             continue;
         }
         if (SDL_Serial_IsComKey(port->key, &hint_number)) {
@@ -1175,16 +1308,17 @@ static bool SERIAL_HintClaims(const char *instance_id)
 }
 
 /* Starts a port for each present device the table names, and stops the
- * ones that left, or all of them when SDL_HINT_JOYSTICK_SERIAL_AUTO is off */
+ * ones that left, or all of them when SDL_HINT_JOYSTICK_SERIAL_AUTO is off.
+ * A scan that cannot list the present ports changes nothing. */
 static void SERIAL_ScanAuto(void)
 {
     const int nrules = SERIAL_CountAutoRules();
-    SERIAL_Port *port, *next;
+    SERIAL_Port *port;
     WCHAR *list = NULL, *interface_path;
     bool any = false;
 
     for (port = serial_ports; port; port = port->next) {
-        if (port->rule) {
+        if (port->rule && !port->stopping) {
             port->auto_seen = false;
             any = true;
         }
@@ -1195,15 +1329,27 @@ static void SERIAL_ScanAuto(void)
     if (serial_auto && nrules > 0) {
         SERIAL_LoadConfigManager();
         list = SERIAL_ListInterfaces();
+        if (!list) {
+            return;
+        }
     }
     for (interface_path = list; interface_path && *interface_path; interface_path += SDL_wcslen(interface_path) + 1) {
         char *instance_id = SERIAL_InterfaceInstanceId(interface_path);
         const SDL_SerialAutoRule *rule = instance_id ? SDL_Serial_MatchAuto(serial_auto_rules, nrules, instance_id) : NULL;
         const SDL_SerialModule *module = rule ? SERIAL_ResolveModule(SERIAL_FindModule(rule->token)) : NULL;
+        uint16_t vendor = 0, product = 0;
 
-        if (module && !SERIAL_HintClaims(instance_id)) {
+        if (rule) {
+            SERIAL_AutoIds(rule, instance_id, &vendor, &product);
+        }
+        /* SDL's ignore lists, which the other Windows drivers apply, name a
+           device by its USB IDs. The name is not known before the device
+           answers, and SDL_ShouldIgnoreGamepad skips its name rules for a
+           NULL name. An ignored device's port is not opened, and one already
+           running is not seen, so it stops below. */
+        if (module && !SERIAL_HintClaims(instance_id) && !SDL_ShouldIgnoreJoystick(vendor, product, 0, NULL)) {
             for (port = serial_ports; port; port = port->next) {
-                if (port->rule && SDL_Serial_KeysEqual(port->key, instance_id)) {
+                if (port->rule && !port->stopping && SDL_Serial_KeysEqual(port->key, instance_id)) {
                     break;
                 }
             }
@@ -1223,12 +1369,27 @@ static void SERIAL_ScanAuto(void)
     }
     SDL_free(list);
 
-    for (port = serial_ports; port; port = next) {
-        next = port->next;
-        if (port->rule && !port->auto_seen) {
+    for (port = serial_ports; port; port = port->next) {
+        if (port->rule && !port->stopping && !port->auto_seen) {
             SERIAL_StopPort(port, true);
         }
     }
+}
+
+/* A port that identifies itself has its device's USB IDs, and the name only
+   feeds the GUID's CRC. A port the hint names has no IDs SDL can trust, so
+   its GUID takes the name form with vendor 0, keyed by SDL_Serial_GUIDKey
+   so each name and sub-device keeps its own gamepad mapping. The joystick's
+   name stays the identity's. */
+static SDL_GUID SERIAL_CreateGUID(const SERIAL_Port *port, int sub, const SDL_SerialIdentity *identity)
+{
+    char key[SDL_SERIAL_GUID_KEY_LENGTH];
+
+    if (port->rule) {
+        return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_USB, port->usb_vendor, port->usb_product, 0, NULL, identity->name, 's', identity->type);
+    }
+    SDL_Serial_GUIDKey(key, sizeof(key), SDL_crc16(0, identity->name, SDL_strlen(identity->name)), sub, identity->name);
+    return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_SERIAL, 0, 0, 0, NULL, key, 's', identity->type);
 }
 
 static void SERIAL_CheckPresence(SERIAL_Port *port)
@@ -1258,11 +1419,7 @@ static void SERIAL_CheckPresence(SERIAL_Port *port)
             s->registered = generation;
             s->joystick_identity = identity;
             s->instance_id = SDL_GetNextObjectID();
-            if (port->rule) {
-                s->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_USB, port->usb_vendor, port->usb_product, 0, NULL, identity.name, 's', identity.type);
-            } else {
-                s->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_SERIAL, 0, 0, 0, NULL, identity.name, 's', identity.type);
-            }
+            s->guid = SERIAL_CreateGUID(port, sub, &identity);
             SDL_PrivateJoystickAdded(s->instance_id);
         }
     }
@@ -1375,16 +1532,29 @@ static void SERIAL_JoystickDetect(void)
         SDL_SetAtomicInt(&serial_hint_changed, 0);
         SERIAL_ApplyHint();
     }
+    /* Without COM port notifications the automatic ports are scanned every
+       SERIAL_POLL_MS, as SDL's HIDAPI discovery polls without its own */
+    if (serial_auto && serial_cfgmgr32 && !serial_notification) {
+        const Uint64 now = SDL_GetTicks();
+
+        if (!serial_last_poll || now >= serial_last_poll + SERIAL_POLL_MS) {
+            serial_last_poll = now;
+            SDL_SetAtomicInt(&serial_rescan, 1);
+        }
+    }
     if (SDL_GetAtomicInt(&serial_rescan)) {
         SDL_SetAtomicInt(&serial_rescan, 0);
         SERIAL_ScanAuto();
     }
     for (port = serial_ports; port; port = port->next) {
-        if (SDL_GetAtomicInt(&port->presence_changed)) {
+        SERIAL_FlushNotes(port);
+        /* A stopping port's thread still reports presence while it closes */
+        if (!port->stopping && SDL_GetAtomicInt(&port->presence_changed)) {
             SDL_SetAtomicInt(&port->presence_changed, 0);
             SERIAL_CheckPresence(port);
         }
     }
+    SERIAL_ReapPorts(false);
 }
 
 /* Connection state is wired and the port holds the device, so no other
@@ -1428,8 +1598,13 @@ static int SERIAL_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
 
 static int SERIAL_JoystickGetDevicePlayerIndex(int device_index)
 {
-    (void)device_index;
-    return -1;
+    SERIAL_Port *port;
+    int sub;
+
+    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
+        return -1;
+    }
+    return port->subs[sub].joystick_identity.player_index;
 }
 
 static void SERIAL_JoystickSetDevicePlayerIndex(int device_index, int player_index)
@@ -1482,13 +1657,15 @@ static void SERIAL_SendControls(SDL_Joystick *joystick, const SDL_SerialControls
 
 /* The state Open took goes out before anything newer. SDL allocates a
  * joystick's axes and buttons only after Open returns, so Open sends
- * nothing itself. */
+ * nothing itself. A change the port thread stamped before Open took that
+ * state can follow it, so later events carry at least its stamp. */
 static void SERIAL_SendInitial(SDL_Joystick *joystick)
 {
     struct joystick_hwdata *hwdata = joystick->hwdata;
 
     if (hwdata->send_initial) {
         hwdata->send_initial = false;
+        hwdata->last_stamp = hwdata->initial_stamp;
         SERIAL_SendControls(joystick, &hwdata->initial, hwdata->initial_stamp);
     }
 }
@@ -1522,9 +1699,13 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
     }
 
     /* The state so far, sent by the first update. Queued snapshots up to it
-       are skipped. */
+       are skipped. A sub-device that left and came back since Detect
+       registered this generation holds the next generation's state, which
+       this joystick does not take, as the iCade driver's Open does not. */
     SDL_LockMutex(port->mutex);
-    hwdata->initial = s->latest;
+    if (s->generation == hwdata->generation) {
+        hwdata->initial = s->latest;
+    }
     hwdata->sequence = s->latest_sequence;
     SDL_UnlockMutex(port->mutex);
     /* A ball reports motion, and motion from before the open is not state */
@@ -1535,13 +1716,19 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
     return true;
 }
 
-static void SERIAL_PostOutput(SERIAL_Port *port, const SDL_SerialOutput *request)
+/* False when the port holds SDL_SERIAL_OUTPUT_QUEUE effects that have not
+   gone out */
+static bool SERIAL_PostOutput(SERIAL_Port *port, const SDL_SerialOutput *request)
 {
+    bool posted;
+
     SDL_LockMutex(port->mutex);
-    port->subs[request->sub].output = *request;
-    port->subs[request->sub].output_set = true;
+    posted = SDL_Serial_PostOutput(&port->outbox, port->module, request);
     SDL_UnlockMutex(port->mutex);
-    SetEvent(port->output_event);
+    if (posted) {
+        SetEvent(port->output_event);
+    }
+    return posted;
 }
 
 static bool SERIAL_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
@@ -1560,7 +1747,8 @@ static bool SERIAL_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_r
     request.sub = hwdata->sub;
     request.low_frequency_rumble = low_frequency_rumble;
     request.high_frequency_rumble = high_frequency_rumble;
-    SERIAL_PostOutput(hwdata->port, &request);
+    /* A rumble replaces the one before it, so it always finds room */
+    (void)SERIAL_PostOutput(hwdata->port, &request);
     return true;
 }
 
@@ -1581,6 +1769,8 @@ static bool SERIAL_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green
     return SDL_Unsupported();
 }
 
+/* A module that queues its effects sends every one it accepts, in order,
+   and a full queue fails the call. Otherwise the latest request goes out. */
 static bool SERIAL_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
 {
     struct joystick_hwdata *hwdata = joystick->hwdata;
@@ -1591,18 +1781,26 @@ static bool SERIAL_JoystickSendEffect(SDL_Joystick *joystick, const void *data, 
         return SDL_SetError("Serial joystick is no longer connected");
     }
     module = hwdata->port->module;
-    if (module->effect_max == 0) {
+    /* A negative size is outside every range */
+    switch (SDL_Serial_CheckEffect(module, (const uint8_t *)data, (size < 0) ? (size_t)-1 : (size_t)size)) {
+    case SDL_SERIAL_EFFECT_OK:
+        break;
+    case SDL_SERIAL_EFFECT_UNSUPPORTED:
         return SDL_Unsupported();
-    }
-    if (!data || size < (int)module->effect_min || size > (int)module->effect_max) {
-        return SDL_SetError("Serial %s effects take %d to %d bytes", module->token, (int)module->effect_min, (int)module->effect_max);
+    case SDL_SERIAL_EFFECT_INVALID:
+        return SDL_SetError("Serial %s effects are one whole command", module->token);
+    default:
+        return SDL_SetError("Serial %s effects take %d to %d bytes", module->token, (int)module->effect_min,
+                            (int)SDL_min(module->effect_max, (size_t)SDL_SERIAL_MAX_EFFECT));
     }
     SDL_zero(request);
     request.kind = SDL_SERIAL_OUTPUT_EFFECT;
     request.sub = hwdata->sub;
     request.length = (size_t)size;
     SDL_memcpy(request.data, data, (size_t)size);
-    SERIAL_PostOutput(hwdata->port, &request);
+    if (!SERIAL_PostOutput(hwdata->port, &request)) {
+        return SDL_SetError("Serial %s effect queue is full", module->token);
+    }
     return true;
 }
 
@@ -1646,7 +1844,7 @@ static void SERIAL_JoystickUpdate(SDL_Joystick *joystick)
         }
         SERIAL_SendInitial(target);
         target->hwdata->sequence = entry->sequence;
-        SERIAL_SendControls(target, &entry->controls, entry->stamp_ns);
+        SERIAL_SendControls(target, &entry->controls, SDL_Serial_EventStamp(&target->hwdata->last_stamp, entry->stamp_ns));
     }
 }
 
@@ -1669,19 +1867,18 @@ static void SERIAL_JoystickQuit(void)
         serial_unregister_notification(serial_notification);
         serial_notification = NULL;
     }
-    /* Every port starts its close at once, so the close sequences of
+    /* Every port is told before the first wait, so the close sequences of
        several ports run side by side and SDL_Quit waits for the longest
-       one, not their sum. The stop event is manual reset, so
-       SERIAL_StopPort setting it again changes nothing. */
-    SDL_LockMutex(serial_lock);
+       one, not their sum. The threads leave their log lines to this thread,
+       so a log callback that takes the joystick lock cannot hold them. */
     for (port = serial_ports; port; port = port->next) {
-        SetEvent(port->stop_event);
+        if (!port->stopping) {
+            SERIAL_StopPort(port, false);
+        }
     }
-    SDL_UnlockMutex(serial_lock);
-    while (serial_ports) {
-        SERIAL_StopPort(serial_ports, false);
-    }
+    SERIAL_ReapPorts(true);
     SERIAL_UnloadConfigManager();
+    serial_last_poll = 0;
     SDL_free(serial_hint);
     serial_hint = NULL;
     SDL_SetAtomicInt(&serial_hint_changed, 0);

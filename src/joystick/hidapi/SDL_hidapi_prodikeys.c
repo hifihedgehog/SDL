@@ -32,11 +32,13 @@
 #ifdef SDL_JOYSTICK_HIDAPI_PRODIKEYS
 
 /* The Creative Prodikeys PC-MIDI, 041E:2801, a PC keyboard with 37 music
- * keys. The typing keys stay with Windows. Interface 1 carries report 3,
+ * keys. The typing keys stay with the system. Interface 1 carries report 3,
  * note and velocity pairs from the music keys, and report 4, a 24-bit mask
  * of the other keys. Linux's hid-prodikeys sends output report 6, 01 C1,
- * before the music keys report, and the driver sends it at open. Report 1
- * stays with Windows. The joystick has 152 buttons, MIDI notes 0-127 at
+ * before the music keys report, and the driver sends it at open. On Windows
+ * interface 1 is read through libusb once WinUSB is bound to it, which takes
+ * reports 1 and 2, the media and sleep keys, from Windows. Elsewhere report
+ * 1 stays with the system. The joystick has 152 buttons, MIDI notes 0-127 at
  * octave 0 and then the 24 mask bits, and axis 0 is the velocity of the
  * latest press. The protocol lives in SDL_hidapi_prodikeys_proto.c, where
  * the offline tests run it. */

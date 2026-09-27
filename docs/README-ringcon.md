@@ -13,11 +13,14 @@ which `test/controller-protocols` replays.
   or as the right half of a pair, is the raw strain: signed 16-bit, rising as
   the ring is pressed and falling as it is pulled. It reads 0 while no
   Ring-Con polls. The axis stays out of the gamepad mapping.
-- Property `SDL.joystick.switch.ringcon` (boolean) is true while the strain
-  flows.
-- Property `SDL.joystick.switch.ringcon_rest` (number) holds the first strain
-  after the strain starts to flow. No source reads a calibration from the
-  ring, and rest values differ from ring to ring.
+- Property `SDL.joystick.switch.ringcon` (boolean) is true while the Ring-Con
+  polls, which begins after the Joy-Con answers `5A`, so it can turn true
+  before the first strain arrives.
+- Property `SDL.joystick.switch.ringcon_rest` (number) holds the first nonzero
+  strain after polling starts and reads 0 while no Ring-Con polls. Every start
+  captures it again: after a yield to NFC or the camera, a watchdog restart,
+  or the hint turning back on. No source reads a calibration from the ring,
+  and rest values differ from ring to ring.
 
 Axis 6 is the NIR camera's value, so every right Joy-Con now has 8 axes.
 
@@ -50,9 +53,13 @@ start, an absent Ring-Con or the hint turning off, the input mode the driver
 uses without the Ring-Con follows. Closing the joystick writes the same
 commands and waits for each reply.
 
-From the `5C` of the start until the stop ends, bytes 37-48 of report 0x30 hold
-the Ring-Con's data in place of the oldest IMU sample, so the driver posts
-two IMU samples per report instead of three.
+From the `5C` of the start until shortly after the stop's `5C` reset is
+answered, bytes 37-48 of report 0x30 hold the Ring-Con's data in place of the
+oldest IMU sample. A Joy-Con that kept a Ring-Con format from an earlier
+session zeroes bytes 37-42 from `22 01` on. The driver posts two IMU samples
+per report instead of three from the `22 01` of the start to the end of its
+stop. After a stop whose `5C` reset went unanswered, it keeps posting two
+until a later stop's reset is answered.
 
 If no nonzero strain arrives for 2 s while polling, the driver stops and
 starts once more. A second silent stretch without any strain in between ends

@@ -27,6 +27,7 @@
 #include "SDL_steam_virtual_gamepad.h"
 #include "SDL_gamepad_c.h"
 #include "SDL_gamepad_db.h"
+#include "SDL_ghl_proto.h"
 #include "SDL_rb3pro_proto.h"
 #include "SDL_train_proto.h"
 #include "controller_type.h"
@@ -40,6 +41,7 @@
 #include "hidapi/SDL_hidapi_ps3ext_proto.h"
 #include "hidapi/SDL_hidapi_sinput.h"
 #include "hidapi/SDL_hidapi_usio_proto.h"
+#include "hidapi/SDL_hidapi_wii_ext_proto.h"
 #include "hidapi/SDL_hidapi_xbox360acc_proto.h"
 #include "hidapi/SDL_hidapi_xid_proto.h"
 #include "hidapi/SDL_hidapijoystick_c.h"
@@ -1145,6 +1147,25 @@ static bool SDL_IsJoystickRB3Pro(Uint16 vendor, Uint16 product)
     return false;
 }
 
+/* The mapping of the PS3 driver's layout for the uDraw, the Top Shot guns and
+   the Tony Hawk boards, or NULL for any other device. The layouts are in
+   SDL_hidapi_ps3ext_proto.c, which builds with the HIDAPI joystick. */
+static const char *SDL_GetPS3ExtMapping(Uint16 vendor, Uint16 product)
+{
+#if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_PS3)
+    SDL_PS3ExtDevice device;
+    SDL_PS3ExtLayout layout;
+
+    if (SDL_PS3Ext_GetDevice(vendor, product, &device) && SDL_PS3Ext_GetLayout(device.variant, &layout)) {
+        return layout.mapping;
+    }
+#else
+    (void)vendor;
+    (void)product;
+#endif
+    return NULL;
+}
+
 /*
  * Helper function to guess at a mapping for HIDAPI gamepads
  */
@@ -1189,11 +1210,12 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
     }
 
 #if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XID)
-    if (SDL_XID_IsKnownID(vendor, product) || HIDAPI_GetInterfaceClassFromGUID(guid) == SDL_XID_INTERFACE_CLASS) {
+    if (SDL_XID_IsXIDJoystick(HIDAPI_GetInterfaceClassFromGUID(guid), vendor, product)) {
         /* An original Xbox XID device: GUID byte 15 is its subtype, the
-           dance-pad byte or the Steel Battalion byte. A known ID decides
-           without the device. Any other XID device is known by its interface
-           class while it is connected. */
+           dance-pad byte or the Steel Battalion byte. A connected device is
+           one only through its XID interface, since other drivers serve
+           products of some of the XID vendors. Without the device, a known
+           ID decides. */
         const char *xid_mapping = SDL_XID_GetMapping(guid.data[15]);
         if (!xid_mapping) {
             // The Steel Battalion has no gamepad shape, so it stays a joystick
@@ -1254,13 +1276,24 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
     }
 #endif
 
+#if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_WII)
     if (vendor == USB_VENDOR_NINTENDO &&
         (product == USB_PRODUCT_NINTENDO_WII_REMOTE || product == USB_PRODUCT_NINTENDO_WII_REMOTE2) &&
-        (guid.data[15] == k_eWiiExtensionControllerType_UDraw ||
-         guid.data[15] == k_eWiiExtensionControllerType_Drawsome)) {
-        // A pen tablet has no gamepad shape, so it stays a joystick with raw pen axes
-        return NULL;
+        SDL_WiiExt_IsDecodedType(guid.data[15])) {
+        /* A Wii Remote extension the extension module decodes
+           (hifihedgehog/SDL#33 Part 2). GUID byte 15 is its type, and the
+           module's mapping binds only the controls its decoder posts. A pen
+           tablet has no gamepad shape, so it stays a joystick with raw pen
+           axes. */
+        const char *wii_mapping = SDL_WiiExt_GetMapping(guid.data[15]);
+
+        if (!wii_mapping) {
+            return NULL;
+        }
+        SDL_strlcat(mapping_string, wii_mapping, sizeof(mapping_string));
+        return SDL_PrivateAddMappingForGUID(guid, mapping_string, &existing, SDL_GAMEPAD_MAPPING_PRIORITY_DEFAULT);
     }
+#endif
 
 #if defined(SDL_JOYSTICK_HIDAPI) && defined(SDL_JOYSTICK_HIDAPI_XBOX360)
     if (SDL_Xbox360Acc_IsAccessoryGUID(vendor, product, guid.data[15])) {
@@ -1406,15 +1439,12 @@ static GamepadMapping_t *SDL_CreateMappingForHIDAPIGamepad(SDL_GUID guid)
     } else if (SDL_IsJoystickRB3Pro(vendor, product)) {
         // The keys, frets and sensors have no gamepad control
         SDL_strlcat(mapping_string, SDL_RB3PRO_MAPPING, sizeof(mapping_string));
-    } else if ((vendor == USB_VENDOR_POWERA_ALT && product == USB_PRODUCT_THQ_PS3_UDRAW) ||
-               (vendor == USB_VENDOR_SCEA && product == USB_PRODUCT_SCEA_PS3_TONY_HAWK_RIDE) ||
-               (vendor == USB_VENDOR_RED_OCTANE && product == USB_PRODUCT_RED_OCTANE_SKATEBOARD)) {
-        // The pen and the board sensors have no gamepad control
-        SDL_strlcat(mapping_string, SDL_PS3EXT_MAPPING_BASE, sizeof(mapping_string));
-    } else if (vendor == USB_VENDOR_SCEA && product == USB_PRODUCT_SCEA_PS3_TOP_SHOT_ELITE) {
-        SDL_strlcat(mapping_string, SDL_PS3EXT_MAPPING_TOPSHOT_ELITE, sizeof(mapping_string));
-    } else if (vendor == USB_VENDOR_SCEA && product == USB_PRODUCT_SCEA_PS3_TOP_SHOT_FEARMASTER) {
-        SDL_strlcat(mapping_string, SDL_PS3EXT_MAPPING_TOPSHOT_FEARMASTER, sizeof(mapping_string));
+    } else if (SDL_GHL_GetDongle(vendor, product) != SDL_GHL_DONGLE_NONE) {
+        // The guitar's 11 buttons, without the touchpad or Share button its dongle's gamepad type would add
+        SDL_strlcat(mapping_string, SDL_GHL_MAPPING, sizeof(mapping_string));
+    } else if (SDL_GetPS3ExtMapping(vendor, product)) {
+        // The pen, the guns' aim and the board sensors have no gamepad control
+        SDL_strlcat(mapping_string, SDL_GetPS3ExtMapping(vendor, product), sizeof(mapping_string));
     } else {
         // All other gamepads have the standard set of 19 buttons and 6 axes
         if (SDL_IsJoystickGameCube(vendor, product)) {

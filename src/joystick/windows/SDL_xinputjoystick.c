@@ -495,14 +495,21 @@ void SDL_XINPUT_JoystickUpdate(SDL_Joystick *joystick)
         UpdateXInputJoystickState(joystick, &XInputState, &XBatteryInformation);
     }
 #else
-    // only fire events if the data changed from last time
-    if (XInputState.dwPacketNumber && XInputState.dwPacketNumber != joystick->hwdata->dwPacketNumber) {
+    /* Only fire events if the data changed from last time. The Rock Band 3
+       Pro instruments also post when only their six trailing bytes changed:
+       no source says whether dwPacketNumber counts them. */
+    if (XInputState.dwPacketNumber &&
+        (XInputState.dwPacketNumber != joystick->hwdata->dwPacketNumber ||
+         (extra && SDL_memcmp(extra, joystick->hwdata->rb3pro_extra, sizeof(joystick->hwdata->rb3pro_extra)) != 0))) {
         if (joystick->hwdata->rb3pro_variant) {
             UpdateXInputRB3ProState(joystick, &XInputState, extra, &XBatteryInformation);
         } else {
             UpdateXInputJoystickState(joystick, &XInputState, &XBatteryInformation);
         }
         joystick->hwdata->dwPacketNumber = XInputState.dwPacketNumber;
+        if (extra) {
+            SDL_memcpy(joystick->hwdata->rb3pro_extra, extra, sizeof(joystick->hwdata->rb3pro_extra));
+        }
     }
 #endif
 

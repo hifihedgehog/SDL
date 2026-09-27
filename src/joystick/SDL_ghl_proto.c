@@ -225,12 +225,6 @@ void SDL_GHL_KeepAliveStart(SDL_GHLKeepAlive *keepalive, uint64_t now_ms)
     keepalive->next_due_ms = now_ms;
 }
 
-void SDL_GHL_KeepAliveStop(SDL_GHLKeepAlive *keepalive)
-{
-    keepalive->active = false;
-    keepalive->next_due_ms = 0;
-}
-
 bool SDL_GHL_KeepAliveDue(const SDL_GHLKeepAlive *keepalive, uint64_t now_ms)
 {
     return keepalive->active && now_ms >= keepalive->next_due_ms;
@@ -238,7 +232,5 @@ bool SDL_GHL_KeepAliveDue(const SDL_GHLKeepAlive *keepalive, uint64_t now_ms)
 
 void SDL_GHL_KeepAliveSent(SDL_GHLKeepAlive *keepalive, uint64_t now_ms, bool success)
 {
-    if (success) {
-        keepalive->next_due_ms = now_ms + SDL_GHL_KEEPALIVE_INTERVAL_MS;
-    }
+    keepalive->next_due_ms = now_ms + (success ? SDL_GHL_KEEPALIVE_INTERVAL_MS : SDL_GHL_KEEPALIVE_RETRY_MS);
 }

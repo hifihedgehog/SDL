@@ -277,6 +277,8 @@ static void TestStartup(void)
     CHECK(H_IsWrite(H_NextCall(h), poll2_request, sizeof(poll2_request), 2650) && H_NextCall(h) == NULL);
     H_Feed(h, idle2, sizeof(idle2));
     CHECK(h->presence[1] == 1 && IsStageIdentity(&h->identity[1], "Konami DDR Stage P2") && H_NoButtons(h, 1));
+    /* The cabinet side gives the player index, as for the P3IO's pads */
+    CHECK(h->identity[0].player_index == 0 && h->identity[1].player_index == 1);
     /* And player 1's again, sequence 8 */
     CHECK(H_IsWrite(H_NextCall(h), expected, Encode(0x01, SDL_MDXF_CMD_POLL, 8, NULL, 0, expected), 2650));
     CHECK(strcmp(SDL_SerialMDXFModule.token, "mdxf") == 0 && SDL_SerialMDXFModule.state_size == sizeof(SDL_MDXFState));

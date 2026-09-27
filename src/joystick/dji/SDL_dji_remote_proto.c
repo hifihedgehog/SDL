@@ -228,8 +228,9 @@ static uint64_t DJI_PollMs(const SDL_DJIRemoteState *s)
     }
 }
 
-/* A start-up or poll write. Its completion runs the step timer. A write that
- * cannot be queued is tried again one period later. */
+/* A start-up or poll write. Its completion runs the step timer, or sends the
+ * next poll when a reply asked for one while the write was on its way. A
+ * write that cannot be queued is tried again one period later. */
 static void DJI_Write(SDL_DJIRemoteState *s, const uint8_t *data, size_t length, uint64_t now)
 {
     const uint8_t tag = DJI_NextSeq(s);
@@ -429,6 +430,7 @@ static void DJI_Restart(SDL_DJIRemoteState *s, uint64_t now)
     SDL_Serial_Absent(&s->base, 0);
     SDL_Serial_ClearActions(&s->base);
     s->waiting_seq = 0;
+    s->poll_due = false;
     DJI_Start(s, now);
 }
 
@@ -445,7 +447,9 @@ static void DJI_Phantom2Pass(SDL_DJIRemoteState *s, uint64_t now)
         s->controls.axes[SDL_DJI_AXIS_LEFT_Y] = (int16_t)-SDL_DJI_ScaleAxis(report.left_y, 0, 1000);
         s->controls.axes[SDL_DJI_AXIS_RIGHT_X] = SDL_DJI_ScaleAxis(report.right_x, 0, 1000);
         s->controls.axes[SDL_DJI_AXIS_RIGHT_Y] = (int16_t)-SDL_DJI_ScaleAxis(report.right_y, 0, 1000);
-        s->controls.axes[SDL_DJI_AXIS_DIAL] = SDL_DJI_ScaleAxis(report.dial, 0, 1000);
+        /* mDjiController negates the dial so that turning it right reads
+           positive, and slaterbbx's fork of it keeps that */
+        s->controls.axes[SDL_DJI_AXIS_DIAL] = (int16_t)-SDL_DJI_ScaleAxis(report.dial, 0, 1000);
         /* -780, 0 and 780 are the three positions. Any other value keeps
            the last one, as mDjiController does for the left lever. */
         for (i = 0; i < 2; ++i) {
@@ -570,14 +574,23 @@ static void DJI_OnFrame(void *userdata, const SDL_DJIFrame *frame)
         count = SDL_DJI_DecodeChannels(frame, values);
         if (count > 0) {
             if (s->kind == SDL_DJI_REMOTE_BULK && count == 6) {
-                /* The 06/01 answer came, so 06/F5 is not needed */
+                /* The 06/01 answer came, so 06/F5 is not needed, even when
+                   the first poll's completion comes after this answer */
                 s->fallback_timer = false;
+                s->fallback_armed = true;
             }
             DJI_OnChannels(s, values, count, now);
-            /* A reply asks for the next poll at once. The 06/F5 loop keeps
-               its own period, and a reply during a wait leaves the wait. */
+            /* A reply asks for the next poll at once. While a poll is still
+               on its way, its completion sends the next one, so the rate
+               does not depend on which of the two the port reports first.
+               The 06/F5 loop keeps its own period, and a reply during a
+               wait leaves the wait. */
             if (s->step == SDL_DJI_STEP_POLL && !(s->kind == SDL_DJI_REMOTE_BULK && s->test_stick)) {
-                DJI_SendPoll(s, now);
+                if (s->waiting_seq) {
+                    s->poll_due = true;
+                } else {
+                    DJI_SendPoll(s, now);
+                }
             }
             return;
         }
@@ -691,10 +704,12 @@ static void DJI_Tick(void *state, uint64_t now)
     }
     if (s->fallback_timer && now >= s->fallback_deadline) {
         /* No 32-byte 06/01 answer: poll with 06/F5 as dji-rc-joystick does,
-           which sends no 06/24 */
+           which sends no 06/24. Its loop keeps its own period, so a poll
+           that a reply left due is dropped. */
         s->fallback_timer = false;
         s->test_stick = true;
         s->simulator_timer = false;
+        s->poll_due = false;
         if (!s->waiting_seq) {
             DJI_SendPoll(s, now);
         }
@@ -786,7 +801,13 @@ static void DJI_ActionDone(void *state, bool success, uint64_t now)
         DJI_SetTimer(s, now + SDL_DJI_PHANTOM2_WAIT_MS);
         break;
     case SDL_DJI_STEP_POLL:
-        DJI_SetTimer(s, now + DJI_PollMs(s));
+        if (s->poll_due) {
+            /* A reply came before this completion and asked for the next poll */
+            s->poll_due = false;
+            DJI_SendPoll(s, now);
+        } else {
+            DJI_SetTimer(s, now + DJI_PollMs(s));
+        }
         if (s->kind == SDL_DJI_REMOTE_BULK && !s->test_stick && !s->fallback_armed) {
             s->fallback_armed = true;
             s->fallback_timer = true;

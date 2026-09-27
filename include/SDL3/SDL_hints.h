@@ -1691,7 +1691,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_GHL "SDL_JOYSTICK_HIDAPI_GHL"
 
@@ -1702,6 +1702,10 @@ extern "C" {
  * This is a PadForge fork addition. The pads reach the PC through the Intel
  * Wireless Series USB base station (8086:C013). On Windows the driver reads
  * it through libusb once WinUSB is bound to the base station's interface 0.
+ * On other platforms the driver reads the base station through libusb
+ * whenever SDL can open it. That detaches the system's keyboard driver from
+ * interface 0, so the Intel wireless keyboard stops working while SDL holds
+ * the base station.
  *
  * The variable can be set to the following values:
  *
@@ -1712,7 +1716,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_INTEL_WIRELESS "SDL_JOYSTICK_HIDAPI_INTEL_WIRELESS"
 
@@ -2182,7 +2186,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_SHAPED_RUMBLE "SDL_JOYSTICK_HIDAPI_SWITCH_SHAPED_RUMBLE"
 
@@ -2220,7 +2224,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.4.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2 "SDL_JOYSTICK_BLE_SWITCH2"
 
@@ -2234,9 +2238,12 @@ extern "C" {
  * COM3=spaceball,COM4=magellan
  *
  * PORT is COMn, or the start of a device instance ID as Device Manager shows
- * it, which follows an adapter to a new COM number. PROTOCOL is one of
- * spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua, ibus,
- * jvs, vrinsight, kettler, iforce for I-Force wheels and joysticks,
+ * it, which follows an adapter to a new COM number. The start must include
+ * the backslash after the enumerator, so FTDIBUS alone is not a port. When
+ * several present ports start with it, the first one opens, and the matching
+ * of SDL_HINT_JOYSTICK_SERIAL_AUTO leaves all of them alone. PROTOCOL is one
+ * of spaceball, spaceorb, magellan, stinger, warrior, cyberman, zhenhua,
+ * ibus, jvs, vrinsight, kettler, iforce for I-Force wheels and joysticks,
  * mastercontroller for Pony Canyon's train Master Controllers, for DJI drone
  * remotes dji (the RC-N1 family), djimavicmini, djiphantom3 and djiphantom2,
  * for Konami's BIO2 board bio2, which runs the cabinet
@@ -2244,13 +2251,17 @@ extern "C" {
  * Konami's ACIO boards on RS-232 kfca (SOUND VOLTEX), panb (Nostalgia), rvol
  * (MUSECA) and mdxf (the DDR A stage). Spaces around entries are ignored, an
  * entry that cannot be used is skipped with a log message, and a port named
- * twice keeps its last entry.
+ * twice with the same spelling, ignoring case, keeps its last entry. A port
+ * named both as COMn and by instance ID gets two entries, and while one of
+ * them holds the port the other retries every second.
  *
- * The default is empty, and the driver opens no port.
+ * The default is empty. The driver then opens no port by name, and while
+ * SDL_HINT_JOYSTICK_SERIAL_AUTO is on, its default, it still opens the ports
+ * of devices that identify themselves.
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_SERIAL "SDL_JOYSTICK_SERIAL"
 
@@ -2262,8 +2273,12 @@ extern "C" {
  * port as one of their own USB interfaces, so the port's device instance ID
  * names the device, and the driver opens those ports without
  * SDL_HINT_JOYSTICK_SERIAL naming them: the protocol port of DJI's RC-N1
- * remotes, interface 2 of vendor 2CA3, and Konami's BIO2 board, 1CCF:804C
- * and 1CCF:8040. A port the hint names keeps the hint's protocol. The driver
+ * remotes, interface 2 of 2CA3:1010, 2CA3:1020 and 2CA3:1030, and Konami's
+ * BIO2 board, 1CCF:804C and 1CCF:8040. A port the hint names keeps the hint's
+ * protocol, and a remote on another DJI product ID needs the hint.
+ * SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES
+ * and SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT apply to these ports by
+ * their USB IDs, and the driver does not open a port they exclude. The driver
  * holds a port it opens, so DJI Assistant 2 cannot use the remote, nor a game
  * the BIO2, while SDL does.
  *
@@ -2275,7 +2290,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_SERIAL_AUTO "SDL_JOYSTICK_SERIAL_AUTO"
 
@@ -2288,8 +2303,9 @@ extern "C" {
  * port on Windows' own USB serial driver and is opened by its IDs, and boards
  * on RS-232 are opened through SDL_HINT_JOYSTICK_SERIAL. The driver resets
  * the bus with a line break, so a board answers about 3 seconds after its
- * port opens. A Nostalgia panel is reset again before its port closes, which
- * holds the close for about 1.5 seconds.
+ * port opens. A PANB or RVOL at 115200 answers after about 10 seconds, since
+ * the driver tries 57600 first. A Nostalgia panel is reset again before its
+ * port closes, which holds the close for about 1.5 seconds.
  *
  * The variable can be set to the following values:
  *
@@ -2298,7 +2314,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_KONAMI_ACIO "SDL_JOYSTICK_KONAMI_ACIO"
 
@@ -2319,11 +2335,12 @@ extern "C" {
  *   buttons.
  *
  * The default is empty: the driver brings the board up, logs its node and
- * opens no joystick.
+ * opens no joystick. The values match in any case, and any other value acts
+ * as the empty default.
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_KONAMI_BIO2_MODE "SDL_JOYSTICK_KONAMI_BIO2_MODE"
 
@@ -2342,7 +2359,7 @@ extern "C" {
  *
  * This hint should be set before the controller connects.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE "SDL_JOYSTICK_BLE_SWITCH2_MOUSE"
 
@@ -2363,7 +2380,7 @@ extern "C" {
  *
  * This hint should be set before the controller connects.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER "SDL_JOYSTICK_BLE_SWITCH2_MAGNETOMETER"
 
@@ -2375,7 +2392,8 @@ extern "C" {
  * Ball Plus, Google's Daydream controller, Samsung's Gear VR controller, the
  * Oculus Go controller, the iOS model of the Guitar Hero Live guitar, the
  * Zwift Play and Zwift Click, and the Thalmic Myo armband. The driver watches
- * for their Bluetooth LE advertisements and connects to each one it finds.
+ * for their Bluetooth LE advertisements and connects to each one it finds. It
+ * tracks up to 16 addresses at once, counting those that wait out a retry.
  * Each family has its own hint, which defaults to this one.
  * SDL_HINT_JOYSTICK_BLE_SWITCH2 belongs to another driver and does not.
  *
@@ -2392,7 +2410,7 @@ extern "C" {
  * joystick update, and it watches for advertisements only while a family is
  * on.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE "SDL_JOYSTICK_BLE"
 
@@ -2412,7 +2430,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_POKEBALL "SDL_JOYSTICK_BLE_POKEBALL"
 
@@ -2435,7 +2453,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_DAYDREAM "SDL_JOYSTICK_BLE_DAYDREAM"
 
@@ -2456,7 +2474,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_GEARVR "SDL_JOYSTICK_BLE_GEARVR"
 
@@ -2479,7 +2497,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_OCULUSGO "SDL_JOYSTICK_BLE_OCULUSGO"
 
@@ -2500,7 +2518,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_GHLIVE "SDL_JOYSTICK_BLE_GHLIVE"
 
@@ -2523,7 +2541,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_ZWIFT "SDL_JOYSTICK_BLE_ZWIFT"
 
@@ -2545,7 +2563,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_MYO "SDL_JOYSTICK_BLE_MYO"
 
@@ -2572,7 +2590,7 @@ extern "C" {
  *
  * This hint can be set anytime. A change applies to the next connection.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_BLE_PAIRING "SDL_JOYSTICK_BLE_PAIRING"
 
@@ -2591,7 +2609,7 @@ extern "C" {
  *
  * This hint should be set before sensors are enabled on the controller.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR "SDL_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR"
 
@@ -2620,8 +2638,10 @@ extern "C" {
  *
  * This is a PadForge fork addition. The Ring-Con is read through the
  * Joy-Con's NFC/IR MCU, which costs battery, and a check for a Ring-Con that
- * is not attached keeps the MCU up for several seconds, so it is opt-in. The
- * NIR camera and NFC take the MCU first when their hints are on.
+ * is not attached keeps the MCU up for several seconds, so it is opt-in. NFC
+ * takes the MCU first while SDL_HINT_JOYSTICK_HIDAPI_SWITCH_NFC is on, and
+ * the NIR camera while SDL_HINT_JOYSTICK_HIDAPI_JOYCON_IR_SENSOR is on and
+ * the joystick's sensors are enabled.
  *
  * The variable can be set to the following values:
  *
@@ -2630,14 +2650,18 @@ extern "C" {
  *   when this hint turns on. The strain is joystick axis
  *   SDL_GAMEPAD_AXIS_COUNT + 1, a signed 16-bit value that rises as the ring
  *   is pressed. The joystick property "SDL.joystick.switch.ringcon" is true
- *   while the strain flows, and "SDL.joystick.switch.ringcon_rest" holds the
- *   first strain read after it starts, the resting value unless the ring was
- *   held at that moment.
+ *   while the Ring-Con polls, which begins after the Joy-Con acknowledges
+ *   the polling command, so it can turn true before the first strain
+ *   arrives. "SDL.joystick.switch.ringcon_rest" holds the first nonzero
+ *   strain after polling starts, the resting value unless the ring was held
+ *   at that moment, and reads 0 while no Ring-Con polls. Every start
+ *   captures it again: after a yield to NFC or the camera, a watchdog
+ *   restart, or this hint turning back on.
  *
  * The hint can be toggled at runtime: turning it off powers the MCU back
  * down.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_JOYCON_RINGCON "SDL_JOYSTICK_HIDAPI_JOYCON_RINGCON"
 
@@ -2691,7 +2715,7 @@ extern "C" {
  *
  * The driver reads this hint when it identifies a Wii Remote's extension.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_WII_EXTENSIONS "SDL_JOYSTICK_HIDAPI_WII_EXTENSIONS"
 
@@ -2763,11 +2787,13 @@ extern "C" {
  * - "0": The chatpad is not read and no chatpad command is sent.
  * - "1": The chatpad is read.
  *
- * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX_360.
+ * The default is the value of the first of SDL_HINT_JOYSTICK_HIDAPI_XBOX_360
+ * and SDL_HINT_JOYSTICK_HIDAPI_XBOX that is set, otherwise the value of
+ * SDL_HINT_JOYSTICK_HIDAPI.
  *
  * The drivers read this hint when they open a pad or a receiver.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_CHATPAD "SDL_JOYSTICK_HIDAPI_XBOX_360_CHATPAD"
 
@@ -2790,12 +2816,15 @@ extern "C" {
  * A variable controlling whether the HIDAPI Xbox 360 wireless driver reports
  * an Xbox 360 uDraw GameTablet as a tablet.
  *
- * This is a PadForge fork addition. A receiver slot whose link control packet
+ * This is a PadForge fork addition. On an Xbox 360 wireless receiver
+ * (045E:0719, 045E:0291 or 045E:02A9), a slot whose link control packet
  * names subtype 0x23 becomes a joystick named "Xbox 360 uDraw GameTablet"
  * with 7 axes (pen X and Y, pressure, finger spread, tilt X, Y and Z), 10
- * buttons and a hat, and no gamepad mapping. While the hint is on, a slot's
- * joystick connects when the receiver reports the slot's subtype or sends
- * its first state packet, not on the connection status alone.
+ * buttons and a hat, and no gamepad mapping. While the hint is on, such a
+ * receiver's slot connects its joystick when the receiver reports the slot's
+ * subtype or sends its first state packet, not on the connection status
+ * alone. Any other adapter the wireless driver serves keeps its slots as
+ * before, with the hint on or off.
  *
  * The variable can be set to the following values:
  *
@@ -2803,11 +2832,14 @@ extern "C" {
  *   on the connection status.
  * - "1": A tablet is reported as a tablet.
  *
- * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_WIRELESS.
+ * The default is the value of the first of
+ * SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_WIRELESS,
+ * SDL_HINT_JOYSTICK_HIDAPI_XBOX_360 and SDL_HINT_JOYSTICK_HIDAPI_XBOX that is
+ * set, otherwise the value of SDL_HINT_JOYSTICK_HIDAPI.
  *
  * The driver reads this hint when it opens a receiver.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_XBOX_360_UDRAW "SDL_JOYSTICK_HIDAPI_XBOX_360_UDRAW"
 
@@ -2881,11 +2913,12 @@ extern "C" {
  * - "0": HIDAPI driver is not used.
  * - "1": HIDAPI driver is used.
  *
- * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX
+ * The default is the value of SDL_HINT_JOYSTICK_HIDAPI_XBOX when that hint
+ * is set, otherwise the value of SDL_HINT_JOYSTICK_HIDAPI.
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_XBOX_ORIGINAL "SDL_JOYSTICK_HIDAPI_XBOX_ORIGINAL"
 
@@ -2908,7 +2941,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_STEEL_BATTALION "SDL_JOYSTICK_HIDAPI_STEEL_BATTALION"
 
@@ -2919,7 +2952,8 @@ extern "C" {
  * This is a PadForge fork addition. The wheel's USB receiver, 046D:C29C,
  * does not bond with the wheel until the host sends two feature reports,
  * which the driver sends at open. Axis 0 is the wheel and axes 1 and 2 the
- * pedals.
+ * pedals. On Linux the driver claims nothing, and hid-lg and lg4ff drive the
+ * wheel.
  *
  * The variable can be set to the following values:
  *
@@ -2930,7 +2964,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_SPEEDFORCE "SDL_JOYSTICK_HIDAPI_SPEEDFORCE"
 
@@ -2950,7 +2984,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_RC_ADAPTER "SDL_JOYSTICK_HIDAPI_RC_ADAPTER"
 
@@ -2970,7 +3004,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_GAMEVOICE "SDL_JOYSTICK_HIDAPI_GAMEVOICE"
 
@@ -2991,7 +3025,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_P5GLOVE "SDL_JOYSTICK_HIDAPI_P5GLOVE"
 
@@ -3010,7 +3044,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_DREAMCHEEKY "SDL_JOYSTICK_HIDAPI_DREAMCHEEKY"
 
@@ -3031,7 +3065,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_NIA "SDL_JOYSTICK_HIDAPI_NIA"
 
@@ -3053,7 +3087,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_GAMETRAK "SDL_JOYSTICK_HIDAPI_GAMETRAK"
 
@@ -3064,7 +3098,8 @@ extern "C" {
  * This is a PadForge fork addition. The tracker, 2833:0001 with the
  * manufacturer string "Oculus VR, Inc.", sends while the driver writes its
  * keep-alive. Its accelerometer and gyroscope are SDL sensors, and axes 0-2
- * are yaw, pitch and roll.
+ * are yaw, pitch and roll. On Linux the driver claims nothing, and OpenHMD
+ * reads the tracker.
  *
  * The variable can be set to the following values:
  *
@@ -3075,7 +3110,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_RIFT_DK1 "SDL_JOYSTICK_HIDAPI_RIFT_DK1"
 
@@ -3086,7 +3121,8 @@ extern "C" {
  * This is a PadForge fork addition. It covers controllers paired to the PC
  * over Bluetooth, 045E:065B, 045E:065D and 045E:066A. The driver reads each
  * controller's calibration at open, and the controller appears once that is
- * done. The accelerometer and gyroscope are SDL sensors.
+ * done. The accelerometer and gyroscope are SDL sensors. On Linux the driver
+ * claims nothing, and Monado reads the controllers.
  *
  * The variable can be set to the following values:
  *
@@ -3097,7 +3133,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_WMR "SDL_JOYSTICK_HIDAPI_WMR"
 
@@ -3106,7 +3142,8 @@ extern "C" {
  * Nimbus should be used.
  *
  * This is a PadForge fork addition. The Nimbus, 0111:1420 over Bluetooth,
- * is a gamepad that Windows leaves out of its game controllers.
+ * is a gamepad that Windows leaves out of its game controllers. On Apple
+ * platforms the driver claims nothing, and GCController presents the Nimbus.
  *
  * The variable can be set to the following values:
  *
@@ -3117,7 +3154,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_NIMBUS "SDL_JOYSTICK_HIDAPI_NIMBUS"
 
@@ -3128,7 +3165,9 @@ extern "C" {
  * This is a PadForge fork addition. The keyboard, 041E:2801, keeps its
  * typing keys on Windows. The driver gives its music keys as buttons 0-127
  * by MIDI note, its other keys as buttons 128-151 and the latest key
- * velocity as axis 0.
+ * velocity as axis 0. On Windows interface 1 is read through libusb, so
+ * WinUSB must be bound to it, which takes the media and sleep keys from
+ * Windows.
  *
  * The variable can be set to the following values:
  *
@@ -3139,7 +3178,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_PRODIKEYS "SDL_JOYSTICK_HIDAPI_PRODIKEYS"
 
@@ -3161,7 +3200,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_DJI_REMOTE "SDL_JOYSTICK_HIDAPI_DJI_REMOTE"
 
@@ -3176,13 +3215,19 @@ extern "C" {
  * The port defaults to 40007, where the DJI RC and DJI RC 2 serve their
  * sticks on firmware that still opens it. Spaces around entries are ignored,
  * an entry that cannot be used is skipped with a log message, and an address
- * named twice keeps one entry.
+ * and port named twice keep one entry.
+ *
+ * SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES
+ * and SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT check a remote as
+ * 0x0000/0x0000 with its joystick name when it would become a joystick, so
+ * an allow list leaves every remote without a joystick while its links stay
+ * open.
  *
  * The default is empty, and the driver opens no connection.
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS "SDL_JOYSTICK_DJI_REMOTE_TCP_HOSTS"
 
@@ -3205,7 +3250,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_IFORCE "SDL_JOYSTICK_HIDAPI_IFORCE"
 
@@ -3213,10 +3258,12 @@ extern "C" {
  * A variable controlling whether the HIDAPI driver for the Namco GunCon 2
  * light gun should be used.
  *
- * This is a PadForge fork addition, for Windows. The GunCon 2, 0B9A:016A,
- * and the EMS LCD TopGun that shares its ID are read through libusb, so
- * WinUSB must be bound to them. The gun is a joystick whose axes carry the
- * raw beam position, which the application calibrates to its screen.
+ * This is a PadForge fork addition. The GunCon 2, 0B9A:016A, is read through
+ * libusb on every platform where SDL has libusb, and on Windows WinUSB must
+ * be bound to it. The EMS LCD TopGun shares the ID and is read only if its
+ * interface has the GunCon 2's vendor class, 0xFF. No descriptor dump of a
+ * TopGun records its class. The gun is a joystick whose axes carry the raw
+ * beam position, which the application calibrates to its screen.
  *
  * The variable can be set to the following values:
  *
@@ -3227,7 +3274,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_GUNCON "SDL_JOYSTICK_HIDAPI_GUNCON"
 
@@ -3235,11 +3282,11 @@ extern "C" {
  * A variable controlling whether the HIDAPI driver for USB train controllers
  * should be used.
  *
- * This is a PadForge fork addition, for Windows. Taito's Densha de GO! Type
- * 2, Shinkansen and Ryojohen controllers for the PlayStation 2, the Multi
- * Train Controller and the Train Mascon are read through libusb, so WinUSB
- * must be bound to them. A handle becomes one axis with its notches spread
- * evenly.
+ * This is a PadForge fork addition. Taito's Densha de GO! Type 2, Shinkansen
+ * and Ryojohen controllers for the PlayStation 2, the Multi Train Controller
+ * and the Train Mascon are read through libusb on every platform where SDL
+ * has libusb, and on Windows WinUSB must be bound to them. A handle becomes
+ * one axis with its notches spread evenly.
  *
  * The variable can be set to the following values:
  *
@@ -3250,7 +3297,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_TRAIN "SDL_JOYSTICK_HIDAPI_TRAIN"
 
@@ -3261,8 +3308,8 @@ extern "C" {
  * This is a PadForge fork addition, for Windows. The USIO, 0B9A:0910, is the
  * I/O board of Namco's System 357 and 369 arcade cabinets. It is read through
  * libusb, so WinUSB must be bound to it. A board with the ID 0B9A:0900 is
- * used when it identifies itself as a USIO. The joysticks it becomes follow
- * SDL_HINT_JOYSTICK_HIDAPI_USIO_LAYOUT.
+ * used when its identification block begins with "NBGI.", as a USIO's does.
+ * The joysticks it becomes follow SDL_HINT_JOYSTICK_HIDAPI_USIO_LAYOUT.
  *
  * The variable can be set to the following values:
  *
@@ -3273,7 +3320,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_USIO "SDL_JOYSTICK_HIDAPI_USIO"
 
@@ -3284,17 +3331,19 @@ extern "C" {
  * registers whose meaning depends on the game, and the two layouts are the
  * ones emulators serve to these games.
  *
- * The variable can be set to the following values:
+ * The variable can be set to the following values, in any case:
  *
  * - "taiko": Taiko no Tatsujin. Two drum joysticks, each pad an axis and a
  *   button, and the cabinet's buttons on player 1. (default)
  * - "tekken": Tekken. Four arcade stick joysticks, each a gamepad.
  *
+ * Any other value selects "taiko".
+ *
  * The layout is read when the board is opened.
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_USIO_LAYOUT "SDL_JOYSTICK_HIDAPI_USIO_LAYOUT"
 
@@ -3319,7 +3368,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P3IO "SDL_JOYSTICK_HIDAPI_KONAMI_P3IO"
 
@@ -3341,7 +3390,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P4IO "SDL_JOYSTICK_HIDAPI_KONAMI_P4IO"
 
@@ -3367,7 +3416,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_KONAMI_P4IO_LAYOUT "SDL_JOYSTICK_HIDAPI_KONAMI_P4IO_LAYOUT"
 
@@ -3389,7 +3438,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_CHMFP "SDL_JOYSTICK_HIDAPI_CHMFP"
 
@@ -3412,7 +3461,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_ERGODEX "SDL_JOYSTICK_HIDAPI_ERGODEX"
 
@@ -3423,9 +3472,9 @@ extern "C" {
  * This is a PadForge fork addition, for Windows. The TrackIR 2, 131D:0150,
  * and the TrackIR 3, 131D:0155, are read through libusb, so WinUSB must be
  * bound to them. SDL starts the camera, and the joystick follows the largest
- * bright dot it sees: axes 0 and 1 are the dot's offset from the center of
- * the image, axis 2 its size in pixels, and button 0 is held while a dot is
- * in view.
+ * bright dot it sees, up to 1024 pixels: axes 0 and 1 are the dot's offset
+ * from the center of the image, axis 2 its size in pixels, and button 0 is
+ * held while a dot is in view.
  *
  * The variable can be set to the following values:
  *
@@ -3436,7 +3485,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_TRACKIR "SDL_JOYSTICK_HIDAPI_TRACKIR"
 
@@ -3450,7 +3499,9 @@ extern "C" {
  * need a Tacx firmware image from the host, are not read. A head unit
  * becomes a joystick with its four buttons and five axes: the steering, the
  * wheel speed, the cadence, the heart rate and the current resistance. The
- * driver sends only stop frames, so it never sets a resistance.
+ * driver sends the version request and stop frames, and never sets a
+ * resistance. An application that sets a resistance turns this hint off
+ * before initializing joysticks and drives the head unit itself.
  *
  * The variable can be set to the following values:
  *
@@ -3461,7 +3512,7 @@ extern "C" {
  *
  * This hint should be set before initializing joysticks and gamepads.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_HIDAPI_TACX "SDL_JOYSTICK_HIDAPI_TACX"
 
@@ -3472,8 +3523,12 @@ extern "C" {
  * This is a PadForge fork addition, for Windows. It covers the PowerA MOGA
  * in Mode A, the Zeemote JS1, the Chainpus BGP100 and the 2011 Phonejoy,
  * found by name among the devices paired in Windows. The driver reads the
- * paired list every 3 seconds and connects to each matching controller. Each
- * family has its own hint, which defaults to this one.
+ * paired list every 3 seconds and connects to each matching controller that
+ * SDL_HINT_JOYSTICK_BLACKLIST_DEVICES, SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES
+ * and SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT do not leave out. It
+ * reads no vendor or product ID for these controllers, so the lists check
+ * them as 0x0000/0x0000 with their Bluetooth names, and an allow list leaves
+ * out all of them. Each family has its own hint, which defaults to this one.
  *
  * The variable can be set to the following values:
  *
@@ -3484,7 +3539,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_RFCOMM "SDL_JOYSTICK_RFCOMM"
 
@@ -3493,8 +3548,8 @@ extern "C" {
  * controllers in Mode A.
  *
  * This is a PadForge fork addition, for Windows. It takes paired devices
- * named "BD&A", "BDA" or "MOGA", in any case, whose name does not contain
- * "HID".
+ * whose name starts with "BD&A" or "BDA", or starts with "MOGA" and does not
+ * contain "HID", in any case.
  *
  * The variable can be set to the following values:
  *
@@ -3505,7 +3560,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_RFCOMM_MOGA "SDL_JOYSTICK_RFCOMM_MOGA"
 
@@ -3525,7 +3580,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_RFCOMM_ZEEMOTE "SDL_JOYSTICK_RFCOMM_ZEEMOTE"
 
@@ -3546,7 +3601,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_RFCOMM_BGP100 "SDL_JOYSTICK_RFCOMM_BGP100"
 
@@ -3566,7 +3621,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_RFCOMM_PHONEJOY "SDL_JOYSTICK_RFCOMM_PHONEJOY"
 
@@ -3579,7 +3634,11 @@ extern "C" {
  * another when it is released. The driver decodes the keyboards with the
  * cabinet's IDs, 15E4:0132, or a pair listed in
  * SDL_HINT_JOYSTICK_ICADE_DEVICES, into a joystick with one hat and eight
- * buttons. The letters still reach the window with the keyboard focus.
+ * buttons. SDL_HINT_JOYSTICK_BLACKLIST_DEVICES,
+ * SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES and
+ * SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT apply to these keyboards
+ * when they arrive. The letters still reach the window with the keyboard
+ * focus.
  *
  * The variable can be set to the following values:
  *
@@ -3588,7 +3647,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_ICADE "SDL_JOYSTICK_ICADE"
 
@@ -3600,11 +3659,11 @@ extern "C" {
  * window registered last for a device class receives its Raw Input. SDL
  * registers only while a keyboard it decodes as an iCade is connected and
  * no window of the process holds the keyboard class, as Microsoft asks of a
- * library. It removes the registration when the last iCade leaves, when this
- * hint or SDL_HINT_JOYSTICK_ICADE turns off, and at quit, each time only if
- * its own window still holds it. A window that registers keyboards while
- * SDL holds the class takes it, and SDL then reads the iCade only through
- * SDL_ICadeProcessRawKeyboard(). SDL's own raw keyboard input,
+ * library. It removes the registration when no such keyboard is left, when
+ * this hint or SDL_HINT_JOYSTICK_ICADE turns off, and at quit, each time
+ * only if its own window still holds it. A window that registers keyboards
+ * while SDL holds the class takes it, and SDL then reads the iCade only
+ * through SDL_ICadeProcessRawKeyboard(). SDL's own raw keyboard input,
  * SDL_HINT_WINDOWS_RAW_KEYBOARD, passes each keyboard record it receives
  * there. A host that registers keyboards itself turns this hint off and
  * passes each keyboard record its window receives to
@@ -3620,7 +3679,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_ICADE_RAWINPUT "SDL_JOYSTICK_ICADE_RAWINPUT"
 
@@ -3644,7 +3703,7 @@ extern "C" {
  *
  * This hint can be set anytime.
  *
- * \since This hint is available since SDL 3.5.0.
+ * \since This hint is available since SDL 3.6.0.
  */
 #define SDL_HINT_JOYSTICK_ICADE_DEVICES "SDL_JOYSTICK_ICADE_DEVICES"
 

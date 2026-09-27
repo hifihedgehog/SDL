@@ -60,6 +60,7 @@ typedef struct
     bool connected;                             /* The joysticks belong to session number connected_ups */
     Uint32 connected_ups;
     bool gone;                                  /* A read failed, so the board is gone for this handle */
+    bool version_logged;                        /* The board's version went to the log */
     bool post_pending[SDL_P3IO_PLAYERS];        /* Opened and not yet sent the state */
     SDL_P3IOInput input;
     SDL_P3IOState state;
@@ -331,6 +332,33 @@ static void HIDAPI_DriverKonamiP3IO_Disconnect(SDL_DriverKonamiP3IO_Context *ctx
     ctx->connected = false;
 }
 
+/* Logs the board's version once, when the first GET VERSION reply is in, as
+   the P4IO driver logs its board's. The line follows bemanitools'
+   p3io-ddr-tool: the four characters up to the first 00, then the major,
+   minor and patch numbers. A character outside 20 to 7E reads as '?'. The
+   session holds all 00 until a reply comes. */
+static void HIDAPI_DriverKonamiP3IO_LogVersion(SDL_DriverKonamiP3IO_Context *ctx, const Uint8 *version)
+{
+    char product[5];
+    bool replied = false;
+    int i;
+
+    for (i = 0; i < SDL_P3IO_VERSION_LENGTH; ++i) {
+        if (version[i] != 0) {
+            replied = true;
+        }
+    }
+    if (!replied) {
+        return;
+    }
+    for (i = 0; i < 4 && version[i] != 0; ++i) {
+        product[i] = (version[i] >= 0x20 && version[i] <= 0x7E) ? (char)version[i] : '?';
+    }
+    product[i] = '\0';
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Konami P3IO: %s %d.%d.%d", product, version[4], version[5], version[6]);
+    ctx->version_logged = true;
+}
+
 static void HIDAPI_DriverKonamiP3IO_Post(SDL_DriverKonamiP3IO_Context *ctx, int player, SDL_Joystick *joystick, Uint64 timestamp)
 {
     const int nbuttons = (player == 0) ? SDL_P3IO_P1_BUTTONS : SDL_P3IO_P2_BUTTONS;
@@ -345,6 +373,7 @@ static bool HIDAPI_DriverKonamiP3IO_UpdateDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverKonamiP3IO_Context *ctx = (SDL_DriverKonamiP3IO_Context *)device->context;
     Uint8 data[USB_PACKET_LENGTH];
+    Uint8 version[SDL_P3IO_VERSION_LENGTH];
     bool up, decoded = false;
     Uint32 ups;
     Uint64 timestamp;
@@ -359,7 +388,11 @@ static bool HIDAPI_DriverKonamiP3IO_UpdateDevice(SDL_HIDAPI_Device *device)
     SDL_LockMutex(ctx->lock);
     up = SDL_P3IO_SessionUp(&ctx->session);
     ups = ctx->session.ups;
+    SDL_memcpy(version, ctx->session.version, sizeof(version));
     SDL_UnlockMutex(ctx->lock);
+    if (!ctx->version_logged) {
+        HIDAPI_DriverKonamiP3IO_LogVersion(ctx, version);
+    }
 
     /* A session that failed takes the joysticks with it, even one that is
        already up again */

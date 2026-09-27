@@ -4195,9 +4195,10 @@ static void HandleFullControllerState(SDL_Joystick *joystick, SDL_DriverSwitch_C
         if (bHasSensorData) {
             const Uint32 IMU_UPDATE_RATE_SAMPLE_FREQUENCY = 1000;
             Uint64 sensor_timestamp[3];
-            /* Oldest first. While the Ring-Con's format is set, bytes 37-48
-               hold its data in place of the oldest sample, so only the samples
-               at bytes 25-36 and 13-24 post. */
+            /* Oldest first. From the 22 01 of a Ring-Con start to the end of
+               its stop, and while the Ring-Con's format stays set, bytes 37-48
+               may hold no IMU sample, so only the samples at bytes 25-36 and
+               13-24 post. */
             int rgnSample[3];
             int nSamples = SDL_RingCon_ImuPostOrder(&ctx->m_RingCon, rgnSample);
             int i;

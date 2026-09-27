@@ -354,7 +354,9 @@ static void VRinsight_Identified(SDL_VRinsightState *s, SDL_VRinsightPanel panel
         static const char *const names[] = { "", "", "", "MCP Combo II Airbus", "MCP Combo II Boeing", "M-Panel", "an unknown panel" };
         char text[80];
 
-        (void)snprintf(text, sizeof(text), "VRinsight %s identified, its messages are not known", names[panel]);
+        /* A panel the table does not reach reads as unknown */
+        (void)snprintf(text, sizeof(text), "VRinsight %s identified, its messages are not known",
+                       ((size_t)panel < sizeof(names) / sizeof(names[0])) ? names[panel] : "an unknown panel");
         SDL_Serial_Log(&s->base, text);
         s->step = SDL_VRINSIGHT_STEP_UNSUPPORTED;
         VRinsight_Write(s, vrinsight_version, sizeof(vrinsight_version));
@@ -482,13 +484,16 @@ static void VRinsight_ActionDone(void *state, bool success, uint64_t now)
         return;
     }
     s->waiting_seq = 0;
-    (void)success;
     switch (s->step) {
     case SDL_VRINSIGHT_STEP_CONNECT:
     case SDL_VRINSIGHT_STEP_FUNCTION:
     case SDL_VRINSIGHT_STEP_KEEPALIVE:
+        /* The answer is due 3 s after the request left. A request cut short
+           takes the timeout path at once. A write comes up short only when
+           the port's write timeout of 1000 ms and more ends it, so the
+           retries cannot spin. */
         s->timer = true;
-        s->deadline = now + SDL_VRINSIGHT_REPLY_MS;
+        s->deadline = success ? now + SDL_VRINSIGHT_REPLY_MS : now;
         break;
     default:
         break;
@@ -532,5 +537,7 @@ const SDL_SerialModule SDL_SerialVRinsightModule = {
     VRinsight_ActionDone,
     VRinsight_Output,
     VRinsight_GetDeadline,
-    SDL_Serial_GetSnapshot
+    SDL_Serial_GetSnapshot,
+    true,
+    NULL
 };

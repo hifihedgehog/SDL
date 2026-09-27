@@ -277,6 +277,7 @@ static void TestConstants(void)
     const unsigned long headers[2] = { SDL_TACX_HEADER_DATA, SDL_TACX_HEADER_VERSION };
     const int modes[3] = { SDL_TACX_MODE_STOP, SDL_TACX_MODE_RESISTANCE, SDL_TACX_MODE_CALIBRATE };
     const unsigned long long timing[3] = { SDL_TACX_FRAME_INTERVAL_NS, SDL_TACX_VERSION_RETRY_NS, SDL_TACX_TIMEOUT_NS };
+    const unsigned long long read_timeout = SDL_TACX_READ_TIMEOUT_MS;
     const int requests = SDL_TACX_VERSION_REQUESTS;
     const int ids[3] = { SDL_TACX_VENDOR, SDL_TACX_PRODUCT_T1904, SDL_TACX_PRODUCT_T1932 };
     const int tree_ids[3] = { USB_VENDOR_TACX, USB_PRODUCT_TACX_T1904, USB_PRODUCT_TACX_T1932 };
@@ -294,6 +295,7 @@ static void TestConstants(void)
     CHECK(headers[0] == 0x00021303ul && headers[1] == 0x00000C03ul);
     CHECK(modes[0] == 0x00 && modes[1] == 0x02 && modes[2] == 0x03);
     CHECK(timing[0] == MS(100) && timing[1] == MS(500) && timing[2] == MS(1000));
+    CHECK(read_timeout == 50 && MS(read_timeout) < timing[0]);
     CHECK(requests == 6);
     CHECK(ids[0] == 0x3561 && ids[1] == 0x1904 && ids[2] == 0x1932);
     /* The module's IDs are the ones usb_ids.h gives the tree */
@@ -409,6 +411,9 @@ static void TestVendorRules(void)
         CHECK(rule->in_endpoint == 0x82 && rule->out_endpoint == 0x02);
         CHECK(rule->in_size == 0 && rule->out_size == 0);
         CHECK(rule->read_size == SDL_TACX_READ_SIZE);
+        /* A transfer that a short packet or a full buffer does not end hands
+           over its reply within the 100 ms between frames */
+        CHECK(rule->in_timeout == SDL_TACX_READ_TIMEOUT_MS);
 
         for (k = 0; k < 3; ++k) {
             const bool windows = (platforms[k] == SDL_VENDORUSB_PLATFORM_WINDOWS);

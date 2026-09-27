@@ -27,13 +27,14 @@
  * A discovery thread reads the system's list of known Bluetooth devices
  * every 3000 ms without an inquiry, so the user pairs the controller in
  * Windows first. The joystick thread picks the paired devices whose name
- * matches a family and whose hint is on, and gives each a thread that owns
- * its socket and runs the pure link in SDL_rfcomm_proto.c, which decides
- * every connect, send and close. As in the serial and DJI TCP drivers, the
- * device thread hands presence and snapshots to the joystick thread under
- * the device's mutex and never takes the joystick lock. ws2_32 and
- * bthprops.cpl are loaded at run time, so SDL links no Bluetooth or Winsock
- * library, and without them the driver finds nothing.
+ * matches a family, whose hint is on and that SDL's device lists do not
+ * leave out, and gives each a thread that owns its socket and runs the pure
+ * link in SDL_rfcomm_proto.c, which decides every connect, send and close.
+ * As in the serial and DJI TCP drivers, the device thread hands presence,
+ * snapshots and its log lines to the joystick thread under the device's
+ * mutex and never takes the joystick lock. ws2_32 and bthprops.cpl are
+ * loaded at run time, so SDL links no Bluetooth or Winsock library, and
+ * without them the driver finds nothing.
  */
 
 #include "SDL_internal.h"
@@ -52,9 +53,11 @@
 #include <ws2bth.h>
 #include <bluetoothapis.h>
 
-#define RFCOMM_READ_SIZE   1024
-#define RFCOMM_MAX_ACTIONS 64 /* Actions one pass may run, a guard only */
-#define RFCOMM_MAX_PAIRED  64
+#define RFCOMM_READ_SIZE    1024
+#define RFCOMM_MAX_ACTIONS  64 /* Actions one pass may run, a guard only */
+#define RFCOMM_MAX_PAIRED   64
+#define RFCOMM_NOTE_ENTRIES 8  /* Device thread log lines kept for the joystick thread */
+#define RFCOMM_NOTE_LENGTH  64
 
 typedef int(WSAAPI *RFCOMM_WSAStartupFunc)(WORD, LPWSADATA);
 typedef int(WSAAPI *RFCOMM_WSACleanupFunc)(void);
@@ -109,6 +112,9 @@ typedef struct RFCOMM_Device
     uint64_t sequence;
     int player_index;
     bool player_pending;
+    char notes[RFCOMM_NOTE_ENTRIES][RFCOMM_NOTE_LENGTH]; /* The device thread's log lines */
+    int note_count;
+    Uint32 notes_dropped;
 
     /* The joystick thread's */
     bool stopping;
@@ -128,6 +134,7 @@ struct joystick_hwdata
     bool battery_sent;
     bool send_initial;  /* The state Open took is not sent yet */
     Uint64 initial_stamp;
+    Uint64 last_stamp;  /* The time of the last event sent, see SDL_RFCOMM_EventStamp */
     SDL_SerialControls initial;
 };
 
@@ -331,14 +338,62 @@ static void RFCOMM_StopDiscovery(void)
     SDL_SetAtomicInt(&rfcomm_paired_changed, 1);
 }
 
-/* A failing call is logged once until the error changes */
+/* A log line from the device thread. SDL_LockJoysticks locks
+   SDL_event_lock, which an application's log callback also takes when it
+   pushes an event, and SDL_Quit waits for this thread with that lock held.
+   So this thread keeps its lines here and the joystick thread logs them, as
+   the iCade driver's thread does. */
+static void RFCOMM_Note(RFCOMM_Device *device, const char *format, ...)
+{
+    va_list ap;
+
+    SDL_LockMutex(device->mutex);
+    if (device->note_count < RFCOMM_NOTE_ENTRIES) {
+        va_start(ap, format);
+        (void)SDL_vsnprintf(device->notes[device->note_count], RFCOMM_NOTE_LENGTH, format, ap);
+        va_end(ap);
+        ++device->note_count;
+    } else {
+        ++device->notes_dropped;
+    }
+    SDL_UnlockMutex(device->mutex);
+}
+
+/* On the joystick thread: logs the device thread's lines in order, with
+   none of the device's locks held */
+static void RFCOMM_FlushNotes(RFCOMM_Device *device)
+{
+    char notes[RFCOMM_NOTE_ENTRIES][RFCOMM_NOTE_LENGTH];
+    Uint32 dropped;
+    int count, i;
+
+    SDL_LockMutex(device->mutex);
+    count = device->note_count;
+    for (i = 0; i < count; ++i) {
+        SDL_memcpy(notes[i], device->notes[i], RFCOMM_NOTE_LENGTH);
+    }
+    dropped = device->notes_dropped;
+    device->note_count = 0;
+    device->notes_dropped = 0;
+    SDL_UnlockMutex(device->mutex);
+
+    for (i = 0; i < count; ++i) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "RFCOMM %s (%s): %s", device->path, device->info.name, notes[i]);
+    }
+    if (dropped) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "RFCOMM %s (%s): %u more lines dropped", device->path, device->info.name, (unsigned int)dropped);
+    }
+}
+
+/* On the device thread. A failing call is logged once until the error
+   changes. */
 static void RFCOMM_LogError(RFCOMM_Device *device, const char *call, int error)
 {
     if (device->logged_error == error) {
         return;
     }
     device->logged_error = error;
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "RFCOMM %s (%s): %s failed with error %d", device->path, device->info.name, call, error);
+    RFCOMM_Note(device, "%s failed with error %d", call, error);
 }
 
 /* The module's snapshots, in order, on the device thread */
@@ -537,11 +592,21 @@ static void RFCOMM_RunActions(RFCOMM_Device *device)
             RFCOMM_CloseSocket(device);
             break;
         case SDL_RFCOMM_ACTION_SEND:
-            if (device->socket != INVALID_SOCKET &&
-                rfcomm_send(device->socket, (const char *)action.data, (int)action.length, 0) != (int)action.length) {
-                RFCOMM_LogError(device, "send", rfcomm_wsa_get_last_error());
-                RFCOMM_CloseSocket(device);
-                SDL_RFCOMMLink_Lost(&device->link, SDL_GetTicks());
+            if (device->socket != INVALID_SOCKET) {
+                const int sent = rfcomm_send(device->socket, (const char *)action.data, (int)action.length, 0);
+
+                /* The socket asks for no FD_WRITE, so a send that would block
+                   or takes fewer bytes ends the link. A short count sets no
+                   Winsock error, so the count is what gets logged. */
+                if (sent != (int)action.length) {
+                    if (sent < 0) {
+                        RFCOMM_LogError(device, "send", rfcomm_wsa_get_last_error());
+                    } else {
+                        RFCOMM_Note(device, "send took %d of %d bytes", sent, (int)action.length);
+                    }
+                    RFCOMM_CloseSocket(device);
+                    SDL_RFCOMMLink_Lost(&device->link, SDL_GetTicks());
+                }
             }
             break;
         }
@@ -719,7 +784,8 @@ static void RFCOMM_UnlinkDevice(RFCOMM_Device *device)
     }
 }
 
-/* Frees the stopped devices whose thread has ended, or all of them */
+/* Frees the stopped devices whose thread has ended, or all of them, after
+   logging what each thread kept */
 static void RFCOMM_ReapDevices(bool wait)
 {
     RFCOMM_Device *device, *next;
@@ -731,6 +797,7 @@ static void RFCOMM_ReapDevices(bool wait)
         }
         SDL_WaitThread(device->thread, NULL);
         device->thread = NULL;
+        RFCOMM_FlushNotes(device);
         RFCOMM_UnlinkDevice(device);
         RFCOMM_FreeDevice(device);
     }
@@ -753,7 +820,21 @@ static bool RFCOMM_GetEnabled(bool *enabled)
     return any;
 }
 
-/* The paired devices whose family is on, against the running devices */
+/* SDL's device lists, SDL_HINT_JOYSTICK_BLACKLIST_DEVICES and
+   SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES with its _EXCEPT allow list, read in
+   Detect under the joystick lock, which the WGI driver also holds when it
+   reads them. An RFCOMM device carries no VID or PID, so it is checked as
+   0000:0000 with its paired name, and an allow list leaves out every such
+   device. */
+static bool RFCOMM_IsIgnored(void *userdata, const SDL_RFCOMMDevice *device)
+{
+    (void)userdata;
+    return SDL_ShouldIgnoreJoystick(0, 0, 0, device->name);
+}
+
+/* The paired devices whose family is on and that SDL's device lists do not
+   leave out, against the running devices. A device the lists leave out is
+   never connected. */
 static void RFCOMM_ApplyDevices(void)
 {
     SDL_RFCOMMPaired *paired = (SDL_RFCOMMPaired *)SDL_calloc(RFCOMM_MAX_PAIRED, sizeof(*paired));
@@ -773,7 +854,7 @@ static void RFCOMM_ApplyDevices(void)
     SDL_UnlockMutex(rfcomm_paired_lock);
 
     RFCOMM_GetEnabled(enabled);
-    nselected = SDL_RFCOMM_SelectDevices(paired, npaired, enabled, selected, SDL_RFCOMM_MAX_DEVICES);
+    nselected = SDL_RFCOMM_SelectDevices(paired, npaired, enabled, selected, SDL_RFCOMM_MAX_DEVICES, RFCOMM_IsIgnored, NULL);
     SDL_free(paired);
     /* Counts only: the names of other devices stay out of the log */
     if (npaired != rfcomm_logged_known || nselected != rfcomm_logged_selected) {
@@ -815,11 +896,16 @@ static void RFCOMM_CheckPresence(RFCOMM_Device *device)
         RFCOMM_RemoveJoystick(device, true);
     }
     if (!device->registered && generation) {
+        char key[SDL_RFCOMM_GUID_KEY_LENGTH];
+
         device->registered = generation;
         device->joystick_identity = identity;
         device->instance_id = SDL_GetNextObjectID();
-        /* Vendor 0 puts the name in the GUID. 'b' is this driver's. */
-        device->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, 0, 0, 0, NULL, identity.name, 'b', 0);
+        /* Vendor 0 puts a product name in the GUID, of which SDL keeps 9
+           bytes, so the name is the family's key (SDL_RFCOMM_GUIDKey). The
+           joystick's name stays identity.name. 'b' is this driver's. */
+        SDL_RFCOMM_GUIDKey(key, sizeof(key), device->info.family, SDL_crc16(0, identity.name, SDL_strlen(identity.name)), identity.name);
+        device->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, 0, 0, 0, NULL, key, 'b', 0);
         SDL_PrivateJoystickAdded(device->instance_id);
     }
 }
@@ -933,6 +1019,7 @@ static void RFCOMM_JoystickDetect(void)
             SDL_SetAtomicInt(&device->presence_changed, 0);
             RFCOMM_CheckPresence(device);
         }
+        RFCOMM_FlushNotes(device);
     }
     RFCOMM_ReapDevices(false);
 }
@@ -1017,6 +1104,9 @@ static void RFCOMM_SendControls(SDL_Joystick *joystick, const SDL_SerialControls
     for (i = 0; i < joystick->nbuttons; ++i) {
         SDL_SendJoystickButton(timestamp, joystick, (Uint8)i, SDL_Serial_GetButton(controls, i));
     }
+    for (i = 0; i < joystick->nhats; ++i) {
+        SDL_SendJoystickHat(timestamp, joystick, (Uint8)i, controls->hats[i]);
+    }
 }
 
 static bool RFCOMM_JoystickOpen(SDL_Joystick *joystick, int device_index)
@@ -1036,11 +1126,12 @@ static bool RFCOMM_JoystickOpen(SDL_Joystick *joystick, int device_index)
     joystick->hwdata = hwdata;
     joystick->naxes = device->joystick_identity.naxes;
     joystick->nbuttons = device->joystick_identity.nbuttons;
+    joystick->nhats = device->joystick_identity.nhats;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
     /* The state so far, sent by the first update, as SDL allocates the
-       joystick's axes and buttons only after Open returns. Queued snapshots
-       up to it are skipped. */
+       joystick's axes, buttons and hats only after Open returns. Queued
+       snapshots up to it are skipped. */
     SDL_LockMutex(device->mutex);
     hwdata->initial = device->latest;
     hwdata->sequence = device->latest_sequence;
@@ -1090,7 +1181,11 @@ static bool RFCOMM_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enable
     return SDL_Unsupported();
 }
 
-/* Drains the device's snapshot queue in order */
+/* Drains the device's snapshot queue in order. The state Open took goes out
+   stamped at the Open, and a snapshot the device thread stamped just before
+   the Open but queued after it carries an earlier time, so every event takes
+   SDL_RFCOMM_EventStamp and the joystick's events keep their order in
+   time. */
 static void RFCOMM_JoystickUpdate(SDL_Joystick *joystick)
 {
     struct joystick_hwdata *hwdata = joystick->hwdata;
@@ -1103,7 +1198,7 @@ static void RFCOMM_JoystickUpdate(SDL_Joystick *joystick)
     }
     if (hwdata->send_initial) {
         hwdata->send_initial = false;
-        RFCOMM_SendControls(joystick, &hwdata->initial, hwdata->initial_stamp);
+        RFCOMM_SendControls(joystick, &hwdata->initial, SDL_RFCOMM_EventStamp(&hwdata->last_stamp, hwdata->initial_stamp));
     }
     device = hwdata->device;
     SDL_LockMutex(device->mutex);
@@ -1119,7 +1214,7 @@ static void RFCOMM_JoystickUpdate(SDL_Joystick *joystick)
             continue;
         }
         hwdata->sequence = entry->sequence;
-        RFCOMM_SendControls(joystick, &entry->controls, entry->stamp_ns);
+        RFCOMM_SendControls(joystick, &entry->controls, SDL_RFCOMM_EventStamp(&hwdata->last_stamp, entry->stamp_ns));
     }
     /* The Zeemote reports millivolts, and no source gives a charge curve */
     if (battery >= 0 && !hwdata->battery_sent) {
@@ -1169,6 +1264,8 @@ static void RFCOMM_JoystickQuit(void)
     rfcomm_initialized = false;
 }
 
+/* As SERIAL_MapInput converts it. A hat's target carries its bit, as
+   SDL_InputMapping encodes it. */
 static void RFCOMM_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
 {
     SDL_zerop(out);
@@ -1178,6 +1275,9 @@ static void RFCOMM_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
         break;
     case SDL_SERIAL_MAP_AXIS:
         out->kind = EMappingKind_Axis;
+        break;
+    case SDL_SERIAL_MAP_HAT:
+        out->kind = EMappingKind_Hat;
         break;
     case SDL_SERIAL_MAP_AXIS_POSITIVE:
         out->kind = EMappingKind_Axis;

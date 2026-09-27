@@ -38,19 +38,40 @@
  * SDL's Linux haptic backend converts to, and the encoding follows Linux's
  * iforce-ff.c. A parameter block is written at most every 20 ms, the
  * spacing jsmolina's Windows port gives periodic updates on 06F8:0004, and a
- * thread sends the updates that wait. */
+ * thread sends the updates that wait. Commands that fail to send are undone,
+ * so the same update goes out again. The thread tries a waiting update at
+ * most three times in a row. Each try holds the joystick lock for as long as
+ * the write takes, up to 1000 ms on an endpoint that refuses data, so after
+ * the third the update is dropped and the next one from the application is
+ * built against what the device held. */
 
 typedef struct SDL_HIDAPI_IForceHaptic
 {
     SDL_Joystick *joystick;
-    SDL_Mutex *lock;
+    SDL_Mutex *lock;    /* Taken after the joystick lock */
     SDL_Condition *wake;
     SDL_Thread *thread;
-    bool stop;          /* Under lock */
+    SDL_AtomicInt stop; /* Set under lock */
     bool wheel;
     SDL_IForceFF ff;    /* Under lock */
     bool created[SDL_IFORCE_EFFECTS_MAX];
 } SDL_HIDAPI_IForceHaptic;
+
+/* Every send takes the joystick lock, so every path takes that lock before
+   ctx->lock. The other order deadlocks against an application that calls
+   the haptic API under the joystick lock, from an event watcher or after
+   SDL_LockJoysticks, while the thread sends. */
+static void IForceHaptic_Lock(SDL_HIDAPI_IForceHaptic *ctx)
+{
+    SDL_LockJoysticks();
+    SDL_LockMutex(ctx->lock);
+}
+
+static void IForceHaptic_Unlock(SDL_HIDAPI_IForceHaptic *ctx)
+{
+    SDL_UnlockMutex(ctx->lock);
+    SDL_UnlockJoysticks();
+}
 
 static bool IForceHaptic_Send(SDL_HIDAPI_IForceHaptic *ctx, const SDL_IForceCommand *command)
 {
@@ -81,26 +102,48 @@ static bool SDL_HIDAPI_HapticDriverIForce_JoystickSupported(SDL_Joystick *joysti
     return SDL_GetNumberProperty(props, SDL_IFORCE_PROP_EFFECTS_NUMBER, 0) > 0;
 }
 
-/* Sends the updates whose blocks may be written again */
+/* Sends the updates whose blocks may be written again. The thread waits
+   holding only ctx->lock, and lets go of it before it takes the joystick
+   lock. The close may hold the joystick lock while it waits for the thread,
+   so the thread only tries that lock, and gives up once stop is set. */
 static int SDLCALL IForceHaptic_Thread(void *data)
 {
     SDL_HIDAPI_IForceHaptic *ctx = (SDL_HIDAPI_IForceHaptic *)data;
 
     SDL_LockMutex(ctx->lock);
-    while (!ctx->stop) {
+    while (!SDL_GetAtomicInt(&ctx->stop)) {
         SDL_IForceCommands commands;
         Uint64 deadline;
         const Uint64 now = SDL_GetTicks();
 
-        if (SDL_IForce_NextDeferred(&ctx->ff, now, &commands)) {
-            IForceHaptic_SendAll(ctx, &commands);
+        if (!SDL_IForce_DeferredDeadline(&ctx->ff, &deadline)) {
+            SDL_WaitCondition(ctx->wake, ctx->lock);
             continue;
         }
-        if (SDL_IForce_DeferredDeadline(&ctx->ff, &deadline)) {
-            SDL_WaitConditionTimeout(ctx->wake, ctx->lock, (Sint32)((deadline > now) ? SDL_min(deadline - now, 1000) : 1));
-        } else {
-            SDL_WaitCondition(ctx->wake, ctx->lock);
+        if (deadline > now) {
+            SDL_WaitConditionTimeout(ctx->wake, ctx->lock, (Sint32)SDL_min(deadline - now, 1000));
+            continue;
         }
+        SDL_UnlockMutex(ctx->lock);
+        while (!SDL_TryLockJoysticks()) {
+            if (SDL_GetAtomicInt(&ctx->stop)) {
+                return 0;
+            }
+            SDL_Delay(1);
+        }
+        SDL_LockMutex(ctx->lock);
+        if (!SDL_GetAtomicInt(&ctx->stop) && SDL_IForce_NextDeferred(&ctx->ff, SDL_GetTicks(), &commands) &&
+            !IForceHaptic_SendAll(ctx, &commands)) {
+            /* The update waits again, until 20 ms after this try, unless
+               this was its last try */
+            const int dropped = SDL_IForce_DeferredFailed(&ctx->ff);
+
+            if (dropped >= 0) {
+                SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "I-Force: dropped the waiting update of effect %d after %d failed sends: %s",
+                             dropped, SDL_IFORCE_SEND_TRIES, SDL_GetError());
+            }
+        }
+        SDL_UnlockJoysticks();
     }
     SDL_UnlockMutex(ctx->lock);
     return 0;
@@ -166,7 +209,7 @@ static bool SDL_HIDAPI_HapticDriverIForce_StopEffects(SDL_HIDAPI_HapticDevice *d
     bool result = true;
     int i;
 
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     for (i = 0; i < ctx->ff.effects; ++i) {
         if (ctx->created[i]) {
             SDL_IForceCommand stop;
@@ -178,7 +221,7 @@ static bool SDL_HIDAPI_HapticDriverIForce_StopEffects(SDL_HIDAPI_HapticDevice *d
             }
         }
     }
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
     return result;
 }
 
@@ -187,8 +230,10 @@ static void SDL_HIDAPI_HapticDriverIForce_Close(SDL_HIDAPI_HapticDevice *device)
     SDL_HIDAPI_IForceHaptic *ctx = (SDL_HIDAPI_IForceHaptic *)device->ctx;
     SDL_IForceCommand stop;
 
+    /* The caller may hold the joystick lock, and the thread gives up
+       waiting for it once stop is set */
     SDL_LockMutex(ctx->lock);
-    ctx->stop = true;
+    SDL_SetAtomicInt(&ctx->stop, 1);
     SDL_SignalCondition(ctx->wake);
     SDL_UnlockMutex(ctx->lock);
     SDL_WaitThread(ctx->thread, NULL);
@@ -381,6 +426,11 @@ static int IForceHaptic_Upload(SDL_HIDAPI_IForceHaptic *ctx, int id, const SDL_H
     if (result == SDL_IFORCE_UPLOAD_DEFERRED) {
         SDL_SignalCondition(ctx->wake);
     } else if (result == SDL_IFORCE_UPLOAD_SENT && !IForceHaptic_SendAll(ctx, &commands)) {
+        /* The model goes back to what the device may still hold, so the
+           same update is sent again, and an update this one dropped waits
+           again */
+        SDL_IForce_Undo(&ctx->ff);
+        SDL_SignalCondition(ctx->wake);
         return SDL_IFORCE_UPLOAD_INVALID;
     } else if (result == SDL_IFORCE_UPLOAD_NO_MEMORY) {
         SDL_SetError("The device has no room for the effect");
@@ -399,24 +449,24 @@ static SDL_HapticEffectID SDL_HIDAPI_HapticDriverIForce_CreateEffect(SDL_HIDAPI_
         SDL_SetError("Unsupported effect");
         return -1;
     }
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     for (id = 0; id < ctx->ff.effects; ++id) {
         if (!ctx->created[id]) {
             break;
         }
     }
     if (id == ctx->ff.effects) {
-        SDL_UnlockMutex(ctx->lock);
+        IForceHaptic_Unlock(ctx);
         SDL_SetError("All effect slots in use");
         return -1;
     }
     if (IForceHaptic_Upload(ctx, id, data) < 0) {
         SDL_IForce_Erase(&ctx->ff, id);
-        SDL_UnlockMutex(ctx->lock);
+        IForceHaptic_Unlock(ctx);
         return -1;
     }
     ctx->created[id] = true;
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
     return id;
 }
 
@@ -430,13 +480,13 @@ static bool SDL_HIDAPI_HapticDriverIForce_UpdateEffect(SDL_HIDAPI_HapticDevice *
     SDL_HIDAPI_IForceHaptic *ctx = (SDL_HIDAPI_IForceHaptic *)device->ctx;
     bool result;
 
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     if (!IForceHaptic_Valid(ctx, id)) {
-        SDL_UnlockMutex(ctx->lock);
+        IForceHaptic_Unlock(ctx);
         return SDL_SetError("Bad effect id");
     }
     result = (IForceHaptic_Upload(ctx, id, data) >= 0);
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
     return result;
 }
 
@@ -446,15 +496,15 @@ static bool SDL_HIDAPI_HapticDriverIForce_RunEffect(SDL_HIDAPI_HapticDevice *dev
     SDL_IForceCommand play;
     bool result;
 
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     if (!IForceHaptic_Valid(ctx, id)) {
-        SDL_UnlockMutex(ctx->lock);
+        IForceHaptic_Unlock(ctx);
         return SDL_SetError("Bad effect id");
     }
     SDL_IForce_SetPlaying(&ctx->ff, id, iterations > 0);
     SDL_IForce_BuildPlay(&play, (Uint8)id, iterations);
     result = IForceHaptic_Send(ctx, &play);
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
     return result;
 }
 
@@ -468,14 +518,14 @@ static void SDL_HIDAPI_HapticDriverIForce_DestroyEffect(SDL_HIDAPI_HapticDevice 
     SDL_HIDAPI_IForceHaptic *ctx = (SDL_HIDAPI_IForceHaptic *)device->ctx;
     SDL_IForceCommand stop;
 
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     if (IForceHaptic_Valid(ctx, id)) {
         SDL_IForce_BuildPlay(&stop, (Uint8)id, 0);
         IForceHaptic_Send(ctx, &stop);
         SDL_IForce_Erase(&ctx->ff, id);
         ctx->created[id] = false;
     }
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
 }
 
 static bool SDL_HIDAPI_HapticDriverIForce_GetEffectStatus(SDL_HIDAPI_HapticDevice *device, SDL_HapticEffectID id)
@@ -490,10 +540,10 @@ static bool SDL_HIDAPI_HapticDriverIForce_SetGain(SDL_HIDAPI_HapticDevice *devic
     bool result;
 
     gain = SDL_clamp(gain, 0, 100);
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     SDL_IForce_BuildGain(&command, (Uint16)((0xFFFFU * (Uint32)gain) / 100));
     result = IForceHaptic_Send(ctx, &command);
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
     return result;
 }
 
@@ -504,10 +554,10 @@ static bool SDL_HIDAPI_HapticDriverIForce_SetAutocenter(SDL_HIDAPI_HapticDevice 
     bool result;
 
     autocenter = SDL_clamp(autocenter, 0, 100);
-    SDL_LockMutex(ctx->lock);
+    IForceHaptic_Lock(ctx);
     SDL_IForce_BuildAutocenter(commands, (Uint16)((0xFFFFU * (Uint32)autocenter) / 100));
     result = IForceHaptic_Send(ctx, &commands[0]) && IForceHaptic_Send(ctx, &commands[1]);
-    SDL_UnlockMutex(ctx->lock);
+    IForceHaptic_Unlock(ctx);
     return result;
 }
 

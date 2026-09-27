@@ -31,7 +31,10 @@
  * console captures of Yamakaky/joy: 5B ends polling, a 5C with format 0
  * resets the report format, 22 00 suspends the MCU. From the 5C of the start
  * until up to 45 ms after that reset is acknowledged, bytes 37 to 48 of
- * report 0x30 carry Ring-Con data instead of the third IMU sample.
+ * report 0x30 carry Ring-Con data instead of the third IMU sample. A Joy-Con
+ * that kept a Ring-Con format from an earlier session zeroes bytes 37 to 42
+ * from its answer to 22 01 on, as the logs of Ringcon-Driver and
+ * Yamakaky/joy show.
  *
  * The bytes are facts from those sources, Ringcon-Driver, osc-ringcon and
  * dekuNukem's notes. No code from any of them is copied.
@@ -141,7 +144,7 @@ typedef struct SDL_RingConMachine
     bool format_set;    // 5C was sent and no stop has finished with its reset acknowledged
     bool format_reset;  // this stop's format reset was acknowledged
     bool polling_set;   // 5A was sent and no 5B has been acknowledged
-    int16_t strain;     // the last nonzero strain, 0 before the first
+    bool slot_held;     // 22 01 was sent and its stop has not finished: bytes 37-48 may hold no IMU sample
     int16_t rest;       // the first nonzero strain after polling began, 0 before
     uint64_t alive_ms;  // polling start or the last nonzero strain
 } SDL_RingConMachine;
@@ -179,8 +182,9 @@ extern bool SDL_RingCon_Engaged(const SDL_RingConMachine *machine);
 
 /* The IMU samples of a 0x30 report to post, oldest first, as indices into the
  * driver's three samples: 0 is bytes 13-24, 1 bytes 25-36, 2 bytes 37-48.
- * From the 5C send to the end of the stop that resets the format, bytes 37-48
- * are not IMU data. */
+ * Bytes 37-48 do not count as IMU data from the 22 01 send to the end of its
+ * stop, and from the 5C send to the end of the first stop whose format reset
+ * is acknowledged. */
 extern int SDL_RingCon_ImuPostOrder(const SDL_RingConMachine *machine, int order[3]);
 
 /* What the close path writes, waiting for each reply: 5B if polling began, the

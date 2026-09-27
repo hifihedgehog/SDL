@@ -15,9 +15,14 @@
    descriptors are the ones the part quotes: the Speed Force Wireless from
    WiiBrew, the SideWinder Game Voice from the 2007 linux-kernel thread and
    both VRC-2 interfaces from linux-input. Each is fed as an exact-size heap
-   copy at every length, so AddressSanitizer catches a read past it. */
+   copy at every length, so AddressSanitizer catches a read past it. The
+   collection checks of the drivers whose rows admit any usage run on
+   constructed pairs of collections, since no source records those devices'
+   collections. */
 
 #include "../src/hidapi/SDL_hidapi_collections.h"
+#include "../src/joystick/hidapi/SDL_hidapi_riftdk1_proto.h"
+#include "../src/joystick/hidapi/SDL_hidapi_wmr_proto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,11 +258,137 @@ static void TestDescriptors(void)
     CHECK(!SDL_HIDAPI_HasReportID(NULL, 0));
 }
 
+/* Constructed pairs of top-level collections. Windows makes a device of each,
+   and its reconstructed descriptor covers that collection alone. Report IDs
+   are unique within a device, so each pair's second collection has its own. */
+
+/* The Rift DK1's reports as the Oculus SDK uses them on one handle: input 1
+   of 62 bytes with the ID, feature 2 of 7 and feature 8 of 5 */
+static const uint8_t rift_tracker_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01,
+    0x85, 0x01, 0x75, 0x08, 0x95, 0x3D, 0x09, 0x01, 0x81, 0x02,
+    0x85, 0x02, 0x95, 0x06, 0x09, 0x02, 0xB1, 0x02,
+    0x85, 0x08, 0x95, 0x04, 0x09, 0x03, 0xB1, 0x02,
+    0xC0
+};
+
+/* A second collection with features 4 and 9 only */
+static const uint8_t rift_feature_only_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x02, 0xA1, 0x01,
+    0x85, 0x04, 0x75, 0x08, 0x95, 0x07, 0x09, 0x04, 0xB1, 0x02,
+    0x85, 0x09, 0x95, 0x38, 0x09, 0x05, 0xB1, 0x02,
+    0xC0
+};
+
+/* The tracker's collection with one of its three reports missing */
+static const uint8_t rift_without_input1[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x02, 0x95, 0x06, 0x09, 0x02, 0xB1, 0x02,
+    0x85, 0x08, 0x95, 0x04, 0x09, 0x03, 0xB1, 0x02,
+    0xC0
+};
+static const uint8_t rift_without_feature2[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x01, 0x95, 0x3D, 0x09, 0x01, 0x81, 0x02,
+    0x85, 0x08, 0x95, 0x04, 0x09, 0x03, 0xB1, 0x02,
+    0xC0
+};
+static const uint8_t rift_without_feature8[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x01, 0x95, 0x3D, 0x09, 0x01, 0x81, 0x02,
+    0x85, 0x02, 0x95, 0x06, 0x09, 0x02, 0xB1, 0x02,
+    0xC0
+};
+
+/* A Windows Mixed Reality controller's reports as Monado uses them on one
+   handle: status input 1 of 45 bytes with the ID and command output 6 of 64 */
+static const uint8_t wmr_controller_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x01, 0x95, 0x2C, 0x09, 0x01, 0x81, 0x02,
+    0x85, 0x06, 0x95, 0x3F, 0x09, 0x02, 0x91, 0x02,
+    0xC0
+};
+static const uint8_t wmr_feature_only_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x02, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x10, 0x95, 0x3F, 0x09, 0x03, 0xB1, 0x02,
+    0xC0
+};
+static const uint8_t wmr_without_input1[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x02, 0x95, 0x4D, 0x09, 0x01, 0x81, 0x02,
+    0x85, 0x06, 0x95, 0x3F, 0x09, 0x02, 0x91, 0x02,
+    0xC0
+};
+static const uint8_t wmr_without_output6[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x75, 0x08,
+    0x85, 0x01, 0x95, 0x2C, 0x09, 0x01, 0x81, 0x02,
+    0x85, 0x06, 0x95, 0x4D, 0x09, 0x02, 0x81, 0x02,
+    0xC0
+};
+
+/* The RC adapter's and the drum kit's 8-byte input without report IDs, and
+   a second collection with a vendor feature only or an output only */
+static const uint8_t input_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01,
+    0x75, 0x08, 0x95, 0x08, 0x09, 0x01, 0x81, 0x02,
+    0xC0
+};
+static const uint8_t feature_only_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x02, 0xA1, 0x01,
+    0x75, 0x08, 0x95, 0x08, 0x09, 0x02, 0xB1, 0x02,
+    0xC0
+};
+static const uint8_t output_only_collection[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x03, 0xA1, 0x01,
+    0x75, 0x08, 0x95, 0x02, 0x09, 0x03, 0x91, 0x02,
+    0xC0
+};
+
+static void TestCollectionChoice(void)
+{
+    SDL_HIDAPIReportIDs ids;
+
+    /* Rift DK1: input 1 and features 2 and 8 in the same collection */
+    CHECK(Parse(rift_tracker_collection, sizeof(rift_tracker_collection), &ids));
+    CHECK(SDL_RiftDK1_CarriesTracker(ids.input, ids.feature));
+    CHECK(Parse(rift_feature_only_collection, sizeof(rift_feature_only_collection), &ids));
+    CHECK(!SDL_RiftDK1_CarriesTracker(ids.input, ids.feature));
+    CHECK(Parse(rift_without_input1, sizeof(rift_without_input1), &ids));
+    CHECK(!SDL_RiftDK1_CarriesTracker(ids.input, ids.feature));
+    CHECK(Parse(rift_without_feature2, sizeof(rift_without_feature2), &ids));
+    CHECK(!SDL_RiftDK1_CarriesTracker(ids.input, ids.feature));
+    CHECK(Parse(rift_without_feature8, sizeof(rift_without_feature8), &ids));
+    CHECK(!SDL_RiftDK1_CarriesTracker(ids.input, ids.feature));
+    CHECK(!SDL_RiftDK1_CarriesTracker(NULL, ids.feature) && !SDL_RiftDK1_CarriesTracker(ids.input, NULL));
+
+    /* Windows Mixed Reality: input 1 and output 6 in the same collection */
+    CHECK(Parse(wmr_controller_collection, sizeof(wmr_controller_collection), &ids));
+    CHECK(SDL_WMR_CarriesController(ids.input, ids.output));
+    CHECK(Parse(wmr_feature_only_collection, sizeof(wmr_feature_only_collection), &ids));
+    CHECK(!SDL_WMR_CarriesController(ids.input, ids.output));
+    CHECK(Parse(wmr_without_input1, sizeof(wmr_without_input1), &ids));
+    CHECK(!SDL_WMR_CarriesController(ids.input, ids.output));
+    CHECK(Parse(wmr_without_output6, sizeof(wmr_without_output6), &ids));
+    CHECK(!SDL_WMR_CarriesController(ids.input, ids.output));
+    CHECK(!SDL_WMR_CarriesController(NULL, ids.output) && !SDL_WMR_CarriesController(ids.input, NULL));
+
+    /* RC adapter, drum kit and Nimbus: any input report */
+    CHECK(Parse(input_collection, sizeof(input_collection), &ids));
+    CHECK(SDL_HIDAPI_DeclaresInput(&ids));
+    CHECK(Parse(rift_tracker_collection, sizeof(rift_tracker_collection), &ids) && SDL_HIDAPI_DeclaresInput(&ids));
+    CHECK(Parse(feature_only_collection, sizeof(feature_only_collection), &ids));
+    CHECK(!SDL_HIDAPI_DeclaresInput(&ids));
+    CHECK(Parse(output_only_collection, sizeof(output_only_collection), &ids));
+    CHECK(!SDL_HIDAPI_DeclaresInput(&ids));
+    CHECK(!SDL_HIDAPI_DeclaresInput(NULL));
+}
+
 int main(void)
 {
     TestAdmitted();
     TestJoystickOnly();
     TestDescriptors();
+    TestCollectionChoice();
 
     if (failures) {
         printf("FAILED: %d of %d checks\n", failures, checks);

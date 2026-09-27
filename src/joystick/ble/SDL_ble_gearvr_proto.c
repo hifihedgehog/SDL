@@ -23,23 +23,27 @@
  * - Start-up: write 08 00, wait for its 2-byte echo on the data
  *   characteristic, about 1.5 s later, then write 01 00, which streams 68
  *   packets per second. 01 00 before the echo makes the controller echo
- *   01 00 and stop (PROTOCOL.md:68-78). Without an echo in 4 s, 01 00 alone
- *   streams about 30 packets per second (PROTOCOL.md:35).
+ *   01 00 and stop (PROTOCOL.md:68-78). Without an echo, 01 00 alone
+ *   streams about 30 packets per second (PROTOCOL.md:35), so 01 00 follows
+ *   4 s after the 08 00 write completes, where gearvr.py:158-168 starts its
+ *   4 s wait.
  * - 04 00 every 10 s keeps it alive, the interval Samsung's service used
  *   (daydream-catcher writeup 2, :68). 00 00 stops the stream (gearvr.py:133-140).
  * - A stream can stop for good: when 01 00 arrives before the 08 00 echo,
  *   caps/vr_first.jsonl streams 103 packets, echoes 01 00 at 2.4983 s and
  *   sends nothing more, as caps/vr_ka.jsonl does at 2.5715 s
  *   (PROTOCOL.md:77). The 4 s fallback can cause that when the echo is late.
- *   So 3 s without a packet after 01 00 went out, whether the stream stopped
- *   or never started, releases every control and starts over from 08 00.
+ *   So 3 s without a packet after the 01 00 write completed, whether the
+ *   stream stopped or never started, releases every control and starts
+ *   over from 08 00.
  *   The reference's probe restarts a stopped stream the same way, 08 00 and
  *   then 01 00 (probe_features.py:120-125). A streaming controller echoes
  *   08 00 about 1.5 s later: caps/vr_idle.jsonl writes 01 00 at 1.0710 s,
  *   receives three packets, writes 08 00 at 1.1342 s, which stops the
  *   stream (PROTOCOL.md:78), and receives the echo at 2.6942 s. Whether a
  *   controller that stopped on its own echoes 08 00 is untested, and
- *   without the echo 01 00 follows at 4 s. A 01 00 echo alone is no stop.
+ *   without the echo 01 00 follows 4 s after the 08 00 write completes. A
+ *   01 00 echo alone is no stop.
  * - After two restarts in a row that bring no packet, the module gives the
  *   connection up. The session ends with its backoff, and the device's next
  *   connection starts over, where the joystick would otherwise stay at rest
@@ -90,11 +94,24 @@ static void GearVR_Reset(void *state, const SDL_BLESink *sink, const SDL_BLEModu
     SDL_BLE_ResetBase(&gearvr->base, sink, &identity);
 }
 
+/* Queues a command. Returns its number among the module's writes, counted
+   from 1 in the order the session sends and answers them, or 0 when the
+   queue is full. */
+static uint32_t GearVR_Command(SDL_GearVRState *gearvr, const uint8_t *command)
+{
+    if (!SDL_BLE_QueueWrite(&gearvr->base, SDL_GEARVR_COMMAND, command, 2, true)) {
+        return 0;
+    }
+    return ++gearvr->queued;
+}
+
 /* 08 00, then its echo awaited: the start-up, and the restart after a
-   stream stopped */
+   stream stopped. The echo's 4 s run from the write's completion
+   (GearVR_WriteDone). A write that could not be queued never completes, so
+   they run from now. */
 static void GearVR_VRMode(SDL_GearVRState *gearvr, uint64_t now)
 {
-    SDL_BLE_QueueWrite(&gearvr->base, SDL_GEARVR_COMMAND, gearvr_vr_mode, sizeof(gearvr_vr_mode), true);
+    gearvr->awaited = GearVR_Command(gearvr, gearvr_vr_mode);
     gearvr->phase = SDL_GEARVR_WAIT_ACK;
     gearvr->deadline = now + SDL_GEARVR_ACK_WAIT_MS;
 }
@@ -104,14 +121,40 @@ static void GearVR_Start(void *state, uint64_t now)
     GearVR_VRMode((SDL_GearVRState *)state, now);
 }
 
-/* 01 00 starts the stream, and the silence timer runs from it, so a stream
-   that never starts counts as a stop */
+/* 01 00 starts the stream. The silence timer runs from the write's
+   completion, so a stream that never starts counts as a stop and a slow
+   write does not. */
 static void GearVR_StartStream(SDL_GearVRState *gearvr, uint64_t now)
 {
-    SDL_BLE_QueueWrite(&gearvr->base, SDL_GEARVR_COMMAND, gearvr_sensor, sizeof(gearvr_sensor), true);
+    gearvr->awaited = GearVR_Command(gearvr, gearvr_sensor);
     gearvr->phase = SDL_GEARVR_STREAMING;
     gearvr->deadline = now + SDL_GEARVR_KEEPALIVE_MS;
     gearvr->silence = now + SDL_GEARVR_SILENCE_MS;
+}
+
+/* The session sends the module's writes one at a time, in the order they
+   were queued, and answers each, so the count of answers names the write
+   each answer belongs to, and a keep-alive answered ahead of the awaited
+   write starts nothing. The answer of the awaited 08 00 or 01 00, success
+   or failure, starts its timer, as gearvr.py:158-168 starts its 4 s once
+   the write has completed and the Zwift module times its handshake
+   (Zwift_WriteDone). Only a close or an end drops writes unsent, and no
+   timer of the module runs after either. */
+static void GearVR_WriteDone(void *state, bool success, uint64_t now)
+{
+    SDL_GearVRState *gearvr = (SDL_GearVRState *)state;
+
+    (void)success;
+    ++gearvr->answered;
+    if (gearvr->awaited == 0 || gearvr->answered != gearvr->awaited) {
+        return;
+    }
+    gearvr->awaited = 0;
+    if (gearvr->phase == SDL_GEARVR_WAIT_ACK) {
+        gearvr->deadline = now + SDL_GEARVR_ACK_WAIT_MS;
+    } else if (gearvr->phase == SDL_GEARVR_STREAMING && gearvr->silence < now + SDL_GEARVR_SILENCE_MS) {
+        gearvr->silence = now + SDL_GEARVR_SILENCE_MS;
+    }
 }
 
 static int16_t GearVR_Int16(const uint8_t *data)
@@ -211,18 +254,21 @@ static void GearVR_Value(void *state, int characteristic, const uint8_t *data, s
     GearVR_Sample(gearvr, &data[32], time_ns);
 }
 
+/* The echo's wait and the silence timer run only once their write has
+   completed */
 static void GearVR_Tick(void *state, uint64_t now)
 {
     SDL_GearVRState *gearvr = (SDL_GearVRState *)state;
 
-    if (gearvr->phase == SDL_GEARVR_WAIT_ACK && now >= gearvr->deadline) {
+    if (gearvr->phase == SDL_GEARVR_WAIT_ACK && !gearvr->awaited && now >= gearvr->deadline) {
         GearVR_StartStream(gearvr, now);
-    } else if (gearvr->phase == SDL_GEARVR_STREAMING && now >= gearvr->silence) {
+    } else if (gearvr->phase == SDL_GEARVR_STREAMING && !gearvr->awaited && now >= gearvr->silence) {
         if (gearvr->restarts >= SDL_GEARVR_RESTARTS) {
             /* The restarts brought nothing: the connection is given up,
                and the module keeps no timer */
             gearvr->phase = SDL_GEARVR_IDLE;
             gearvr->base.failed = true;
+            SDL_BLE_Log(&gearvr->base, "the restarts brought no packet, giving up");
             return;
         }
         /* The stream stopped: nothing stays held, and the start-up runs again */
@@ -230,7 +276,7 @@ static void GearVR_Tick(void *state, uint64_t now)
         SDL_BLE_Release(&gearvr->base, now * 1000000);
         GearVR_VRMode(gearvr, now);
     } else if (gearvr->phase == SDL_GEARVR_STREAMING && now >= gearvr->deadline) {
-        SDL_BLE_QueueWrite(&gearvr->base, SDL_GEARVR_COMMAND, gearvr_keepalive, sizeof(gearvr_keepalive), true);
+        (void)GearVR_Command(gearvr, gearvr_keepalive);
         gearvr->deadline += SDL_GEARVR_KEEPALIVE_MS;
         if (gearvr->deadline <= now) {
             gearvr->deadline = now + SDL_GEARVR_KEEPALIVE_MS;
@@ -238,15 +284,17 @@ static void GearVR_Tick(void *state, uint64_t now)
     }
 }
 
+/* No deadline for the echo's wait while its 08 00 is out, and no silence
+   timer while the 01 00 is out */
 static bool GearVR_GetDeadline(void *state, uint64_t *deadline)
 {
     SDL_GearVRState *gearvr = (SDL_GearVRState *)state;
 
-    if (gearvr->phase == SDL_GEARVR_IDLE) {
+    if (gearvr->phase == SDL_GEARVR_IDLE || (gearvr->phase == SDL_GEARVR_WAIT_ACK && gearvr->awaited)) {
         return false;
     }
     *deadline = gearvr->deadline;
-    if (gearvr->phase == SDL_GEARVR_STREAMING && gearvr->silence < *deadline) {
+    if (gearvr->phase == SDL_GEARVR_STREAMING && !gearvr->awaited && gearvr->silence < *deadline) {
         *deadline = gearvr->silence;
     }
     return true;
@@ -257,7 +305,7 @@ static void GearVR_Close(void *state, uint64_t now)
     SDL_GearVRState *gearvr = (SDL_GearVRState *)state;
 
     (void)now;
-    SDL_BLE_QueueWrite(&gearvr->base, SDL_GEARVR_COMMAND, gearvr_off, sizeof(gearvr_off), true);
+    (void)GearVR_Command(gearvr, gearvr_off);
     gearvr->phase = SDL_GEARVR_IDLE;
 }
 
@@ -266,7 +314,7 @@ const SDL_BLEModule SDL_BLEGearVRModule = {
     GearVR_Reset,
     GearVR_Start,
     GearVR_Value,
-    SDL_BLE_NoWriteDone,
+    GearVR_WriteDone,
     GearVR_Tick,
     GearVR_GetDeadline,
     GearVR_Close

@@ -24,7 +24,12 @@
    3. A GUID built the way the DirectInput backend builds it, with a nonzero
       version and a device name, resolves to the row.
    4. No HIDAPI driver supports the device, whether or not a hint enables it.
-      Known HIDAPI devices are the positive control.
+      Known HIDAPI devices are the positive controls, among them devices a
+      driver reads only on one interface number, one interface class or one
+      cartridge version, and an original Xbox pad.
+   5. SDL does not type the device as a flight stick or a wheel, and it is
+      not vJoy's 1234:BEAD. Rows the generator leaves out for these reasons
+      are the positive controls.
    Regeneration from the pinned file is the other test, run by the generator.
 */
 
@@ -40,6 +45,8 @@
 /* Internal functions of the static library, declared in
    src/joystick/SDL_joystick_c.h and src/joystick/hidapi/SDL_hidapijoystick_c.h. */
 extern SDL_GUID SDL_CreateJoystickGUID(Uint16 bus, Uint16 vendor, Uint16 product, Uint16 version, const char *vendor_name, const char *product_name, Uint8 driver_signature, Uint8 driver_data);
+extern bool SDL_IsJoystickFlightStick(Uint16 vendor_id, Uint16 product_id);
+extern bool SDL_IsJoystickWheel(Uint16 vendor_id, Uint16 product_id, Uint16 crc);
 extern bool HIDAPI_IsDeviceSupportedByAnyDriver(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
 
 #define HARDWARE_BUS_USB 0x03 /* SDL_HARDWARE_BUS_USB in src/joystick/SDL_sysjoystick.h */
@@ -392,6 +399,12 @@ static void TestNoHIDAPIDriver(const Row *rows, int row_count)
         { 0x057E, 0x0337, "WUP-028" },               /* GameCube adapter driver */
         { 0x045E, 0x02A0, "Xbox 360 Big Button IR" }, /* Big Button driver */
         { 0x28DE, 0x1102, "Steam Controller" },      /* Steam driver */
+        { 0x04B4, 0x2412, "Flydigi Vader 2" },       /* Flydigi driver, interface 2 only */
+        { 0x8086, 0xC013, "Intel Wireless Series" }, /* Intel Wireless driver, interface 0 only */
+        { 0x0B9A, 0x016A, "GunCon 2" },              /* GunCon driver, vendor class only */
+        { 0x2CA3, 0x1023, "DJI RC" },                /* DJI remote driver, class FF/43 only */
+        { 0x0AE4, 0x0101, "Multi Train Controller" }, /* train driver, by cartridge version */
+        { 0x045E, 0x0202, "Xbox Controller" },       /* XID drivers, XID class only */
     };
     size_t k;
     int i;
@@ -403,6 +416,51 @@ static void TestNoHIDAPIDriver(const Row *rows, int row_count)
     for (i = 0; i < row_count; ++i) {
         CHECK(!HIDAPI_IsDeviceSupportedByAnyDriver(rows[i].vendor, rows[i].product, 0, rows[i].name),
               "%s %s: a HIDAPI driver supports %04X:%04X", rows[i].guid, rows[i].name, rows[i].vendor, rows[i].product);
+    }
+}
+
+/* SDL's own type lists. SDL_gamepad.c makes no default gamepad mapping for
+   either type. The crc of 0 asks about the ID alone, as SDL_gamepad.c does. */
+static bool IsFlightStickOrWheel(const Row *row)
+{
+    return SDL_IsJoystickFlightStick(row->vendor, row->product) || SDL_IsJoystickWheel(row->vendor, row->product, 0);
+}
+
+/* Every vJoy device has this ID, and each user sets its buttons and axes */
+static bool IsVJoy(const Row *row)
+{
+    return row->vendor == 0x1234 && row->product == 0xBEAD;
+}
+
+/* 5. No row is for a device SDL types as a flight stick or a wheel, or for
+   vJoy. The controls are GUIDs of such devices, read the way the generated
+   rows are read. */
+static void TestNoJoystickLayouts(const Row *rows, int row_count)
+{
+    static const struct
+    {
+        const char *text;
+        bool (*left_out)(const Row *row);
+    } controls[] = {
+        { "030000004f0400000ab1000000000000,T16000M,a:b0,", IsFlightStickOrWheel }, /* SDL's flight stick list */
+        { "030000002c3600000100000000000000,Yawman Arrow,a:b4,", IsFlightStickOrWheel }, /* SDL's flight stick list */
+        { "030000006d0400004fc2000000000000,Logitech G29,a:b0,", IsFlightStickOrWheel }, /* SDL's wheel list */
+        { "0300000034120000adbe000000000000,vJoy Device,a:b0,", IsVJoy },
+    };
+    size_t k;
+    int i;
+
+    for (k = 0; k < ARRAY_COUNT(controls); ++k) {
+        Row control;
+        const bool split = SplitRow(controls[k].text, &control);
+
+        CHECK(split && controls[k].left_out(&control), "positive control %s is not left out", controls[k].text);
+    }
+    for (i = 0; i < row_count; ++i) {
+        CHECK(!IsFlightStickOrWheel(&rows[i]), "%s %s: SDL types %04X:%04X as a flight stick or a wheel",
+              rows[i].guid, rows[i].name, rows[i].vendor, rows[i].product);
+        CHECK(!IsVJoy(&rows[i]), "%s %s: %04X:%04X is vJoy's, whose layout each user sets",
+              rows[i].guid, rows[i].name, rows[i].vendor, rows[i].product);
     }
 }
 
@@ -484,7 +542,8 @@ int main(int argc, char *argv[])
     }
 
     ClearSDLEnvironment();
-    /* The mapping database loads without any backend. Keep real devices out. */
+    /* The mapping database loads without any backend. Keep real devices out,
+       with every backend the generator turns off. */
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_DIRECTINPUT, "0");
@@ -492,6 +551,13 @@ int main(int argc, char *argv[])
     SDL_SetHint(SDL_HINT_JOYSTICK_WGI, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_GAMEINPUT, "0");
     SDL_SetHint("SDL_JOYSTICK_BLE_SWITCH2", "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_BLE, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_SERIAL_AUTO, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_RFCOMM, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ICADE, "0");
+    /* The serial port and DJI remote hints are lists, so they are set empty */
+    SDL_SetHint(SDL_HINT_JOYSTICK_SERIAL, "");
+    SDL_SetHint(SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS, "");
     if (!SDL_Init(SDL_INIT_GAMEPAD)) {
         printf("SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -514,6 +580,7 @@ int main(int argc, char *argv[])
     TestDirectInputGUIDs(rows, row_count);
     TestNoOverlap(rows, row_count, argv[1]);
     TestNoHIDAPIDriver(rows, row_count);
+    TestNoJoystickLayouts(rows, row_count);
     TestRowsParse(rows, row_count);
 
     SDL_Quit();

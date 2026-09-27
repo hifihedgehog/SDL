@@ -115,21 +115,22 @@ pixels they see.
 | Names | NaturalPoint TrackIR 2, NaturalPoint TrackIR 3 |
 | Sensor | 256 x 256 pixels on the TrackIR 2, 440 x 314 on the TrackIR 3 |
 
-Binding WinUSB to a camera takes it away from NaturalPoint's driver.
+Binding WinUSB to a camera takes it away from NaturalPoint's driver, and a
+TrackIR 3 away from TrackIR 5.x for owners of the Vector unlock.
 
-Interface 0 takes commands on bulk OUT 0x02 and streams packets on bulk IN
-0x82, which SDL reads 16384 bytes at a time, as linuxtrack reads it. The
-joystick appears when the camera connects, and SDL starts the camera from its
-updates with linuxtrack's commands and delays. It turns the lights and the
-video off, flushes the stream with three reads, and sends the device
-information request `17 01` until a read starts `09 40`, 20 tries at most,
-after which it goes on without an answer. Then it sets the threshold and
-turns the video and the infrared lights on. The TrackIR 3 also gets three
-commands that linuxtrack names unknown, sent as linuxtrack sends them. A
-light command is `10`, the lights to turn on, then the lights it sets: 10
-red, 20 green, 40 blue, 80 infrared. The red and green status lights stay
-off. The threshold ends at 140, `15 8C 01` on the TrackIR 2 and
-`15 8C 01 00` on the TrackIR 3.
+Interface 0 takes commands on OUT 0x02 and streams packets on IN 0x82.
+linuxtrack reads 0x82 16384 bytes at a time with bulk calls, and SDL does
+the same when the descriptor says bulk. The joystick appears when the camera
+connects, and SDL starts the camera from its updates with linuxtrack's
+commands and delays. It turns the lights and the video off, flushes the
+stream with three reads, and sends the device information request `17 01`
+until a read starts `09 40`, 20 tries at most, after which it goes on
+without an answer. Then it sets the threshold and turns the video and the
+infrared lights on. The TrackIR 3 also gets three commands that linuxtrack
+names unknown, sent as linuxtrack sends them. A light command is `10`, the
+lights to turn on, then the lights it sets: 10 red, 20 green, 40 blue, 80
+infrared. The red and green status lights stay off. The threshold ends at
+140, `15 8C 01` on the TrackIR 2 and `15 8C 01 00` on the TrackIR 3.
 
 When SDL lets the camera go, it sends linuxtrack's stop sequence, which turns
 the infrared lights off, and waits out its delays, 401 ms on the TrackIR 2
@@ -140,7 +141,7 @@ gone, or when the start-up failed or never began.
 |---|---|
 | Axis 0 | ((width - 1) / 2 - x) x 65535 / width, where x is the mean column of the dot's pixels |
 | Axis 1 | The same with the mean line of the dot's pixels and the height |
-| Axis 2 | The dot's size in pixels, up to 32767 |
+| Axis 2 | The dot's size in pixels, up to 1024 |
 | Button 0 | Held while a dot is in view |
 
 A read holds one or more packets, each starting with its size and a type: 1C
@@ -149,11 +150,15 @@ information packets, and an unknown type drops the rest of the read. A read
 that fills all 16384 bytes can end inside a packet, and the next read
 finishes it. A frame ends at an all-zero stripe or at a line lower than the
 one before. A stripe joins every blob that has a stripe it overlaps or
-touches, diagonally too, on the line before. A stripe outside the sensor, or
-one that ends before it starts, is ignored. The dot is the largest blob of
-the frame, the later one on a tie. The axes keep their last values while no
-dot is in view. Recentering and scaling into yaw and pitch, which
-linuxtrack's pose code does, are left to the application.
+touches, diagonally too, on the line before. A stripe past the sensor, or
+one that ends before it starts, is ignored. As in linuxtrack, a line or x
+equal to the sensor size still counts. The dot is the largest blob of the
+frame up to 1024 pixels, the later one on a tie. A larger bright area, such
+as a lamp in view, is never the dot, since 1024 pixels is linuxtrack's upper
+bound for these cameras. linuxtrack also drops blobs under 4 pixels, and SDL
+keeps them. The axes keep their last values while no dot is in view.
+Recentering and scaling into yaw and pitch, which linuxtrack's pose code
+does, are left to the application.
 
 ## Tacx trainer head units
 
@@ -171,21 +176,28 @@ WinUSB replaces Tacx's Jungo driver, so software that uses the Jungo driver
 cannot reach the head unit until that driver is bound again.
 
 Interface 0 takes frames on OUT 0x02 and answers on IN 0x82. The head unit
-asks the brake only after a frame from the host, so SDL writes from its
-updates, whether or not a joystick is open: the version request
+asks the brake only after a frame from the host, so SDL sends frames from
+its updates, whether or not a joystick is open: the version request
 `02 00 00 00` first, without which the head unit reports no cadence, then a
 stop frame every 100 ms, `01 08 01 00` and eight bytes of 00, mode 00 with
 target 0. Until the brake's version reply arrives, the version request takes
 a frame's place every 500 ms, six times at most, and a head unit that starts
-answering after that gets a new round. SDL never sets a resistance.
-`SDL_SendJoystickEffect` is unsupported, and resistance control belongs to
-the application's trainer code.
+answering after that gets a new round. The HIDAPI rumble thread writes each
+frame, so an update never waits for a write.
 
-A reply is 64 bytes. Its header is bytes 24 to 27, a little-endian word. SDL
-decodes a reply of 48 bytes or more whose header is 00021303 as data, the
-length of the T1942's replies, which share the protocol. The joystick
-appears with the first data reply and goes 1000 ms after the last one, and a
-new round of version requests begins then. The brake's version reply, header
+SDL never sets a resistance, and `SDL_SendJoystickEffect` is unsupported.
+While SDL holds the head unit it writes a stop frame every 100 ms and keeps
+the device's WinUSB handle, so trainer code that sets a resistance must own
+the head unit: it sets `SDL_HINT_JOYSTICK_HIDAPI_TACX` to "0" before
+joysticks are initialized, and SDL then shows no Tacx joystick.
+
+A reply is 64 bytes from a head unit on a magnetic brake. FortiusANT's issue
+104 reports 48-byte replies from a T1932, the length of the T1942's, whose
+protocol the T1904 and T1932 share. A reply's header is bytes 24 to 27, a
+little-endian word, and SDL decodes a reply of 48 bytes or more whose header
+is 00021303 as data. The joystick appears with the first data reply and goes
+1000 ms after the last one, and a new round of version requests begins
+then. The brake's version reply, header
 00000C03, is logged at debug level with the brake's firmware version and
 serial, and for a motor brake its model, year and unit number, which the
 serial encodes. A magnetic brake reports serial 0, and its line ends
@@ -194,12 +206,22 @@ computes none.
 
 | SDL | Control |
 |---|---|
-| Axis 0 | Steering, the head unit's axis 1 in reply bytes 18 and 19, minus 32768 |
+| Axis 0 | Steering, the head unit's axis 1 in reply bytes 18 and 19, minus 32768. It rises toward the left. |
 | Axis 1 | Wheel speed as the head unit reports it, up to 32767, about 113 km/h by FortiusANT's factor |
 | Axis 2 | Cadence in rpm, x 128 |
 | Axis 3 | Heart rate in bpm, x 128 |
 | Axis 4 | Current resistance, signed, as the head unit reports it |
 | Buttons 0 to 3 | Enter, Down, Up, Cancel |
+
+A steering unit moves the raw value from about 0300 at full right to 0500
+at full left, so axis 0 reads about -32000 at full right and -31488 at full
+left. With no steering unit the head unit sends 0A0D, and axis 0 reads
+-30195. The ttyT1941 wiki gives that range and the 0A0D value. FortiusANT
+inverts the raw value so that a lower value steers left, and treats 0A0D as
+no steering unit, and the fortius_1942 driver negates the value too. The
+range differs from unit to unit, which the wiki gives as 0300 to 0580 on a
+T1904 and 0220 to 0540 on a T1942, so SDL neither scales nor centers the
+axis. Trainer code calibrates it, as FortiusANT calibrates at run time.
 
 ## Devices SDL does not read
 
@@ -229,6 +251,10 @@ computes none.
 - When the TrackIR's `17 01` request cannot be written, the start-up stops,
   as linuxtrack stops, and the joystick does not move until the camera
   connects again.
+- No source records the transfer type of the TrackIR endpoints. linuxtrack's
+  bulk calls also run on interrupt endpoints under Linux. If IN 0x82 is an
+  interrupt endpoint, SDL reads it one packet at a time and drops every
+  TrackIR packet longer than one USB packet.
 - A Tacx head unit whose brake does not answer sends no data reply, so it
   shows no joystick. The 24-byte replies that FortiusANT sees at times hold
   the head unit's own fields, the buttons and the steering among them, but
@@ -239,18 +265,26 @@ computes none.
   code. The T1932 capture's steering reads 0A0D, which FortiusANT treats as
   no steering unit, and the T1942 capture's reads near 03D0. Whether a
   steering unit was attached to that T1942 is not recorded.
-- No source records the Tacx endpoint types. The transfer type comes from
-  the descriptor, and a bulk IN endpoint is read 64 bytes a transfer, so one
-  whose packet size does not divide 64, such as a high-speed one of 512
-  bytes, does not open.
+- The T1904 and T1932 carry an NXP LPC2141, whose logical endpoint 2 is bulk
+  with packets of 8, 16, 32 or 64 bytes (NXP UM10139, Table 96), and no
+  source records the size the head units use. SDL takes the transfer type
+  from the descriptor and reads a bulk IN endpoint 64 bytes a transfer, so
+  an endpoint whose packet size does not divide 64, such as a high-speed one
+  of 512 bytes, does not open. Each transfer also ends 50 ms after it
+  starts, so a 48-byte reply in 8- or 16-byte packets, which no short packet
+  ends, still comes back alone. A timeout that lands while a reply's packets
+  arrive splits that reply, and SDL drops both parts.
 
 ## Tests
 
 The protocol modules are C99 with no SDL runtime and no I/O.
-`test/controller-protocols` runs `testchmfp` against chmfp's byte table and
-constructed reports, `testergodex` against the packets dx1-studio and
-ergodex-dx1-linux captured from hardware and the start-up on an injected
-clock, `testtrackir` against streams constructed from linuxtrack's parser and
-blob code, and `testtacx` against antifier's T1942 and T1932 captures,
-replayed whole, in normal and AddressSanitizer builds. Each of the four also
-checks its device's vendor rule.
+`test/controller-protocols` builds and runs `test/testchmfp.c` against
+chmfp's byte table and constructed reports, `test/testergodex.c` against the
+packets dx1-studio and ergodex-dx1-linux captured from hardware and the
+start-up on an injected clock, `test/testtrackir.c` against streams
+constructed from linuxtrack's parser and blob code, and `test/testtacx.c`
+against antifier's T1942 and T1932 captures, replayed whole, in normal and
+AddressSanitizer builds. Each of the four also checks its device's vendor
+rule. `test/libusb-backend` runs the Tacx driver and SDL's libusb backend
+against a fake libusb: an update returns at once while the head unit's OUT
+endpoint NAKs, and 48-byte replies in 16-byte packets come back one a read.

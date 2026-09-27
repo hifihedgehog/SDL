@@ -410,6 +410,12 @@ static void TestOutput(void)
 
     CHECK(SDL_SerialIForceModule.effect_min == 2 && SDL_SerialIForceModule.effect_max == 15);
     CHECK(SDL_SerialIForceModule.effect_max <= SDL_SERIAL_MAX_EFFECT && !SDL_SerialIForceModule.rumble);
+    /* The driver sends the commands in order and accepts only whole ones, as
+       the USB driver does */
+    CHECK(SDL_SerialIForceModule.queue_effects && SDL_SerialIForceModule.ValidEffect == SDL_IForce_IsCommand);
+    CHECK(SDL_Serial_CheckEffect(&SDL_SerialIForceModule, (const uint8_t *)"\x43\x7F", 2) == SDL_SERIAL_EFFECT_OK);
+    CHECK(SDL_Serial_CheckEffect(&SDL_SerialIForceModule, (const uint8_t *)"\x43\x7F\x00", 3) == SDL_SERIAL_EFFECT_INVALID);
+    CHECK(SDL_Serial_CheckEffect(&SDL_SerialIForceModule, (const uint8_t *)"\x07\x00", 2) == SDL_SERIAL_EFFECT_INVALID);
 
     /* Nothing goes before identification */
     H_Start(h);

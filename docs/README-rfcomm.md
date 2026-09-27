@@ -13,16 +13,26 @@ loads no input driver for them. The driver is Windows only.
 
 Pair the controller in Windows Settings first. The driver never searches
 for new devices. It reads the list of paired devices every 3 seconds,
-connects to each one whose name matches, and after a failed connect or a
-lost link connects again 3 seconds later, until the device leaves the list.
+connects to each one whose name matches, up to 8 at once from the first 64
+devices in the list, and after a failed connect or a lost link connects
+again 3 seconds later, until the device leaves the list.
 A device counts as paired when Windows remembers or authenticated it, not
 because it is connected. Names starting "Zeemote: SteelSeries", in any case,
 are left alone: the SteelSeries FREE works as a HID gamepad.
 
-`SDL_HINT_JOYSTICK_RFCOMM` turns the driver on or off, default on.
+`SDL_HINT_JOYSTICK_RFCOMM`, default on, is the default of
 `SDL_HINT_JOYSTICK_RFCOMM_MOGA`, `SDL_HINT_JOYSTICK_RFCOMM_ZEEMOTE`,
-`SDL_HINT_JOYSTICK_RFCOMM_BGP100` and `SDL_HINT_JOYSTICK_RFCOMM_PHONEJOY`
-default to it and override it, as the HIDAPI drivers' hints do.
+`SDL_HINT_JOYSTICK_RFCOMM_BGP100` and `SDL_HINT_JOYSTICK_RFCOMM_PHONEJOY`, as
+`SDL_HINT_JOYSTICK_HIDAPI` is for the HIDAPI drivers' hints. A family hint
+set to "1" keeps its family on while `SDL_HINT_JOYSTICK_RFCOMM` is "0".
+
+SDL's device lists, `SDL_HINT_JOYSTICK_BLACKLIST_DEVICES`,
+`SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES` and
+`SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT`, check each matching device
+as 0x0000/0x0000 with its Bluetooth name. The driver reads no vendor or
+product ID, so an allow list leaves out every such device. The driver checks
+whenever the paired list or one of its hints changes, and runs no device the
+lists leave out.
 
 A joystick appears with the first valid report or key event, so a device
 with a matching name that sends something else shows nothing. A lost link
@@ -36,12 +46,12 @@ with analog triggers, and 41 and 44 for "BD&A" or "BDA", for 12-byte
 reports. After 2 seconds without a report SDL polls. A report after the poll
 brings the listen command again, and 2 more seconds of silence end the link.
 
-The player index lights the blue LED: players 0 to 3 are ids 1 to 4, and no
-player is id 5, which lights none. A, B, X and Y are South, East, West and
-North, L1 and R1 the shoulders, Select Back, Start Start, L3 and R3 the
-stick clicks, and the D-pad the D-pad. The triggers are analog in 14-byte
-reports and full or released in 12-byte ones. Mode A carries no battery
-level.
+The player index lights the blue LED: players 0 to 3 are ids 1 to 4, and
+any other index is id 5, which lights none. Until the joystick has a player
+index, SDL sends id 1. A, B, X and Y are South, East, West and North, L1 and
+R1 the shoulders, Select Back, Start Start, L3 and R3 the stick clicks, and
+the D-pad the D-pad. The triggers are analog in 14-byte reports and full or
+released in 12-byte ones. Mode A carries no battery level.
 
 ## Zeemote
 

@@ -75,6 +75,7 @@
 #define SDL_XID_REQUEST_GET_REPORT     0x01
 #define SDL_XID_INPUT_REPORT_VALUE     0x0100
 #define SDL_XID_REQUEST_TIMEOUT_MS     100
+#define SDL_XID_DESCRIPTOR_ATTEMPTS    3 // GET_DESCRIPTOR requests before the ID tables decide
 
 #define SDL_XID_GAMEPAD_REPORT_LENGTH 20
 #define SDL_XID_SB_REPORT_LENGTH      26
@@ -108,7 +109,9 @@
 #define SDL_XID_FLAG_NULL_STICKS     0x04 // the sticks are not read
 #define SDL_XID_FLAG_DANCE_PAD       (SDL_XID_FLAG_DPAD_BUTTONS | SDL_XID_FLAG_TRIGGER_BUTTONS | SDL_XID_FLAG_NULL_STICKS)
 
-// GUID byte 15, which picks the gamepad mapping
+/* GUID byte 15, which picks the gamepad mapping: 0xFF for the Steel
+ * Battalion alone, 0x80 for a dance pad, else the bSubType of a
+ * gamepad-family descriptor, and 0 without one or for bSubType 0xFF */
 #define SDL_XID_GUID_DANCE_PAD       0x80
 #define SDL_XID_GUID_STEEL_BATTALION 0xFF
 
@@ -194,11 +197,17 @@ extern bool SDL_XID_ParseDescriptor(const uint8_t *data, size_t length, SDL_XIDD
 // The identity table: pads, wheels, dance pads and light guns by ID
 extern const SDL_XIDKnownDevice *SDL_XID_FindKnownDevice(uint16_t vendor, uint16_t product);
 
-/* Whether a HIDAPI GUID with this ID can only come from the XID drivers: an
- * ID in the identity table or the Steel Battalion's. No other driver serves
- * these IDs, so the mapping follows from the GUID whether or not the device
- * is connected. */
+/* Whether a HIDAPI GUID with this ID is taken for an XID device while no
+ * device with that GUID is connected: an ID in the identity table or the
+ * Steel Battalion's. */
 extern bool SDL_XID_IsKnownID(uint16_t vendor, uint16_t product);
+
+/* Whether a HIDAPI joystick takes an XID mapping. interface_class is the
+ * interface class of the connected device with the joystick's GUID, or -1
+ * when none is connected. A connected device takes one only through an XID
+ * interface, since other drivers serve products of some of the identity
+ * table's vendors. Without the device, a known ID decides. */
+extern bool SDL_XID_IsXIDJoystick(int interface_class, uint16_t vendor, uint16_t product);
 
 /* What the device is, from its descriptor when one was read, otherwise from
  * the identity table. Returns false for a device that is not served. */
@@ -249,17 +258,18 @@ typedef struct SDL_XIDSink
 typedef struct SDL_XIDSession
 {
     SDL_XIDIdentity identity;
-    uint8_t interface_number;
     bool post_pending; // a joystick opened and has not been sent the state
     SDL_XIDGamepadState gamepad;
     SDL_XIDSteelBattalionState steel_battalion;
 } SDL_XIDSession;
 
-/* Reads the XID descriptor with one GET_DESCRIPTOR and identifies the device,
- * falling back to the ID tables on a stall, a timeout or a malformed reply.
- * The state starts at rest. The gamepad family then reads its current report
- * with one GET_REPORT, since the device sends a report only on a change.
- * Returns false for a device that is not served, the DVD remote. */
+/* Reads the XID descriptor with GET_DESCRIPTOR and identifies the device. A
+ * stall, a timeout or a malformed reply sends the request again, up to
+ * SDL_XID_DESCRIPTOR_ATTEMPTS requests in all, and only then do the ID tables
+ * decide. The state starts at rest. The gamepad family then reads its
+ * current report with one GET_REPORT, since the device sends a report only
+ * on a change. Returns false for a device that is not served, the DVD
+ * remote. */
 extern bool SDL_XID_Open(SDL_XIDSession *session, uint16_t vendor, uint16_t product, uint8_t interface_number,
                          const char *product_string, const SDL_XIDSink *sink);
 

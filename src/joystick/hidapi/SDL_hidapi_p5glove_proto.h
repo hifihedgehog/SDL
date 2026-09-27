@@ -67,7 +67,7 @@ extern int16_t SDL_P5Glove_FingerAxis(uint8_t finger);
 typedef struct SDL_P5GloveLEDPositions
 {
     uint8_t glove_type;
-    int16_t positions[SDL_P5GLOVE_LEDS][3]; /* Hundredths of an inch, the first axis negated */
+    int32_t positions[SDL_P5GLOVE_LEDS][3]; /* Hundredths of an inch. The first axis is negated, so it reaches 32768 */
 } SDL_P5GloveLEDPositions;
 
 /* Feature 12: the glove type and the LED positions. Needs 62 bytes. */

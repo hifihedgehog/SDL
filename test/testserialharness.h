@@ -22,7 +22,25 @@
    feed, (A3) bytes of 00 and of FF past the count change nothing, (A4) a
    reset after a partial packet discards it, (A5) the same packet twice
    produces one change, (A6) a malformed packet changes nothing and the next
-   valid packet decodes. */
+   valid packet decodes.
+
+   Write completion. By default a write finishes inside the pump that
+   started it. The port layer never does that: SERIAL_Write reports every
+   write pending, even one WriteFile finished at once, and the completion
+   arrives through the write event on a later wake. A port thread that runs
+   late handles a read signaled in the same wake first, because the read
+   event comes first in its wait. Under the two deferred modes a write stays
+   pending until a later harness call. H_Start and H_LosePort complete it,
+   and every write its completion starts, before anything else, and
+   H_Advance does the same before it moves the clock. H_Feed completes the
+   one write that was pending, before its bytes under
+   H_DEFER_COMPLETION_FIRST and after them under H_DEFER_BYTES_FIRST, where
+   H_FeedAt also leaves the write pending while the clock moves to the
+   bytes, as a thread that runs late does. A test that fails under
+   H_DEFER_BYTES_FIRST and passes under H_DEFER_COMPLETION_FIRST depends on
+   the order of a reply and the completion of its request. A test build
+   with SDL_SERIAL_TEST_DEFER_WRITES defined as 1 or 2 gives every harness
+   that mode. */
 
 #ifndef testserialharness_h_
 #define testserialharness_h_
@@ -56,6 +74,11 @@ static void H_Fail(const char *what)
 #define H_MAX_PUBLISHED 2048
 #define H_MAX_PRESENCE  64
 
+/* Harness::defer_writes */
+#define H_DEFER_OFF              0
+#define H_DEFER_BYTES_FIRST      1
+#define H_DEFER_COMPLETION_FIRST 2
+
 typedef struct H_Call
 {
     char kind; /* O open, L line, T timeouts, P purge, E escape, W write, D drain, C close */
@@ -86,6 +109,8 @@ typedef struct Harness
     int open_failures;   /* Opens that fail before one succeeds */
     bool reject_toggle;  /* SetLine fails for RTS toggle mode */
     bool pend_writes;    /* Writes stay pending until H_CompleteWrite */
+    int defer_writes;    /* H_DEFER_*, for writes pend_writes does not hold */
+    bool deferred;       /* The last write is pending under defer_writes */
     bool fail_writes;
     uint32_t fail_rate;  /* SetLine fails for this rate */
 
@@ -177,10 +202,19 @@ static SDL_SerialIO H_Write(void *userdata, const uint8_t *data, size_t length)
         memcpy(call->data, data, length);
         call->length = length;
     }
+    /* The engine starts a write only once the one before it has finished */
+    h->deferred = false;
     if (h->fail_writes) {
         return SDL_SERIAL_IO_FAILED;
     }
-    return h->pend_writes ? SDL_SERIAL_IO_PENDING : SDL_SERIAL_IO_DONE;
+    if (h->pend_writes) {
+        return SDL_SERIAL_IO_PENDING;
+    }
+    if (h->defer_writes != H_DEFER_OFF) {
+        h->deferred = true;
+        return SDL_SERIAL_IO_PENDING;
+    }
+    return SDL_SERIAL_IO_DONE;
 }
 
 static bool H_Drain(void *userdata)
@@ -253,15 +287,63 @@ static uint64_t H_NS(uint64_t ms)
     return ms * 1000000;
 }
 
-/* Runs the engine at every deadline up to and including t, then at t */
-static void H_Advance(Harness *h, uint64_t t)
+/* Completes the write held under defer_writes at the current time. False
+   when none is held. */
+static bool H_CompleteDeferred(Harness *h)
+{
+    if (!h->deferred || !h->engine.busy) {
+        h->deferred = false;
+        return false;
+    }
+    h->deferred = false;
+    SDL_SerialEngine_WriteDone(&h->engine, true, H_NS(h->now));
+    return true;
+}
+
+/* Completes the held write and every write its completion starts */
+static void H_Settle(Harness *h)
+{
+    int guard = 0;
+
+    while (H_CompleteDeferred(h)) {
+        if (++guard > 100000) {
+            H_Fail("write loop");
+            break;
+        }
+    }
+}
+
+/* Feeds a read's bytes. Under defer_writes the write that was pending
+   completes before or after them, as the mode says. */
+static void H_Received(Harness *h, const uint8_t *data, size_t length)
+{
+    const bool held = h->deferred;
+
+    if (h->defer_writes == H_DEFER_COMPLETION_FIRST && held) {
+        (void)H_CompleteDeferred(h);
+    }
+    SDL_SerialEngine_Received(&h->engine, data, length, H_NS(h->now));
+    if (h->defer_writes == H_DEFER_BYTES_FIRST && held) {
+        (void)H_CompleteDeferred(h);
+    }
+}
+
+/* Runs the engine at every deadline up to and including t, then at t. A
+   held write finishes before the clock moves unless hold is true. */
+static void H_Run(Harness *h, uint64_t t, bool hold)
 {
     int guard = 0;
 
     for (;;) {
         uint64_t deadline;
+        const bool due = SDL_SerialEngine_GetDeadline(&h->engine, &deadline) && deadline <= t;
 
-        if (!SDL_SerialEngine_GetDeadline(&h->engine, &deadline) || deadline > t) {
+        if (!hold && h->deferred && (due ? deadline : t) > h->now) {
+            /* Its completion can bring a deadline forward, so look again */
+            H_Settle(h);
+            continue;
+        }
+        if (!due) {
             break;
         }
         if (deadline > h->now) {
@@ -279,12 +361,21 @@ static void H_Advance(Harness *h, uint64_t t)
     SDL_SerialEngine_Run(&h->engine, H_NS(h->now));
 }
 
+/* Runs the engine at every deadline up to and including t, then at t */
+static void H_Advance(Harness *h, uint64_t t)
+{
+    H_Run(h, t, false);
+}
+
 static Harness *H_Create(const SDL_SerialModule *module)
 {
     Harness *h = (Harness *)calloc(1, sizeof(Harness));
 
     h->module = module;
     h->state = calloc(1, module->state_size);
+#ifdef SDL_SERIAL_TEST_DEFER_WRITES
+    h->defer_writes = SDL_SERIAL_TEST_DEFER_WRITES;
+#endif
     SDL_SerialEngine_Init(&h->engine, &harness_ops, h, module, h->state, 0);
     return h;
 }
@@ -298,6 +389,7 @@ static void H_Destroy(Harness *h)
 /* Starts the engine at the current time */
 static void H_Start(Harness *h)
 {
+    H_Settle(h);
     SDL_SerialEngine_Run(&h->engine, H_NS(h->now));
 }
 
@@ -309,13 +401,15 @@ static void H_Feed(Harness *h, const uint8_t *data, size_t length)
     if (length) {
         memcpy(copy, data, length);
     }
-    SDL_SerialEngine_Received(&h->engine, copy, length, H_NS(h->now));
+    H_Received(h, copy, length);
     free(copy);
 }
 
+/* Under H_DEFER_BYTES_FIRST a held write stays pending until these bytes
+   are in */
 static void H_FeedAt(Harness *h, uint64_t t, const uint8_t *data, size_t length)
 {
-    H_Advance(h, t);
+    H_Run(h, t, h->defer_writes == H_DEFER_BYTES_FIRST);
     H_Feed(h, data, length);
 }
 
@@ -332,7 +426,7 @@ static void H_FeedPadded(Harness *h, const uint8_t *data, size_t length)
     memcpy(buffer, data, length);
     memset(buffer + length, 0x00, 64);
     memset(buffer + length + 64, 0xFF, 64);
-    SDL_SerialEngine_Received(&h->engine, buffer, length, H_NS(h->now));
+    H_Received(h, buffer, length);
     free(buffer);
 }
 
@@ -343,6 +437,7 @@ static void H_CompleteWrite(Harness *h, bool success)
 
 static void H_LosePort(Harness *h)
 {
+    H_Settle(h);
     SDL_SerialEngine_Lost(&h->engine, H_NS(h->now));
 }
 

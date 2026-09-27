@@ -48,6 +48,8 @@
 #define SDL_GAMETRAK_INITIAL_KEY       0x23
 #define SDL_GAMETRAK_KEEPALIVE_REPORTS 100
 #define SDL_GAMETRAK_ANSWER_WAIT_MS    10
+#define SDL_GAMETRAK_START_WAIT_MS     1000 /* From 45 23 to the first sensor report */
+#define SDL_GAMETRAK_UNLOCK_ATTEMPTS   3
 
 typedef struct SDL_GametrakReport
 {
@@ -82,20 +84,28 @@ typedef struct SDL_GametrakSession
 {
     int phase;
     uint64_t answer_due_ms;
+    uint64_t start_ms;     /* When 45 23 went out */
+    int unlocks_left;      /* "Gametrak" writes left for a unit that stays silent */
     uint32_t key;          /* The key byte last sent is its low byte */
     uint32_t sensor_reports;
     bool desync;           /* The last sensor report's key bits did not match */
 } SDL_GametrakSession;
 
-/* Sends "Gametrak". A reconnect starts here again with the key back at 0x23. */
+/* Sends "Gametrak". A reconnect starts here again with the key back at 0x23
+ * and all three unlocks. */
 extern void SDL_Gametrak_Open(SDL_GametrakSession *session, uint64_t now_ms, const SDL_GametrakSink *sink);
 
-/* Sends 45 23 once 10 ms have passed without an answer */
+/* Sends 45 23 once 10 ms have passed without an answer. When no sensor
+ * report arrives within 1000 ms of 45 23, sends "Gametrak" again, up to three
+ * unlocks in all. libgametrak and GameTrak-Liberation write the unlock once,
+ * but a lost write would leave the unit silent, and PCSX2's model of the
+ * unit takes a second "Gametrak" as a fresh start. */
 extern void SDL_Gametrak_Update(SDL_GametrakSession *session, uint64_t now_ms, const SDL_GametrakSink *sink);
 
 /* Applies one transfer. The unlock answer sends 45 23. A sensor report is
  * decoded into out, counted, checked against the key and, every 100th,
- * followed by a keep-alive. Returns true for a sensor report. */
+ * followed by a keep-alive. The first one after 45 23 ends the unlock
+ * retries. Returns true for a sensor report. */
 extern bool SDL_Gametrak_HandleReport(SDL_GametrakSession *session, uint64_t now_ms, const uint8_t *report, size_t length,
                                       const SDL_GametrakSink *sink, SDL_GametrakReport *out);
 

@@ -1,9 +1,10 @@
 # Namco GunCon light guns
 
 Namco's GunCon 2 and GunCon 3 each present one vendor-class USB interface
-that no Windows driver claims. This fork reads the GunCon 2, and the EMS LCD
-TopGun that shares its ID, through libusb once WinUSB is bound. It does not
-read the GunCon 3.
+that no Windows driver claims. This fork reads the GunCon 2 through libusb
+once WinUSB is bound. The EMS LCD TopGun shares its ID and is read only if
+its interface has the GunCon 2's class, 0xFF. No descriptor dump of a TopGun
+records its class. The fork does not read the GunCon 3.
 
 ## GunCon 2
 
@@ -42,16 +43,19 @@ report, ready for a table from a source the fork can use.
 
 ## Known limits
 
-- No source records what the GunCon 2 reports off screen or with no video
-  signal. PCSX2 emulates X 0 and Y 0.
+- No capture shows what the GunCon 2 reports off screen or with no video
+  signal. One user reports X 1 and Y 5 from an idle Namco unit with no CRT
+  attached, and PCSX2 emulates X 0 and Y 0.
 - The TopGun's Linux driver swaps A and B and orders the D-pad differently.
-  SDL cannot tell a TopGun from a GunCon 2, so both get the GunCon 2 layout.
+  SDL cannot tell a TopGun from a GunCon 2, so a TopGun that SDL reads gets
+  the GunCon 2 layout.
 - Whether the gun reports before the mode request, what the mode bytes mean,
   and the report rate are not recorded.
 
 ## Tests
 
 The protocol module is C99 with no SDL runtime and no I/O.
-`test/controller-protocols` runs `testguncon` against constructed GunCon 2
-reports, every button word, the GunCon 3 key and three GunCon 3 packets
-captured from hardware, in normal and AddressSanitizer builds.
+`test/controller-protocols` builds and runs `test/testguncon.c` against
+constructed GunCon 2 reports, every button word, the GunCon 3 key and three
+GunCon 3 packets captured from hardware, in normal and AddressSanitizer
+builds.

@@ -24,10 +24,17 @@
 /* Return true if the HIDAPI should ignore a device during enumeration */
 extern bool SDL_HIDAPI_ShouldIgnoreDevice(int bus_type, Uint16 vendor_id, Uint16 product_id, Uint16 usage_page, Uint16 usage, bool libusb, bool is_xbox);
 
-/* Sends an output report through SET_REPORT on the control pipe, where
-   SDL_hid_write takes the first interrupt OUT endpoint when one exists. The
-   first byte of data is the report ID, 0 for a device without report IDs.
-   Returns the number of bytes sent, or -1 on error, including on a backend
-   that cannot send one. */
+/* Sends an output report as SET_REPORT on the control pipe on Windows and
+   through libusb, where SDL_hid_write takes the first interrupt OUT endpoint
+   when one exists. On Linux and macOS the kernel sends it on the interrupt
+   OUT endpoint when the device has one, as SDL_hid_write does. The first byte
+   of data is the report ID, 0 for a device without report IDs. Returns the
+   number of bytes sent, or -1 on error, including on a backend that cannot
+   send one. */
 extern int SDL_hid_send_output_report(SDL_hid_device *device, const unsigned char *data, size_t length);
+
+/* Returns true for a device opened through the libusb backend. A driver whose
+   report form works around the Windows HID stack asks this, since libusb
+   sends reports whole on Windows as well. */
+extern bool SDL_hid_device_is_libusb(SDL_hid_device *device);
 

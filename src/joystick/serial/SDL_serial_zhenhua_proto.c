@@ -71,10 +71,13 @@ static bool ZhenHua_FrameByte(SDL_ZhenHuaState *s, uint8_t byte)
 
 /* inputattach's check: an EF, then 9 more bytes of which the fifth is EF
  * again, each within 500 ms. inputattach gives up when none of the first 5
- * bytes is EF. This module keeps looking. */
+ * bytes is EF. This module keeps looking. The tenth byte must also end the
+ * second frame: a data byte is never EF, so an EF among the last four means
+ * a byte of that frame was lost, and detection starts over at the EF. */
 static void ZhenHua_DetectByte(SDL_ZhenHuaState *s, uint8_t byte, uint64_t now)
 {
     SDL_SerialIdentity identity;
+    bool complete;
 
     s->timer = true;
     s->deadline = now + SDL_ZHENHUA_BYTE_MS;
@@ -94,8 +97,17 @@ static void ZhenHua_DetectByte(SDL_ZhenHuaState *s, uint8_t byte, uint64_t now)
         return;
     }
     ++s->detect_length;
-    (void)ZhenHua_FrameByte(s, byte);
+    complete = ZhenHua_FrameByte(s, byte);
     if (s->detect_length < 2 * SDL_ZHENHUA_FRAME) {
+        return;
+    }
+    if (!complete) {
+        s->detect_length = 0;
+        s->frame_length = 0;
+        if (byte == SDL_ZHENHUA_SYNC) {
+            s->detect_length = 1;
+            (void)ZhenHua_FrameByte(s, byte);
+        }
         return;
     }
     s->detecting = false;

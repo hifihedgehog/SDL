@@ -258,6 +258,11 @@ int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const 
     return SDL_HIDAPI_SendRequestAndUnlock(device, data, size, callback, userdata, NULL);
 }
 
+int SDL_HIDAPI_SendRumbleWithWriteFuncAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data, int size, SDL_HIDAPI_RumbleWriteFunc write_func)
+{
+    return SDL_HIDAPI_SendRequestAndUnlock(device, data, size, NULL, NULL, write_func);
+}
+
 void SDL_HIDAPI_UnlockRumble(void)
 {
     SDL_UnlockMutex(SDL_HIDAPI_rumble_lock);

@@ -43,11 +43,13 @@
 /* The chatpad in the pad's expansion port (hifihedgehog/SDL#33 Part 15). It
  * reports on interface 2, which the driver claims on the handle the libusb
  * backend holds for interface 0, since WinUSB reaches a device's other
- * interfaces only through that handle. The start-up and keep-alives are
- * control transfers. The reports come from an interrupt transfer that
- * completes on the backend's event thread, where its callback submits it
- * again. The protocol lives in SDL_hidapi_xbox360acc_proto.c, where the
- * offline tests run it. */
+ * interfaces only through that handle. The start-up, the keep-alives and the
+ * lamps are control transfers, one at a time, and the reports come from an
+ * interrupt transfer. Both complete on the backend's event thread, so no
+ * update waits for the device while it holds the joystick lock. The read's
+ * callback submits it again, and the updates submit each control transfer
+ * once the one before has completed. The protocol lives in
+ * SDL_hidapi_xbox360acc_proto.c, where the offline tests run it. */
 
 #define SDL_XBOX360_CHATPAD_REPORTS 8
 
@@ -63,6 +65,12 @@ typedef struct SDL_Xbox360ChatpadReader
     int sizes[SDL_XBOX360_CHATPAD_REPORTS];
     Uint8 reports[SDL_XBOX360_CHATPAD_REPORTS][SDL_XBOX360ACC_CHATPAD_READ_MAX];
     Uint8 buffer[SDL_XBOX360ACC_CHATPAD_READ_MAX];
+    struct libusb_transfer *control;
+    SDL_AtomicInt control_idle; // 1 while the control transfer is not in flight, set last
+    bool control_ended;         // Under the lock: it ended and no update has taken the result
+    bool control_completed;     // Under the lock: it ended with LIBUSB_TRANSFER_COMPLETED
+    Uint64 control_ended_ms;    // Under the lock
+    Uint8 control_buffer[LIBUSB_CONTROL_SETUP_SIZE + sizeof(((SDL_Xbox360AccControl *)NULL)->data)];
 } SDL_Xbox360ChatpadReader;
 #endif
 
@@ -87,6 +95,7 @@ typedef struct
     Uint16 chatpad_packet_size;
     SDL_Xbox360ChatpadReader *reader;
     bool reads_started;
+    bool reads_ended; // The reads ended while the pad stayed, which stopped the chatpad
     SDL_Xbox360AccWired wired;
     SDL_JoystickID chatpad_id;
     bool chatpad_post_pending; // The joystick opened and has not had the state yet
@@ -267,6 +276,35 @@ static void LIBUSB_CALL HIDAPI_DriverXbox360_ChatpadRead(struct libusb_transfer 
     }
 }
 
+// Runs on the libusb backend's event thread. A stall, a timeout or any other
+// status ends the transfer, and the next update goes on with the sequence.
+static void LIBUSB_CALL HIDAPI_DriverXbox360_ChatpadControlDone(struct libusb_transfer *transfer)
+{
+    SDL_Xbox360ChatpadReader *reader = (SDL_Xbox360ChatpadReader *)transfer->user_data;
+
+    SDL_LockMutex(reader->lock);
+    reader->control_ended = true;
+    reader->control_completed = (transfer->status == LIBUSB_TRANSFER_COMPLETED);
+    reader->control_ended_ms = SDL_GetTicks();
+    SDL_UnlockMutex(reader->lock);
+
+    // The last access to the reader, which may be freed once this is set
+    SDL_SetAtomicInt(&reader->control_idle, 1);
+}
+
+// Frees a reader whose transfers are idle
+static void HIDAPI_DriverXbox360_FreeChatpadReader(SDL_Xbox360ChatpadReader *reader)
+{
+    if (reader->transfer) {
+        reader->libusb->free_transfer(reader->transfer);
+    }
+    if (reader->control) {
+        reader->libusb->free_transfer(reader->control);
+    }
+    SDL_DestroyMutex(reader->lock);
+    SDL_free(reader);
+}
+
 static void HIDAPI_DriverXbox360_StartChatpadReads(SDL_DriverXbox360_Context *ctx)
 {
     SDL_Xbox360ChatpadReader *reader = ctx->reader;
@@ -362,29 +400,78 @@ static void HIDAPI_DriverXbox360_SyncChatpad(SDL_HIDAPI_Device *device, SDL_Driv
     }
 }
 
+// Submits one control transfer with a 100 ms timeout and returns without
+// waiting for it. Returns false when it did not go out.
+static bool HIDAPI_DriverXbox360_SubmitControl(SDL_DriverXbox360_Context *ctx, const SDL_Xbox360AccControl *control)
+{
+    SDL_Xbox360ChatpadReader *reader = ctx->reader;
+
+    if (control->length > sizeof(control->data)) {
+        return false;
+    }
+    libusb_fill_control_setup(reader->control_buffer, control->request_type, control->request, control->value, control->index, control->length);
+    SDL_memcpy(reader->control_buffer + LIBUSB_CONTROL_SETUP_SIZE, control->data, control->length);
+    libusb_fill_control_transfer(reader->control, ctx->handle, reader->control_buffer,
+                                 HIDAPI_DriverXbox360_ChatpadControlDone, reader, 100);
+    SDL_SetAtomicInt(&reader->control_idle, 0);
+    if (ctx->libusb->submit_transfer(reader->control) < 0) {
+        SDL_SetAtomicInt(&reader->control_idle, 1);
+        return false;
+    }
+    return true;
+}
+
+// Counts the control transfer that ended, then sends the next one that is
+// due, each after the one before completes. A stall does not stop the
+// start-up, and the next SETUP clears it. A transfer that cannot go out
+// counts as ended at once.
+static void HIDAPI_DriverXbox360_PumpChatpadControl(SDL_DriverXbox360_Context *ctx)
+{
+    SDL_Xbox360ChatpadReader *reader = ctx->reader;
+    SDL_Xbox360AccControl control;
+    bool ended = false;
+    bool completed = false;
+    Uint64 ended_ms = 0;
+
+    SDL_LockMutex(reader->lock);
+    if (reader->control_ended) {
+        reader->control_ended = false;
+        ended = true;
+        completed = reader->control_completed;
+        ended_ms = reader->control_ended_ms;
+    }
+    SDL_UnlockMutex(reader->lock);
+    if (ended) {
+        SDL_Xbox360Acc_WiredDone(&ctx->wired, ended_ms, completed);
+    }
+
+    // The module holds the next transfer until it counts this one, and the
+    // idle flag holds it until the callback is done with the transfer
+    if (SDL_GetAtomicInt(&reader->control_idle) && SDL_Xbox360Acc_WiredNext(&ctx->wired, SDL_GetTicks(), &control)) {
+        if (!HIDAPI_DriverXbox360_SubmitControl(ctx, &control)) {
+            SDL_Xbox360Acc_WiredDone(&ctx->wired, SDL_GetTicks(), false);
+        }
+    }
+}
+
 static void HIDAPI_DriverXbox360_UpdateChatpad(SDL_HIDAPI_Device *device, SDL_DriverXbox360_Context *ctx)
 {
-    SDL_Xbox360AccControl control;
     Uint8 report[SDL_XBOX360ACC_CHATPAD_READ_MAX];
     int size = 0;
-    int sent = 0;
 
     while (HIDAPI_DriverXbox360_TakeChatpadReport(ctx->reader, report, &size)) {
         SDL_Xbox360Acc_WiredChatpadReport(&ctx->wired, report, (size_t)size);
     }
 
-    // The transfers that are due, each after the one before completes. A
-    // stall does not stop the start-up, and the next SETUP clears it.
-    while (sent < 16 && SDL_Xbox360Acc_WiredNext(&ctx->wired, SDL_GetTicks(), &control)) {
-        Uint8 data[sizeof(control.data)];
-        int result;
-
-        SDL_memcpy(data, control.data, sizeof(data));
-        result = ctx->libusb->control_transfer(ctx->handle, control.request_type, control.request, control.value, control.index,
-                                               control.length ? data : NULL, control.length, 100);
-        SDL_Xbox360Acc_WiredDone(&ctx->wired, SDL_GetTicks(), result >= 0);
-        ++sent;
+    // Reads that ended on their own, with a stall, an error or a failed
+    // submit, stop the chatpad as an unplug does, so no key stays held. The
+    // reads and the start-up do not run again while the pad stays.
+    if (ctx->reads_started && !ctx->reads_ended && SDL_GetAtomicInt(&ctx->reader->finished)) {
+        ctx->reads_ended = true;
+        SDL_Xbox360Acc_WiredStop(&ctx->wired);
     }
+
+    HIDAPI_DriverXbox360_PumpChatpadControl(ctx);
 
     // The reports start once step 9, the 1B, has completed
     if (!ctx->reads_started && SDL_Xbox360Acc_WiredReading(&ctx->wired)) {
@@ -449,22 +536,25 @@ static void HIDAPI_DriverXbox360_InitChatpad(SDL_HIDAPI_Device *device)
 
     ctx->reader = (SDL_Xbox360ChatpadReader *)SDL_calloc(1, sizeof(*ctx->reader));
     if (ctx->reader) {
+        ctx->reader->libusb = ctx->libusb;
         ctx->reader->lock = SDL_CreateMutex();
+        ctx->reader->control = ctx->libusb->alloc_transfer(0);
     }
-    if (!ctx->reader || !ctx->reader->lock) {
-        SDL_free(ctx->reader);
+    if (!ctx->reader || !ctx->reader->lock || !ctx->reader->control) {
+        if (ctx->reader) {
+            HIDAPI_DriverXbox360_FreeChatpadReader(ctx->reader);
+        }
         ctx->reader = NULL;
         SDL_QuitLibUSB();
         ctx->libusb = NULL;
         return;
     }
-    ctx->reader->libusb = ctx->libusb;
     SDL_SetAtomicInt(&ctx->reader->finished, 1);
+    SDL_SetAtomicInt(&ctx->reader->control_idle, 1);
 
     ctx->libusb->set_auto_detach_kernel_driver(handle, true);
     if (ctx->libusb->claim_interface(handle, 2) < 0) {
-        SDL_DestroyMutex(ctx->reader->lock);
-        SDL_free(ctx->reader);
+        HIDAPI_DriverXbox360_FreeChatpadReader(ctx->reader);
         ctx->reader = NULL;
         SDL_QuitLibUSB();
         ctx->libusb = NULL;
@@ -490,16 +580,19 @@ static void HIDAPI_DriverXbox360_FreeChatpad(SDL_DriverXbox360_Context *ctx)
     }
     ctx->chatpad_active = false;
 
-    // The event thread completes the canceled transfer
+    // The event thread completes the canceled transfers
     SDL_LockMutex(reader->lock);
     reader->stopping = true;
     if (!SDL_GetAtomicInt(&reader->finished)) {
         ctx->libusb->cancel_transfer(reader->transfer);
     }
+    if (!SDL_GetAtomicInt(&reader->control_idle)) {
+        ctx->libusb->cancel_transfer(reader->control);
+    }
     SDL_UnlockMutex(reader->lock);
     deadline = SDL_GetTicks() + 1000;
     for (;;) {
-        finished = (SDL_GetAtomicInt(&reader->finished) != 0);
+        finished = (SDL_GetAtomicInt(&reader->finished) != 0 && SDL_GetAtomicInt(&reader->control_idle) != 0);
         if (finished || SDL_GetTicks() >= deadline) {
             break;
         }
@@ -508,14 +601,10 @@ static void HIDAPI_DriverXbox360_FreeChatpad(SDL_DriverXbox360_Context *ctx)
 
     ctx->libusb->release_interface(ctx->handle, 2);
     if (finished) {
-        if (reader->transfer) {
-            ctx->libusb->free_transfer(reader->transfer);
-        }
-        SDL_DestroyMutex(reader->lock);
-        SDL_free(reader);
+        HIDAPI_DriverXbox360_FreeChatpadReader(reader);
     } else {
         // A transfer still in flight keeps its reader, which it may yet complete into
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Xbox 360 chatpad: read still pending after cancel");
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "Xbox 360 chatpad: transfer still pending after cancel");
     }
     ctx->reader = NULL;
     ctx->handle = NULL;
@@ -756,7 +845,8 @@ static bool HIDAPI_DriverXbox360_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_J
 
 /* The chatpad's lamps: one byte, 00 to 03 to put out Shift, Green, Orange
    and People, 08 to 0B to light them, 04 to put out the backlight and 0C to
-   light it */
+   light it. The lamp waits for the control transfer in flight, so success
+   means it is queued, not sent. */
 static bool HIDAPI_DriverXbox360_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
 {
 #ifdef HAVE_LIBUSB
@@ -767,9 +857,10 @@ static bool HIDAPI_DriverXbox360_SendJoystickEffect(SDL_HIDAPI_Device *device, S
         if (size <= 0 || !SDL_Xbox360Acc_WiredLamp((const Uint8 *)data, (size_t)size, &control)) {
             return SDL_SetError("The Xbox 360 chatpad takes one lamp byte, 00 to 04 or 08 to 0C");
         }
-        if (ctx->libusb->control_transfer(ctx->handle, control.request_type, control.request, control.value, control.index, NULL, 0, 100) < 0) {
-            return SDL_SetError("Couldn't set the Xbox 360 chatpad lamp");
+        if (!SDL_Xbox360Acc_WiredQueueLamp(&ctx->wired, (const Uint8 *)data, (size_t)size)) {
+            return SDL_SetError("Couldn't queue the Xbox 360 chatpad lamp");
         }
+        HIDAPI_DriverXbox360_PumpChatpadControl(ctx);
         return true;
     }
 #endif

@@ -59,9 +59,33 @@ static bool HIDAPI_DriverNimbus_IsEnabled(void)
     return SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_NIMBUS, SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI, SDL_HIDAPI_DEFAULT));
 }
 
+/* Whether the collection declares an input report. Windows makes a device of
+   each top-level collection, and no source records the Nimbus's. A
+   descriptor that cannot be read keeps the collection, as Android reads none
+   and makes one device per interface. */
+static bool HIDAPI_DriverNimbus_DeclaresInput(SDL_hid_device *dev)
+{
+    unsigned char descriptor[4096];
+    SDL_HIDAPIReportIDs ids;
+    const int length = SDL_hid_get_report_descriptor(dev, descriptor, sizeof(descriptor));
+
+    if (length <= 0 || !SDL_HIDAPI_ParseReportIDs(descriptor, (size_t)length, &ids)) {
+        return true;
+    }
+    return SDL_HIDAPI_DeclaresInput(&ids);
+}
+
 static bool HIDAPI_DriverNimbus_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GamepadType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
 {
-    return vendor_id == USB_VENDOR_STEELSERIES_BT && product_id == USB_PRODUCT_STEELSERIES_NIMBUS;
+#ifdef SDL_PLATFORM_APPLE
+    // GCController presents the Nimbus, an MFi controller, through the MFi backend
+    return false;
+#endif
+    if (vendor_id != USB_VENDOR_STEELSERIES_BT || product_id != USB_PRODUCT_STEELSERIES_NIMBUS) {
+        return false;
+    }
+    // Once the collection is open, its descriptor decides
+    return !device || !device->dev || HIDAPI_DriverNimbus_DeclaresInput(device->dev);
 }
 
 static bool HIDAPI_DriverNimbus_InitDevice(SDL_HIDAPI_Device *device)

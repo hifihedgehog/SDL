@@ -162,14 +162,18 @@ int PaddlePipelineInitialize(void)
     const char *disabled[] = {
         SDL_HINT_JOYSTICK_HIDAPI, SDL_HINT_JOYSTICK_RAWINPUT, SDL_HINT_JOYSTICK_DIRECTINPUT,
         SDL_HINT_XINPUT_ENABLED, SDL_HINT_JOYSTICK_WGI, SDL_HINT_JOYSTICK_GAMEINPUT,
-        SDL_HINT_JOYSTICK_GAMEINPUT_RAW, SDL_HINT_JOYSTICK_BLE_SWITCH2,
+        SDL_HINT_JOYSTICK_GAMEINPUT_RAW, SDL_HINT_JOYSTICK_BLE, SDL_HINT_JOYSTICK_BLE_SWITCH2,
+        SDL_HINT_JOYSTICK_SERIAL_AUTO, SDL_HINT_JOYSTICK_RFCOMM,
         SDL_HINT_JOYSTICK_THREAD, "SDL_JOYSTICK_WINMM", "SDL_JOYSTICK_ROG_CHAKRAM",
         "SDL_JOYSTICK_ICADE"
     };
+    /* The serial port and DJI remote hints are lists, so they are set empty */
+    const char *emptied[] = { SDL_HINT_JOYSTICK_SERIAL, SDL_HINT_JOYSTICK_DJI_REMOTE_TCP_HOSTS };
     int count = -1;
     SDL_JoystickID *ids;
     SDL_SetMainReady();
     for (int i = 0; i < (int)SDL_arraysize(disabled); ++i) CORE_CHECK(SDL_SetHintWithPriority(disabled[i], "0", SDL_HINT_OVERRIDE));
+    for (int i = 0; i < (int)SDL_arraysize(emptied); ++i) CORE_CHECK(SDL_SetHintWithPriority(emptied[i], "", SDL_HINT_OVERRIDE));
     CORE_CHECK(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE));
     CORE_CHECK(SDL_SetHintWithPriority(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0", SDL_HINT_OVERRIDE));
     CORE_CHECK(SDL_Init(SDL_INIT_GAMEPAD));

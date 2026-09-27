@@ -48,10 +48,12 @@
  *
  * The bus resets the nodes as bemanitools' aciodrv does: 525 bytes of 00, a
  * line break held for 1450 ms, 1200 ms in which every received byte is
- * dropped, then single AA probes until an AA comes back. It then enumerates
- * the nodes, reads each node's version and starts each node, and calls
- * Ready. A failure before Ready starts the bus over. A frame longer than
- * SDL_SERIAL_MAX_WRITE goes out as several writes back to back.
+ * dropped, then single AA probes until an AA comes back. A port that refuses
+ * the break gets the rest of the reset, since aciodrv ignores the result of
+ * the break too. It then enumerates the nodes, reads each node's version and
+ * starts each node, and calls Ready. A failure before Ready starts the bus
+ * over. A frame longer than SDL_SERIAL_MAX_WRITE goes out as several writes
+ * back to back.
  *
  * For a board whose rate no source records, the module names a second rate,
  * and each bring-up that fails switches the line to the other one. A node
@@ -236,10 +238,13 @@ extern bool SDL_ACIO_GetDeadline(void *state, uint64_t *deadline);
 
 /* After Ready: sends a request to a node and awaits its reply, which must
  * come from the address, with or without bit 7, carry the same command and
- * hold min_reply to max_reply payload bytes. A frame from that address with
- * another command fails the exchange. False, sending nothing, when the bus
- * is not ready, an exchange is out, the frame cannot be built or the action
- * queue has no room. */
+ * hold min_reply to max_reply payload bytes. bemanitools checks only the
+ * command (aciodrv/device.c:489), so the address rule is this module's own.
+ * It takes what bemanitools' emulators send, the node's address with bit 7
+ * (acioemu/icca.c:252). A frame from that address with another command fails
+ * the exchange. False, sending nothing, when the bus is not ready, an
+ * exchange is out, the frame cannot be built or the action queue has no
+ * room. */
 extern bool SDL_ACIO_Request(void *state, uint8_t address, uint16_t command, const uint8_t *payload, size_t length, size_t min_reply, size_t max_reply);
 
 /* After Ready: sends a frame that no reply answers. False, sending nothing,
@@ -251,10 +256,9 @@ extern bool SDL_ACIO_Send(void *state, uint8_t address, uint16_t command, const 
  * nothing. */
 extern void SDL_ACIO_Restart(void *state, uint64_t now);
 
-/* After Ready, the enumerated nodes, at addresses 1 to the count. Before it,
- * the count is 0 and every node NULL. */
+/* After Ready, the number of enumerated nodes, which hold addresses 1 to the
+ * count. Before it, 0. */
 extern int SDL_ACIO_GetNodeCount(const void *state);
-extern const SDL_ACIONodeVersion *SDL_ACIO_GetNode(const void *state, int address);
 
 /* After Ready, the highest address whose product code is product, 0 when
  * none */

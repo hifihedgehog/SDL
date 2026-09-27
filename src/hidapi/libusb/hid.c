@@ -118,6 +118,11 @@ struct hid_device_ {
 	int input_ep_bulk;  /* bulk instead of interrupt */
 	int output_ep_bulk;
 
+	/* The IN transfer timeout a vendor rule sets, in milliseconds, or 0 for
+	   5000. A transfer that times out under a rule's timeout hands over the
+	   bytes it holds as a report. */
+	int input_timeout;
+
 	/* The alternate setting a vendor rule selected, or 0 */
 	int selected_alternate;
 
@@ -170,9 +175,12 @@ static hid_device *open_devices;
 #ifdef SDL_PLATFORM_WIN32
 /* On Windows the list decides which handle an open shares, and whether a
    close releases interface 0 and closes the handle. An application can
-   enumerate, open and close on different threads, so hid_open_path,
-   hid_close and hid_enumerate hold this lock while they use the list.
-   hid_init creates it and hid_exit destroys it. */
+   enumerate, open and close on different threads, so hid_open_path and
+   hid_close hold this lock while they use the list. hid_enumerate holds it
+   from each libusb_open of its own to that handle's close: WinUSB lets one
+   handle open a device, so an open on another thread would fail while the
+   enumeration's handle exists. hid_init creates it and hid_exit destroys
+   it. */
 static SDL_Mutex *open_devices_lock;
 #endif
 
@@ -1241,6 +1249,12 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 					if (should_enumerate_interface(dev_vid, dev_pid, intf_desc)) {
 						struct hid_device_info *tmp;
 
+#ifdef SDL_PLATFORM_WIN32
+						/* Held from the open to the close below. WinUSB lets one
+						   handle open a device, so a hid_open_path on another thread
+						   would fail while this handle exists. */
+						SDL_LockMutex(open_devices_lock);
+#endif
 						res = libusb_open(dev, &handle);
 #ifdef HIDAPI_VENDOR_USB
 						{
@@ -1251,17 +1265,19 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 							   WinUSB bound. WinUSB lets one handle open a device, so the
 							   open fails on every interface of a device this process
 							   holds, and those interfaces stay listed while the holder
-							   still reads. */
+							   still reads. Only an Xbox interface is ever skipped, so
+							   only an Xbox interface asks. */
 							int is_xbox = is_xbox_interface(dev_vid, intf_desc);
 							bool held = false;
 #ifdef SDL_PLATFORM_WIN32
-							if (res < 0) {
-								SDL_LockMutex(open_devices_lock);
+							if (res < 0 && is_xbox) {
 								held = is_device_held(dev);
-								SDL_UnlockMutex(open_devices_lock);
 							}
 #endif
 							if (SDL_VendorUSB_SkipUnopened(SDL_VENDORUSB_THIS_PLATFORM, is_xbox, res >= 0 || held)) {
+#ifdef SDL_PLATFORM_WIN32
+								SDL_UnlockMutex(open_devices_lock);
+#endif
 								break;
 							}
 						}
@@ -1335,6 +1351,9 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 							libusb_close(handle);
 							handle = NULL;
 						}
+#ifdef SDL_PLATFORM_WIN32
+						SDL_UnlockMutex(open_devices_lock);
+#endif
 						break;
 					}
 				} /* altsettings */
@@ -1403,7 +1422,15 @@ static void LIBUSB_CALL read_callback(struct libusb_transfer *transfer)
 	hid_device *dev = transfer->user_data;
 	int res;
 
-	if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+	/* A transfer that times out keeps the bytes that arrived before it did:
+	   libusb cancels it, counts what it holds (os/windows_common.c, on
+	   ERROR_OPERATION_ABORTED) and reports it timed out (io.c,
+	   usbi_handle_transfer_cancellation). Those bytes are a report under a
+	   vendor rule's own timeout, since such a device can end a reply on a
+	   full packet, which ends no bulk transfer. Every other transfer that
+	   times out is dropped, as before. */
+	if (transfer->status == LIBUSB_TRANSFER_COMPLETED ||
+	    (transfer->status == LIBUSB_TRANSFER_TIMED_OUT && dev->input_timeout && transfer->actual_length > 0)) {
 
 		struct input_report *rpt = (struct input_report*) malloc(sizeof(*rpt));
 		rpt->data = (uint8_t*) malloc(transfer->actual_length);
@@ -1471,6 +1498,8 @@ static void start_read_operations(hid_device *dev)
 	int res;
 	uint8_t *buf;
 	const size_t length = dev->input_ep_max_packet_size;
+	/* A vendor rule can end each IN transfer sooner */
+	const unsigned int timeout = dev->input_timeout ? (unsigned int)dev->input_timeout : 5000;
 
 	/* Set up the transfer object. */
 	buf = (uint8_t*) malloc(length);
@@ -1483,7 +1512,7 @@ static void start_read_operations(hid_device *dev)
 			(int) length,
 			read_callback,
 			dev,
-			5000/*timeout*/);
+			timeout);
 	} else {
 		libusb_fill_interrupt_transfer(dev->transfer,
 			dev->device_handle,
@@ -1492,7 +1521,7 @@ static void start_read_operations(hid_device *dev)
 			(int) length,
 			read_callback,
 			dev,
-			5000/*timeout*/);
+			timeout);
 	}
 
 	/* Make the first submission. Further submissions are made
@@ -1818,6 +1847,7 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 	dev->output_endpoint = 0;
 	dev->input_ep_bulk = 0;
 	dev->output_ep_bulk = 0;
+	dev->input_timeout = 0;
 
 #ifdef HIDAPI_VENDOR_USB
 	if (vendor_rule) {
@@ -1825,6 +1855,7 @@ static int hidapi_initialize_device(hid_device *dev, const struct libusb_interfa
 		/* The read length: wMaxPacketSize, or the rule's read size on a bulk IN endpoint */
 		dev->input_ep_max_packet_size = vendor_selection.in.read_size;
 		dev->input_ep_bulk = (vendor_selection.in.transfer == SDL_VENDORUSB_TRANSFER_BULK);
+		dev->input_timeout = vendor_rule->in_timeout;
 		dev->output_endpoint = vendor_selection.out.address;
 		dev->output_ep_bulk = (vendor_selection.out.transfer == SDL_VENDORUSB_TRANSFER_BULK);
 		if (vendor_rule->flags & SDL_VENDORUSB_RAW_OUTPUT) {
@@ -1967,6 +1998,11 @@ HID_API_EXPORT hid_device *hid_open_path(const char *path)
 #endif
 							libusb_close(dev->device_handle);
 						}
+						/* One attempt per interface. Every alternate setting has
+						   this path, and hid_enumerate lists the interface at its
+						   first match. After a failure another alternate would
+						   repeat the same open, claim and setup. */
+						break;
 					}
 				}
 			}

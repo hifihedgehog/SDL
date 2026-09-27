@@ -21,12 +21,9 @@
 
 #include "SDL_hidapi_wmr_proto.h"
 
-#include <string.h>
+#include "../usb_ids.h"
 
-#define WMR_VENDOR_MICROSOFT         0x045E
-#define WMR_PRODUCT_FIRST_GENERATION 0x065B
-#define WMR_PRODUCT_ODYSSEY          0x065D
-#define WMR_PRODUCT_REVERB_G2        0x066A
+#include <string.h>
 
 #define WMR_COMMAND_RESET   0x00
 #define WMR_COMMAND_READ    0x02
@@ -46,15 +43,15 @@ bool SDL_WMR_IsControllerID(uint16_t vendor, uint16_t product, SDL_WMRModel *mod
 {
     SDL_WMRModel found;
 
-    if (vendor != WMR_VENDOR_MICROSOFT) {
+    if (vendor != USB_VENDOR_MICROSOFT) {
         return false;
     }
     switch (product) {
-    case WMR_PRODUCT_FIRST_GENERATION:
-    case WMR_PRODUCT_ODYSSEY:
+    case USB_PRODUCT_MICROSOFT_WMR_CONTROLLER:
+    case USB_PRODUCT_MICROSOFT_WMR_CONTROLLER_ODYSSEY:
         found = SDL_WMR_MODEL_FIRST_GENERATION;
         break;
-    case WMR_PRODUCT_REVERB_G2:
+    case USB_PRODUCT_MICROSOFT_WMR_CONTROLLER_REVERB_G2:
         found = SDL_WMR_MODEL_REVERB_G2;
         break;
     default:
@@ -64,6 +61,18 @@ bool SDL_WMR_IsControllerID(uint16_t vendor, uint16_t product, SDL_WMRModel *mod
         *model = found;
     }
     return true;
+}
+
+static bool WMR_HasReportID(const uint8_t ids[32], uint8_t id)
+{
+    return (ids[id >> 3] >> (id & 7)) & 1;
+}
+
+bool SDL_WMR_CarriesController(const uint8_t input_report_ids[32], const uint8_t output_report_ids[32])
+{
+    return input_report_ids && output_report_ids &&
+           WMR_HasReportID(input_report_ids, SDL_WMR_STATUS_REPORT_ID) &&
+           WMR_HasReportID(output_report_ids, SDL_WMR_COMMAND_PREFIX);
 }
 
 SDL_WMRHand SDL_WMR_GetHand(const char *product)

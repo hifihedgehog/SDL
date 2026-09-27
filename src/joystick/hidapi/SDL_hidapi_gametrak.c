@@ -137,7 +137,8 @@ static bool HIDAPI_DriverGametrak_UpdateDevice(SDL_HIDAPI_Device *device)
         return false;
     }
 
-    // The key write goes out 10 ms after "Gametrak" when no answer has come
+    // The key write goes out 10 ms after "Gametrak" when no answer has come, and
+    // the unlock starts over when no report follows the key write within 1000 ms
     SDL_Gametrak_Update(&ctx->session, SDL_GetTicks(), &sink);
     return true;
 }

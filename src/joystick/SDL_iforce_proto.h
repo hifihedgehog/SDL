@@ -44,6 +44,7 @@
 #define SDL_IFORCE_SERIAL_RATE       38400
 #define SDL_IFORCE_SERIAL_START      0x2B
 #define SDL_IFORCE_UPDATE_SPACING_MS 20   /* Between two writes of one parameter block */
+#define SDL_IFORCE_SEND_TRIES        3    /* Failed sends in a row that drop a waiting update */
 
 /* Packet types from the device */
 #define SDL_IFORCE_PACKET_JOYSTICK 0x01
@@ -183,6 +184,10 @@ extern uint8_t SDL_IForce_NextQuery(const SDL_IForceQueries *queries);
  * letter. NULL or a length of 0 is a query that failed. */
 extern void SDL_IForce_QueryResult(SDL_IForceQueries *queries, const uint8_t *reply, size_t length);
 
+/* Whether effects and memory_end are final: N has been asked, or the
+ * sequence is over. C, E, the second O and V change neither. */
+extern bool SDL_IForce_QueriesKnown(const SDL_IForceQueries *queries);
+
 typedef struct SDL_IForceControlSetup
 {
     uint8_t request_type;
@@ -308,7 +313,8 @@ typedef struct SDL_IForceSlot
     bool used;
     bool should_play;
     bool pending;           /* An update waits for its blocks' spacing */
-    SDL_IForceEffect effect; /* As last sent */
+    uint8_t failures;       /* Failed sends in a row of the waiting update */
+    SDL_IForceEffect effect; /* As last sent, or as before a send that failed */
     SDL_IForceEffect next;   /* The update that waits */
     SDL_IForceBlock block[2];
 } SDL_IForceSlot;
@@ -318,6 +324,8 @@ typedef struct SDL_IForceFF
     int effects;
     uint16_t memory_end; /* Blocks go between 0 and this address, both included */
     SDL_IForceSlot slots[SDL_IFORCE_EFFECTS_MAX];
+    int undo_index;      /* The slot the last commands changed, -1 for none */
+    SDL_IForceSlot undo; /* That slot before them */
 } SDL_IForceFF;
 
 #define SDL_IFORCE_MAX_UPLOAD 4 /* Two parameter blocks, the core, and a play */
@@ -349,6 +357,24 @@ extern int SDL_IForce_Upload(SDL_IForceFF *ff, int index, const SDL_IForceEffect
  * when none can go. */
 extern bool SDL_IForce_NextDeferred(SDL_IForceFF *ff, uint64_t now, SDL_IForceCommands *commands);
 
+/* Puts back the slot that the last Upload or NextDeferred changed, for when
+ * its commands failed to send: the effect, and any waiting update with its
+ * count of failed sends, so the same update is sent again. The count comes
+ * back unchanged. An update's blocks keep the time of the failed try, since
+ * the device may hold them, and are written again no sooner than 20 ms
+ * after it. A new effect's blocks are freed. When that call returned no
+ * command, nothing changes. */
+extern void SDL_IForce_Undo(SDL_IForceFF *ff);
+
+/* For commands of the last NextDeferred that failed to send: undoes them as
+ * SDL_IForce_Undo does and counts the failure. The slot counts failed sends
+ * in a row, whichever update waits, and a send that goes through starts the
+ * count again. At SDL_IFORCE_SEND_TRIES the waiting update is dropped, and
+ * the slot keeps the effect it had before the failed sends, so the next
+ * update of that effect is built against it. Returns the index of the
+ * effect whose update was dropped, or -1 while it waits again. */
+extern int SDL_IForce_DeferredFailed(SDL_IForceFF *ff);
+
 /* When the first waiting update can go. false when none waits. */
 extern bool SDL_IForce_DeferredDeadline(const SDL_IForceFF *ff, uint64_t *deadline);
 
@@ -356,7 +382,7 @@ extern bool SDL_IForce_DeferredDeadline(const SDL_IForceFF *ff, uint64_t *deadli
  * upload replays */
 extern void SDL_IForce_SetPlaying(SDL_IForceFF *ff, int index, bool playing);
 
-/* Frees the effect's blocks */
+/* Frees the effect's blocks, and drops its undo */
 extern void SDL_IForce_Erase(SDL_IForceFF *ff, int index);
 
 #endif /* SDL_iforce_proto_h_ */

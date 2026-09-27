@@ -66,4 +66,8 @@ extern bool SDL_HIDAPI_ParseReportIDs(const uint8_t *descriptor, size_t length, 
 
 extern bool SDL_HIDAPI_HasReportID(const uint8_t ids[32], uint8_t id);
 
+/* Whether a descriptor declares any input report. The RC adapter, drum kit
+ * and Nimbus drivers open only such a collection. */
+extern bool SDL_HIDAPI_DeclaresInput(const SDL_HIDAPIReportIDs *ids);
+
 #endif /* SDL_hidapi_collections_h_ */

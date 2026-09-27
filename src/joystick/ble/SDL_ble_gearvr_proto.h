@@ -33,7 +33,7 @@
 #define SDL_GEARVR_COMMAND 1
 
 #define SDL_GEARVR_PACKET_SIZE   60
-#define SDL_GEARVR_ACK_WAIT_MS   4000  /* gearvr.py:158 */
+#define SDL_GEARVR_ACK_WAIT_MS   4000  /* From the 08 00 write's completion, as gearvr.py:158-168 waits */
 #define SDL_GEARVR_KEEPALIVE_MS  10000
 #define SDL_GEARVR_SILENCE_MS    3000  /* A stream stopped: about nine times the longest gap in the captures */
 #define SDL_GEARVR_RESTARTS      2     /* Restarts in a row without a packet before the module gives up */
@@ -41,8 +41,8 @@
 typedef enum SDL_GearVRPhase
 {
     SDL_GEARVR_IDLE,
-    SDL_GEARVR_WAIT_ACK, /* 08 00 written, its echo awaited */
-    SDL_GEARVR_STREAMING /* 01 00 written, and the silence timer runs */
+    SDL_GEARVR_WAIT_ACK, /* 08 00 queued, its echo awaited */
+    SDL_GEARVR_STREAMING /* 01 00 queued, and the silence timer runs once it has completed */
 } SDL_GearVRPhase;
 
 typedef struct SDL_GearVRState
@@ -50,8 +50,11 @@ typedef struct SDL_GearVRState
     SDL_BLEBase base;
     uint8_t phase; /* SDL_GearVRPhase */
     uint64_t deadline;   /* The end of the echo's wait, or the next keep-alive */
-    uint64_t silence;    /* No packet since 01 00 or the last packet by then is a stopped stream */
+    uint64_t silence;    /* No packet since 01 00 completed or the last packet by then is a stopped stream */
     uint8_t restarts;    /* Restarts since the last packet after 01 00 */
+    uint32_t queued;     /* Writes queued since the reset, counting from 1 */
+    uint32_t answered;   /* Writes the session has answered, in the same order */
+    uint32_t awaited;    /* The queued 08 00 or 01 00 whose completion starts its timer, 0 once it has */
     bool have_time;
     uint32_t last_time;  /* The device's microsecond counter */
     uint64_t sensor_us;  /* Accumulated across its wraps */

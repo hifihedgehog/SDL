@@ -109,7 +109,9 @@ typedef enum SDL_SerialActionKind
     SDL_SERIAL_ACTION_SET_MODEM, /* line.dtr and line.rts only */
     SDL_SERIAL_ACTION_WRITE,     /* data, length */
     SDL_SERIAL_ACTION_DRAIN,     /* returns once written bytes have left the host */
-    SDL_SERIAL_ACTION_BREAK      /* on: true holds the line in a break, false ends it */
+    SDL_SERIAL_ACTION_BREAK      /* on: true holds the line in a break, false ends it. A port
+                                    that refuses it finishes the action as failed, except
+                                    the end of a break it holds, which is port loss. */
 } SDL_SerialActionKind;
 
 typedef struct SDL_SerialAction
@@ -160,6 +162,7 @@ typedef struct SDL_SerialIdentity
     uint8_t nbuttons;
     uint8_t nhats;
     uint8_t nballs;
+    int8_t player_index; /* Set by the device's position, such as a cabinet side, or -1 */
     bool has_mapping;
     SDL_SerialGamepadMap mapping;
 } SDL_SerialIdentity;
@@ -249,6 +252,14 @@ typedef struct SDL_SerialModule
     /* Earliest clock value at which Tick must run. False when none */
     bool (*GetDeadline)(void *state, uint64_t *deadline);
     const SDL_SerialSnapshot *(*GetSnapshot)(void *state, int sub);
+    /* Its effects are messages or commands the device takes one by one, so
+     * the port layer queues them in order. When false, a newer effect
+     * request replaces one that has not gone out, which suits effects that
+     * set a state. */
+    bool queue_effects;
+    /* Whether an effect's bytes are one whole command of the device, asked
+     * before the request is accepted. NULL when the size range decides. */
+    bool (*ValidEffect)(const uint8_t *data, size_t length);
 } SDL_SerialModule;
 
 /* Axis scaling. A signed value v in [min, max] is clamped, then v >= 0 maps
@@ -310,7 +321,7 @@ extern void SDL_Serial_EarlierDeadline(bool *have, uint64_t *deadline, uint64_t 
 /* One line for the driver's log, such as a device error */
 extern void SDL_Serial_Log(SDL_SerialBase *base, const char *text);
 
-/* Sets an identity. The name is truncated to fit. */
+/* Sets an identity with no player index. The name is truncated to fit. */
 extern void SDL_Serial_SetIdentity(SDL_SerialIdentity *identity, const char *name, uint8_t type, int naxes, int nbuttons, int nhats, int nballs);
 
 /* Gamepad inputs */

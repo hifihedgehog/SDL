@@ -1609,6 +1609,10 @@ static bool GIP_HandleCommandMetadataRespose(
         if (SDL_strcmp(type, "Activision.Xbox.Input.GH7") == 0) {
             attachment->attachment_type = GIP_TYPE_LIVE_GUITAR;
             expected_guid = &GUID_GuitarHero_Live_Guitar;
+            if (attachment->attachment_index == 0) {
+                // The guitar's name on every path, in the joystick name and the GUID's CRC
+                HIDAPI_SetDeviceName(attachment->device->device, SDL_GHL_DongleName(SDL_GHL_DONGLE_XBOXONE));
+            }
             break;
         }
         if (SDL_strcmp(type, "MadCatz.Xbox.Guitar.Stratocaster") == 0) {
@@ -2425,6 +2429,7 @@ static bool GIP_HandleLiveGuitarReport(
     Uint64 timestamp = SDL_GetTicksNS();
     SDL_Joystick *joystick = NULL;
     SDL_GHLOutput output;
+    size_t length;
     Uint8 i;
 
     if (attachment->device->device->num_joysticks < 1) {
@@ -2445,7 +2450,14 @@ static bool GIP_HandleLiveGuitarReport(
         return true;
     }
 
-    if (num_bytes < 0 || !SDL_GHL_DecodeXboxMessage(header->message_type, bytes, (size_t)num_bytes, &output)) {
+    /* A transfer can carry messages back to back, so decode only this one's
+       payload, the header's length. A reassembled message comes with the
+       header of its final fragment, whose length is 0, and fills the buffer. */
+    length = (num_bytes > 0) ? (size_t)num_bytes : 0;
+    if (!(header->flags & GIP_FLAG_FRAGMENT) && header->length < length) {
+        length = (size_t)header->length;
+    }
+    if (num_bytes < 0 || !SDL_GHL_DecodeXboxMessage(header->message_type, bytes, length, &output)) {
         SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "GIP: Discarding malformed guitar report");
         return false;
     }
@@ -2463,7 +2475,7 @@ static bool GIP_HandleLiveGuitarReport(
 
 /* The Guitar Hero Live guitar wants message 0x22 every 8 s, or the strum bar
    cuts out held frets. The first goes once its joystick exists. A failed
-   send stays due for the next update. */
+   send goes again 1000 ms later. */
 static void GIP_UpdateLiveGuitarKeepAlive(GIP_Attachment *attachment, Uint64 now)
 {
     Uint8 payload[SDL_GHL_XBOX_KEEPALIVE_LENGTH];

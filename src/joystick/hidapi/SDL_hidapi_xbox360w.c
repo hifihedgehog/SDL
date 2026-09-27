@@ -358,13 +358,30 @@ static bool HIDAPI_DriverXbox360W_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_
     return SDL_Unsupported();
 }
 
-// Sends the queued chatpad commands, 12 bytes each on the slot's OUT endpoint
+// Writes one chatpad command on the HIDAPI rumble thread. It touches only
+// device->dev, which the thread checks first. FreeDevice waits until the
+// queue is empty, so the handle is still open for every command queued.
+static int HIDAPI_DriverXbox360W_WriteCommand(SDL_HIDAPI_Device *device, const Uint8 *data, int size)
+{
+    return SDL_hid_write(device->dev, data, (size_t)size);
+}
+
+// Hands the queued chatpad commands, 12 bytes each on the slot's OUT
+// endpoint, to the HIDAPI rumble thread in order. The receiver answers an
+// OUT transfer with NAK until it has passed the one before to the pad
+// ([MS-XUSBI] 3.5.5.2), so a write can wait up to its 1000 ms timeout, and
+// no update waits for one while it holds the joystick lock. The commands
+// have the size and first byte of the pad's rumble, and their own write
+// function keeps a rumble from replacing one of them.
 static void HIDAPI_DriverXbox360W_SendCommands(SDL_HIDAPI_Device *device, SDL_DriverXbox360W_Context *ctx)
 {
     Uint8 packet[SDL_XBOX360ACC_COMMAND_SIZE];
 
     while (SDL_Xbox360Acc_SlotTakeCommand(&ctx->slot, packet)) {
-        SDL_hid_write(device->dev, packet, sizeof(packet));
+        if (!SDL_HIDAPI_LockRumble()) {
+            return;
+        }
+        SDL_HIDAPI_SendRumbleWithWriteFuncAndUnlock(device, packet, sizeof(packet), HIDAPI_DriverXbox360W_WriteCommand);
     }
 }
 
@@ -644,9 +661,12 @@ static bool HIDAPI_DriverXbox360W_UpdateDevice(SDL_HIDAPI_Device *device)
     }
 
     if (size < 0) {
-        // Read error, device is disconnected
+        // Read error: the receiver is gone, or this slot's reads ended. The
+        // receiver's other slots can keep the slot's path listed, so the core
+        // releases the slot and sets it up again at the next device change.
         SDL_Xbox360Acc_SlotLost(&ctx->slot);
         HIDAPI_DriverXbox360W_Sync(device, ctx);
+        device->reads_ended = true;
     } else {
         SDL_Xbox360Acc_SlotUpdate(&ctx->slot, SDL_GetTicks());
         HIDAPI_DriverXbox360W_SendCommands(device, ctx);
@@ -669,6 +689,13 @@ static void HIDAPI_DriverXbox360W_CloseJoystick(SDL_HIDAPI_Device *device, SDL_J
 
 static void HIDAPI_DriverXbox360W_FreeDevice(SDL_HIDAPI_Device *device)
 {
+    /* The backend closes the handle after this returns, and the rumble
+       thread writes queued rumble and chatpad commands to that handle
+       without a lock, so the commands still queued go out first, as the
+       Tacx driver waits for its frames */
+    while (SDL_GetAtomicInt(&device->rumble_pending) > 0) {
+        SDL_Delay(10);
+    }
 }
 
 SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverXbox360W = {

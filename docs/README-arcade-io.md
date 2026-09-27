@@ -35,7 +35,7 @@ side of that protocol for the games, and SDL reads the layouts they serve.
 
 | Item | Value |
 |---|---|
-| ID | 0B9A:0910, "USIO PCB rev00". 0B9A:0900, "H050 USJ(C) PCB rev00", only when its identification block names a USIO |
+| ID | 0B9A:0910, "USIO PCB rev00". 0B9A:0900, "H050 USJ(C) PCB rev00", only when its identification block begins with `NBGI.`, as a USIO's does |
 | Bind WinUSB to | The device, `USB\VID_0B9A&PID_0910` or `USB\VID_0B9A&PID_0900` |
 | Hints | `SDL_HINT_JOYSTICK_HIDAPI_USIO`, and `SDL_HINT_JOYSTICK_HIDAPI_USIO_LAYOUT`: `taiko` (default) or `tekken` |
 | Names | Namco USIO Taiko Drum P1 and P2, or Namco USIO Tekken P1 to P4 |
@@ -55,13 +55,16 @@ E0 for every register SDL reads, then the register and the length, each
 register 1800 for 0x180 bytes, `10 E0 00 18 80 01`. After it SDL reads the
 layout's input block over and over, register 1080 for 0x60 bytes for Taiko,
 `10 E0 80 10 60 00`, or register 1000 for 0x180 bytes for Tekken,
-`10 E0 00 10 80 01`. Each command goes out from SDL's update as soon as the
-last reply is whole, whether or not a joystick is open. SDL never writes a
-register and never addresses another channel.
+`10 E0 00 10 80 01`. SDL's update hands each command to a thread of the
+driver as soon as the last reply is whole, whether or not a joystick is
+open, and the thread writes it, so an update never waits for a write. SDL
+never writes a register and never addresses another channel.
 
 The joysticks appear once the identification block has arrived. A block that
 does not begin with `NBGI.` is logged. SDL uses a 0910 board anyway, but
-sends a 0900 board nothing more and opens no joystick for it.
+sends a 0900 board nothing more and opens no joystick for it. SDL keeps that
+0900 board open, its interface claimed, until the board disconnects or the
+driver is turned off.
 
 A reply is due 100 ms after its command went out. After a missed reply, a
 failed write, or bytes that no command asked for, the next command waits
@@ -116,11 +119,14 @@ reply sets bit 7 of the address.
 The driver brings the bus up as bemanitools does. It writes 525 bytes of 00,
 holds a line break for 1450 ms, drops what it reads for 1200 ms, then sends a
 single AA every 10 ms until an AA comes back, and starts over after 500 with
-no answer. Once an AA comes back, it enumerates the nodes, reads each node's
-version and logs it, and starts each node. The sequence counts from 1, and a
-reply is due 200 ms after its request left. A failure before the bus is up
-starts it over, and so does a bus with no node or more than 16. A board
-answers about 3 seconds after its port opens.
+no answer. A port that refuses the break still gets the rest of the reset,
+since bemanitools ignores the result of the break too. Once an AA comes back,
+it enumerates the nodes, reads each node's version and logs it, and starts
+each node. The sequence counts from 1, and a reply is due 200 ms after its
+request left. A failure before the bus is up starts it over, and so does a
+bus with no node or more than 16. A board answers about 3 seconds after its
+port opens. A PANB or RVOL at 115200 answers after about 10 seconds, since
+the driver tries 57600 first.
 
 Each node's line in the debug log follows the port's name and token. For the
 BIO2's node, with the version arcade-docs lists, it reads:
@@ -207,10 +213,11 @@ driver finds each board's node by the node type in its version reply.
 
 Every line runs with DTR and RTS on. The joysticks are
 `SDL_JOYSTICK_TYPE_UNKNOWN` with no gamepad mapping, except the MDXF's two,
-which are `SDL_JOYSTICK_TYPE_DANCE_PAD` with a mapping. None has a player
-index. The driver takes no output request, and every poll carries its output
-bytes as 00, with every lamp off. An ICCA card reader on the same bus is
-enumerated and started with the other nodes, and SDL reads nothing from it.
+which are `SDL_JOYSTICK_TYPE_DANCE_PAD` with a mapping, P1 at player index 0
+and P2 at player index 1. The others have no player index. The driver takes
+no output request, and every poll carries its output bytes as 00, with every
+lamp off. An ICCA card reader on the same bus is enumerated and started with
+the other nodes, and SDL reads nothing from it.
 
 No source records the PANB's or the RVOL's rate. The driver starts at 57600,
 the KFCA's rate, and after each bring-up that fails it switches between 57600
@@ -290,7 +297,8 @@ player 2, as p4io-mdxfdrv reads them, and logs a third without reading it. It
 polls the two in turn, 0110 with no payload, answered with 3 bytes, each
 reply sending the next poll. The board also has an automatic mode that sends
 frames without pause, which overran p4io-mdxfdrv's reader, and SDL never
-starts it. Each player's joystick appears with its node's first reply.
+starts it. Each player's joystick appears with its node's first reply, player
+1 at player index 0 and player 2 at player index 1, as with the P3IO's pads.
 
 | Button | Control |
 |---|---|
@@ -329,14 +337,15 @@ A command frame is AA, then a length byte that counts the bytes after it, a
 as FF and the byte's complement, and there is no checksum. The driver sends
 INIT, `AA 02 00 2F`, then SET WATCHDOG with 00, `AA 03 01 05 00`, which
 turns the board's watchdog off. Then it sends GET VERSION, `AA 02 02 01`
-with the sequence counting on, 1000 ms after each reply. A reply must echo its
-request's sequence and command. No reply within 1000 ms, a reply of the
-wrong length, an INIT status other than 00 or a failed transfer ends the
-session, and 1000 ms later INIT goes out again with sequence 0. While the
-session is up the board gets a command at least every 2 seconds, and after
-a failure INIT follows its last command within 3 seconds. A board whose
-watchdog stayed on resets 5 to 7 seconds after its last command, so it does
-not reset while its commands go through.
+with the sequence counting on, 1000 ms after each reply, and logs the version
+the first reply gives, such as `Konami P3IO: G32 2.2.6` for the board OpenITG
+records. A reply must echo its request's sequence and command. No reply
+within 1000 ms, a reply of the wrong length, an INIT status other than 00 or
+a failed transfer ends the session, and 1000 ms later INIT goes out again
+with sequence 0. While the session is up the board gets a command at least
+every 2 seconds, and after a failure INIT follows its last command within 3
+seconds. A board whose watchdog stayed on resets 5 to 7 seconds after its
+last command, so it does not reset while its commands go through.
 
 The two joysticks appear once the board has answered INIT and SET WATCHDOG,
 and they leave when an exchange fails. They come back as new joysticks when
@@ -483,12 +492,15 @@ MDXF.
 ## Tests
 
 The protocol modules are C99 with no SDL runtime and no I/O.
-`test/controller-protocols` runs `testusio`, `testkonamip3io` and
-`testkonamip4io` against blocks, frames and reports constructed from RPCS3,
-TaikoZucchini, ITAIKO-firmware, bemanitools, OpenITG, p4io-mdxfdrv and
-arcade-docs, and `testvendorusb` checks where each board's rule applies on
+`test/controller-protocols` builds and runs `test/testusio.c`,
+`test/testkonamip3io.c` and `test/testkonamip4io.c` against blocks, frames
+and reports constructed from RPCS3, TaikoZucchini, ITAIKO-firmware,
+bemanitools, OpenITG, p4io-mdxfdrv and arcade-docs, and
+`test/testvendorusb.c`, which checks where each board's rule applies on
 Windows, Linux and macOS. `test/serial-joystick` runs `testserialacio`
 against the bus inside the serial engine, `testserialbio2` against the BI2A
 node, and `testserialkfca`, `testserialpanb`, `testserialrvol` and
 `testserialmdxf` against the RS-232 boards' frames, in normal and
-AddressSanitizer builds.
+AddressSanitizer builds. `test/libusb-backend` runs the USIO driver against
+a fake libusb, where an update returns at once while the board's OUT
+endpoint NAKs.

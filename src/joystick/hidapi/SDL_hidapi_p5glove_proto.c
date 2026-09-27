@@ -83,11 +83,11 @@ bool SDL_P5Glove_ParseLEDPositions(const uint8_t *reply, size_t length, SDL_P5Gl
     for (led = 0; led < SDL_P5GLOVE_LEDS; ++led) {
         for (axis = 0; axis < 3; ++axis) {
             const uint8_t *p = &reply[2 + 6 * led + 2 * axis];
-            int value = (int16_t)(uint16_t)((p[0] << 8) | p[1]);
+            int32_t value = (int16_t)(uint16_t)((p[0] << 8) | p[1]);
             if (axis == 0) {
                 value = -value;
             }
-            out->positions[led][axis] = (int16_t)value;
+            out->positions[led][axis] = value;
         }
     }
     return true;

@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 project(SDLCommunityMappingTests LANGUAGES C CXX)
 
-# The generator of src/joystick/SDL_gamepad_db_community.h and its tests. Both
-# call internal HIDAPI and GUID functions the shared library does not export,
+# The generator of src/joystick/SDL_gamepad_db_community.h and its tests, and
+# the test of the mappings SDL generates for the Wii Remote extensions. Each
+# calls internal HIDAPI and GUID functions the shared library does not export,
 # so they link a static SDL built from this tree.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "Use a separate build directory for the community mapping tests.")
@@ -42,6 +43,7 @@ endfunction()
 
 community_program(gen_community_mappings "${COMMUNITY_SDL_ROOT}/build-scripts/gen_community_mappings.c")
 community_program(testcommunitymappings "${COMMUNITY_SDL_ROOT}/test/testcommunitymappings.c")
+community_program(testwiiextmapping "${COMMUNITY_SDL_ROOT}/test/testwiiextmapping.c")
 
 # cmake --build <dir> --target community-mappings-write regenerates the header.
 add_custom_target(community-mappings-write
@@ -54,5 +56,7 @@ add_test(NAME community-mappings.regenerate
     COMMAND gen_community_mappings check "${COMMUNITY_DB}" "${COMMUNITY_SOURCE}" "${COMMUNITY_GAMEPAD_DB}" "${COMMUNITY_HEADER}")
 add_test(NAME community-mappings.rows
     COMMAND testcommunitymappings "${COMMUNITY_GAMEPAD_DB}")
-set_tests_properties(community-mappings.regenerate community-mappings.rows PROPERTIES
+add_test(NAME community-mappings.wiiext
+    COMMAND testwiiextmapping)
+set_tests_properties(community-mappings.regenerate community-mappings.rows community-mappings.wiiext PROPERTIES
     TIMEOUT 300 LABELS "community-mappings;offline")

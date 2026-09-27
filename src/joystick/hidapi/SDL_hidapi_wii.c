@@ -2017,7 +2017,7 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
                        active M+ always reports its running mode, so a zero
                        high byte here is by construction a mis-attributed
                        dormant-M+ reply (both identify replies echo address
-                       0x00FE), and any other unknown value is garbage.
+                       0x00FA), and any other unknown value is garbage.
                        Neither is adoptable: doing so would poison the mode
                        while M+ frames stream (hifihedgehog/SDL#13 R3). Leave
                        the state alone and retry shortly. */
@@ -2129,7 +2129,8 @@ static void PostExtensionOutput(SDL_DriverWii_Context *ctx, SDL_Joystick *joysti
     for (i = 0; i < SDL_WII_EXT_MAX_AXES; ++i) {
         if (output->axis_mask & (1u << i)) {
             if (output->data_axis_mask & (1u << i)) {
-                /* Pen coordinates and lever bytes are data: seed past the
+                /* Pen coordinates, lever bytes, drum velocities and the
+                   turntable's crossfader and dial are data: seed past the
                    anti-jitter gate as the IR axes are */
                 SDL_SeedJoystickDataAxis(joystick, (Uint8)i, output->axes[i]);
             }

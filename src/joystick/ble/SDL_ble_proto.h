@@ -287,6 +287,8 @@ extern bool SDL_BLE_QueueWrite(SDL_BLEBase *base, int characteristic, const uint
 extern bool SDL_BLE_NextWrite(SDL_BLEBase *base, SDL_BLEWrite *write);
 extern void SDL_BLE_ClearWrites(SDL_BLEBase *base);
 
+/* One line for the driver's log, such as the reason a module gives the
+   connection up. Nothing without a log sink. */
 extern void SDL_BLE_Log(SDL_BLEBase *base, const char *text);
 /* Folds one candidate into a deadline */
 extern void SDL_BLE_EarlierDeadline(bool *have, uint64_t *deadline, uint64_t candidate);

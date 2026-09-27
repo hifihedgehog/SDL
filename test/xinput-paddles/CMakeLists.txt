@@ -56,8 +56,12 @@ set(SDL_VIRTUAL_JOYSTICK ON CACHE BOOL "Virtual input tests" FORCE)
 add_subdirectory("${PADDLE_SDL_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/sdl" EXCLUDE_FROM_ALL)
 
 enable_testing()
-# Mapping also sets these hints at override priority before SDL_Init and checks
-# that the initial device list is empty. Other tests inject their native inputs.
+# Every hardware joystick driver is off, SDL's and the fork's. The serial port
+# and DJI remote hints are lists, so they are unset. The mapping, pipeline and
+# Rock Band 3 Pro tests also set these hints at override priority before
+# SDL_Init and check that the initial device list is empty. The Guitar Hero
+# Live mapping test never calls SDL_Init. The other tests inject their native
+# inputs.
 set(PADDLE_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_HIDAPI=0"
     "SDL_JOYSTICK_RAWINPUT=0"
@@ -66,11 +70,17 @@ set(PADDLE_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_WGI=0"
     "SDL_JOYSTICK_GAMEINPUT=0"
     "SDL_JOYSTICK_GAMEINPUT_RAW=0"
+    "SDL_JOYSTICK_BLE=0"
     "SDL_JOYSTICK_BLE_SWITCH2=0"
+    "SDL_JOYSTICK_SERIAL_AUTO=0"
+    "SDL_JOYSTICK_RFCOMM=0"
     "SDL_JOYSTICK_THREAD=0"
     "SDL_JOYSTICK_WINMM=0"
     "SDL_JOYSTICK_ROG_CHAKRAM=0"
     "SDL_JOYSTICK_ICADE=0")
+set(PADDLE_CLEARED_ENVIRONMENT
+    "SDL_JOYSTICK_SERIAL=unset:"
+    "SDL_JOYSTICK_DJI_REMOTE_TCP_HOSTS=unset:")
 
 function(paddle_test part)
     set(target "testxinputpaddle${part}")
@@ -91,7 +101,8 @@ function(paddle_test part)
     set_tests_properties("xinput-paddles.${part}" PROPERTIES
         TIMEOUT 60 LABELS "xinput-paddles;offline"
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-        ENVIRONMENT "${PADDLE_OFFLINE_ENVIRONMENT}")
+        ENVIRONMENT "${PADDLE_OFFLINE_ENVIRONMENT}"
+        ENVIRONMENT_MODIFICATION "${PADDLE_CLEARED_ENVIRONMENT}")
 endfunction()
 
 paddle_test(decode "${PADDLE_TESTS}/testxinputpaddledecode.c"
@@ -168,4 +179,22 @@ add_test(NAME xinput-paddles.mapping-empty COMMAND testxinputpaddlemapping --emp
 set_tests_properties(xinput-paddles.mapping-empty PROPERTIES
     TIMEOUT 60 LABELS "xinput-paddles;offline"
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-    ENVIRONMENT "${PADDLE_OFFLINE_ENVIRONMENT}")
+    ENVIRONMENT "${PADDLE_OFFLINE_ENVIRONMENT}"
+    ENVIRONMENT_MODIFICATION "${PADDLE_CLEARED_ENVIRONMENT}")
+
+# Two instrument paths of hifihedgehog/SDL#33 Part 3 live in files these tests
+# share. The Guitar Hero Live mapping test includes the real SDL_gamepad.c, as
+# the mapping test does. The Rock Band 3 Pro test runs the archive's
+# SDL_XINPUT_JoystickUpdate against fake XInput function pointers.
+paddle_test(ghlmapping "${PADDLE_TESTS}/testghlmapping.c")
+paddle_test(rb3proxinput "${PADDLE_TESTS}/testrb3proxinput.c")
+foreach(target testxinputpaddleghlmapping testxinputpaddlerb3proxinput)
+    target_compile_definitions(${target} PRIVATE USING_GENERATED_CONFIG_H SDL_STATIC_LIB)
+    target_include_directories(${target} PRIVATE
+        "${PADDLE_SDL_ROOT}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}/sdl/include-config-$<LOWER_CASE:$<CONFIG>>/build_config"
+        "${CMAKE_CURRENT_BINARY_DIR}/sdl/include-revision")
+    target_link_libraries(${target} PRIVATE SDL3-static)
+endforeach()
+# The included SDL_gamepad.c has unused callback parameters, as above
+target_compile_options(testxinputpaddleghlmapping PRIVATE /wd4100)

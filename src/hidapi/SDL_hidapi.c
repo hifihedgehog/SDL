@@ -1639,6 +1639,17 @@ int SDL_hid_send_output_report(SDL_hid_device *device, const unsigned char *data
     return device->backend->hid_send_output_report(device->device, data, length);
 }
 
+bool SDL_hid_device_is_libusb(SDL_hid_device *device)
+{
+    CHECK_DEVICE_MAGIC(device, false);
+
+#ifdef HAVE_LIBUSB
+    return device->backend == &LIBUSB_Backend;
+#else
+    return false;
+#endif
+}
+
 int SDL_hid_get_input_report(SDL_hid_device *device, unsigned char *data, size_t length)
 {
     CHECK_DEVICE_MAGIC(device, -1);

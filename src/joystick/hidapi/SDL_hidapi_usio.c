@@ -36,7 +36,11 @@
  * hid_write sends each 6-byte command as one bulk transfer, first byte
  * included, and the backend reads the replies a packet at a time. The board
  * sends nothing unasked, so the protocol runs in UpdateDevice whether or not
- * a joystick is open. The protocol, its timing and the two layouts live in
+ * a joystick is open. UpdateDevice runs with the joystick lock held, and a
+ * bulk write waits up to its 1000 ms timeout while the endpoint NAKs, so a
+ * thread of this driver writes each command, as the P3IO driver runs its
+ * commands on a thread, and the protocol learns the write's result at the
+ * next update. The protocol, its timing and the two layouts live in
  * SDL_hidapi_usio_proto.c, where the offline tests run them. This file only
  * moves bytes between it and SDL. */
 
@@ -52,6 +56,9 @@ SDL_COMPILE_TIME_ASSERT(usio_drum_kit, SDL_USIO_JOYSTICK_DRUM_KIT == SDL_JOYSTIC
  * rest of it. */
 #define USIO_READ_SIZE 512
 
+/* No write finished since UpdateDevice last took a result */
+#define USIO_NO_RESULT SDL_MIN_SINT32
+
 typedef struct
 {
     SDL_HIDAPI_Device *device;
@@ -59,6 +66,16 @@ typedef struct
     int players;
     SDL_JoystickID joysticks[SDL_USIO_MAX_PLAYERS];
     bool post_pending[SDL_USIO_MAX_PLAYERS]; /* Opened and not yet sent the state */
+
+    /* The command writer. UpdateDevice fills command and signals wake only
+       while writing is false, and writing stays true until UpdateDevice takes
+       the write's byte count from written. */
+    SDL_Thread *writer;
+    SDL_Semaphore *wake;   /* Signaled once for each command, and once to stop */
+    Uint8 command[SDL_USIO_COMMAND_SIZE];
+    bool writing;          /* A command went to the writer, and its result is not taken */
+    SDL_AtomicInt written; /* The last write's byte count, or USIO_NO_RESULT */
+    SDL_AtomicInt stop;
 } SDL_DriverUSIO_Context;
 
 static void HIDAPI_DriverUSIO_RegisterHints(SDL_HintCallback callback, void *userdata)
@@ -197,6 +214,23 @@ static const char *HIDAPI_DriverUSIO_GetJoystickName(SDL_HIDAPI_Device *device, 
     return info.name;
 }
 
+/* Writes each command UpdateDevice hands over, until FreeDevice stops it.
+   The semaphore orders the command's bytes before the write, and the atomic
+   byte count orders the write before UpdateDevice reuses the command. */
+static int SDLCALL HIDAPI_DriverUSIO_WriteThread(void *data)
+{
+    SDL_DriverUSIO_Context *ctx = (SDL_DriverUSIO_Context *)data;
+
+    for (;;) {
+        SDL_WaitSemaphore(ctx->wake);
+        if (SDL_GetAtomicInt(&ctx->stop)) {
+            break;
+        }
+        SDL_SetAtomicInt(&ctx->written, SDL_hid_write(ctx->device->dev, ctx->command, sizeof(ctx->command)));
+    }
+    return 0;
+}
+
 static bool HIDAPI_DriverUSIO_InitDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverUSIO_Context *ctx = (SDL_DriverUSIO_Context *)SDL_calloc(1, sizeof(*ctx));
@@ -221,8 +255,18 @@ static bool HIDAPI_DriverUSIO_InitDevice(SDL_HIDAPI_Device *device)
     device->guid.data[15] = SDL_USIO_GUIDByte(layout);
     device->GetJoystickName = HIDAPI_DriverUSIO_GetJoystickName;
 
+    SDL_SetAtomicInt(&ctx->written, USIO_NO_RESULT);
+    ctx->wake = SDL_CreateSemaphore(0);
+    if (!ctx->wake) {
+        return false;
+    }
+    ctx->writer = SDL_CreateThread(HIDAPI_DriverUSIO_WriteThread, "SDL USIO commands", ctx);
+    if (!ctx->writer) {
+        return false;
+    }
+
     /* The joysticks appear once the identification block confirms the
-       board. The first command goes out from the first update. */
+       board. The first update hands the first command to the writer. */
     return true;
 }
 
@@ -242,8 +286,16 @@ static bool HIDAPI_DriverUSIO_UpdateDevice(SDL_HIDAPI_Device *device)
     SDL_DriverUSIO_Context *ctx = (SDL_DriverUSIO_Context *)device->context;
     SDL_USIOSink sink = HIDAPI_DriverUSIO_Sink(ctx);
     Uint8 data[USIO_READ_SIZE];
-    Uint8 command[SDL_USIO_COMMAND_SIZE];
-    int player, size, empty = 0;
+    int player, size, written, empty = 0;
+
+    /* The result of a write the writer finished since the last update. The
+       reply to that command can be whole already, or the reply timeout can
+       have abandoned the read, and the protocol then ignores the result. */
+    written = SDL_SetAtomicInt(&ctx->written, USIO_NO_RESULT);
+    if (written != USIO_NO_RESULT) {
+        ctx->writing = false;
+        SDL_USIO_CommandDone(&ctx->state, written, SDL_GetTicksNS(), &sink);
+    }
 
     /* A joystick opened since the last update learns what is held */
     for (player = 0; player < ctx->players; ++player) {
@@ -283,12 +335,12 @@ static bool HIDAPI_DriverUSIO_UpdateDevice(SDL_HIDAPI_Device *device)
         return false;
     }
 
-    /* One read out at a time, the next as soon as the last reply is whole */
+    /* One read out at a time, the next as soon as the last reply is whole
+       and the writer has reported the last write */
     SDL_USIO_Tick(&ctx->state, SDL_GetTicksNS(), &sink);
-    if (SDL_USIO_NextCommand(&ctx->state, SDL_GetTicksNS(), command)) {
-        const int written = SDL_hid_write(device->dev, command, sizeof(command));
-
-        SDL_USIO_CommandDone(&ctx->state, written, SDL_GetTicksNS(), &sink);
+    if (!ctx->writing && SDL_USIO_NextCommand(&ctx->state, SDL_GetTicksNS(), ctx->command)) {
+        ctx->writing = true;
+        SDL_SignalSemaphore(ctx->wake);
     }
     return true;
 }
@@ -349,6 +401,23 @@ static void HIDAPI_DriverUSIO_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joyst
 
 static void HIDAPI_DriverUSIO_FreeDevice(SDL_HIDAPI_Device *device)
 {
+    SDL_DriverUSIO_Context *ctx = (SDL_DriverUSIO_Context *)device->context;
+
+    if (!ctx) {
+        return;
+    }
+    /* The backend closes the handle after this returns, so a write in
+       progress ends first, within its 1000 ms timeout */
+    if (ctx->writer) {
+        SDL_SetAtomicInt(&ctx->stop, 1);
+        SDL_SignalSemaphore(ctx->wake);
+        SDL_WaitThread(ctx->writer, NULL);
+        ctx->writer = NULL;
+    }
+    if (ctx->wake) {
+        SDL_DestroySemaphore(ctx->wake);
+        ctx->wake = NULL;
+    }
 }
 
 SDL_HIDAPI_DeviceDriver SDL_HIDAPI_DriverUSIO = {

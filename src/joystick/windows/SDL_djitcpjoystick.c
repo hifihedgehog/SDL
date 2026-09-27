@@ -28,10 +28,10 @@
  * so SDL opens no connection unless the hint names one. Each host gets a
  * thread that owns its sockets and runs the pure session in
  * src/joystick/dji/SDL_dji_tcp_proto.c, which decides every connect, send
- * and close. The thread hands presence and snapshots to the joystick thread
- * under the host's mutex, as the serial driver does, and never takes the
- * joystick lock. ws2_32 is loaded at run time, so SDL links no Winsock
- * library.
+ * and close. The thread hands presence, snapshots and its log lines to the
+ * joystick thread under the host's mutex, as the serial driver does, and
+ * never takes the joystick lock. ws2_32 is loaded at run time, so SDL links
+ * no Winsock library.
  */
 
 #include "SDL_internal.h"
@@ -49,8 +49,11 @@
 #define TCP_NODELAY 0x0001
 #endif
 
-#define DJITCP_READ_SIZE   2048
-#define DJITCP_MAX_ACTIONS 256 /* Actions one pass may run, a guard only */
+#define DJITCP_READ_SIZE    2048
+#define DJITCP_READ_ROUNDS  8   /* recv calls per link event while the peer is open */
+#define DJITCP_MAX_ACTIONS  256 /* Actions one pass may run, a guard only */
+#define DJITCP_NOTE_ENTRIES 8   /* Host thread log lines kept for the joystick thread */
+#define DJITCP_NOTE_LENGTH  64
 
 typedef int(WSAAPI *DJITCP_WSAStartup)(WORD, LPWSADATA);
 typedef int(WSAAPI *DJITCP_WSACleanup)(void);
@@ -89,6 +92,9 @@ typedef struct DJITCP_Host
     int battery;
     SDL_SerialSnapshotQueue queue;
     uint64_t sequence;
+    char notes[DJITCP_NOTE_ENTRIES][DJITCP_NOTE_LENGTH]; /* The host thread's log lines */
+    int note_count;
+    Uint32 notes_dropped;
 
     /* The joystick thread's */
     uint32_t registered; /* The generation it has a joystick for, 0 when none */
@@ -107,6 +113,7 @@ struct joystick_hwdata
     int battery;       /* The last battery level sent, -1 for none */
     bool send_initial; /* The state Open took is not sent yet */
     Uint64 initial_stamp;
+    Uint64 last_stamp; /* The time of the last event sent, see SDL_DJITCP_EventStamp */
     SDL_SerialControls initial;
 };
 
@@ -129,14 +136,62 @@ static DJITCP_WSAGetLastError djitcp_wsa_get_last_error;
 static DJITCP_WSAEventSelect djitcp_wsa_event_select;
 static DJITCP_WSAEnumNetworkEvents djitcp_wsa_enum_network_events;
 
-/* A failing call is logged once until the error changes */
+/* A log line from the host thread. SDL_LockJoysticks locks SDL_event_lock,
+   which an application's log callback also takes when it pushes an event,
+   and a hint change or SDL_Quit waits for this thread with that lock held.
+   So this thread keeps its lines here and the joystick thread logs them, as
+   the iCade driver's thread does. */
+static void DJITCP_Note(DJITCP_Host *host, const char *format, ...)
+{
+    va_list ap;
+
+    SDL_LockMutex(host->mutex);
+    if (host->note_count < DJITCP_NOTE_ENTRIES) {
+        va_start(ap, format);
+        (void)SDL_vsnprintf(host->notes[host->note_count], DJITCP_NOTE_LENGTH, format, ap);
+        va_end(ap);
+        ++host->note_count;
+    } else {
+        ++host->notes_dropped;
+    }
+    SDL_UnlockMutex(host->mutex);
+}
+
+/* On the joystick thread: logs the host thread's lines in order, with none
+   of the host's locks held */
+static void DJITCP_FlushNotes(DJITCP_Host *host)
+{
+    char notes[DJITCP_NOTE_ENTRIES][DJITCP_NOTE_LENGTH];
+    Uint32 dropped;
+    int count, i;
+
+    SDL_LockMutex(host->mutex);
+    count = host->note_count;
+    for (i = 0; i < count; ++i) {
+        SDL_memcpy(notes[i], host->notes[i], DJITCP_NOTE_LENGTH);
+    }
+    dropped = host->notes_dropped;
+    host->note_count = 0;
+    host->notes_dropped = 0;
+    SDL_UnlockMutex(host->mutex);
+
+    for (i = 0; i < count; ++i) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "DJI remote %s: %s", host->address.key, notes[i]);
+    }
+    if (dropped) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "DJI remote %s: %u more lines dropped", host->address.key, (unsigned int)dropped);
+    }
+}
+
+/* On the host thread. A failing call is logged once until the error
+   changes. */
 static void DJITCP_LogError(DJITCP_Host *host, const char *call, int error)
 {
     if (host->logged_error == error) {
         return;
     }
     host->logged_error = error;
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "DJI remote %s: %s failed with error %d", host->address.key, call, error);
+    DJITCP_Note(host, "%s failed with error %d", call, error);
 }
 
 static bool DJITCP_LoadWinsock(void)
@@ -284,13 +339,18 @@ static void DJITCP_StartConnect(DJITCP_Host *host, int link, uint64_t now)
     /* Otherwise FD_CONNECT reports the result */
 }
 
-/* Takes what arrived until the socket has nothing more. A close or an error
- * is reported as loss. */
-static void DJITCP_Read(DJITCP_Host *host, int link)
+/* Takes what arrived, at most DJITCP_READ_ROUNDS reads while the peer is
+ * open, so a peer that sends faster than the session parses cannot keep the
+ * thread from its stop event. FD_READ is level-triggered: data left over sets
+ * the link's event again, and the wait returns for it at once, the stop
+ * event first. Once the peer has closed, the socket is read to its end,
+ * since nothing more arrives. A close or an error is reported as loss. */
+static void DJITCP_Read(DJITCP_Host *host, int link, bool closed)
 {
     char buffer[DJITCP_READ_SIZE];
+    int rounds = 0;
 
-    while (host->sockets[link] != INVALID_SOCKET) {
+    while (host->sockets[link] != INVALID_SOCKET && (closed || rounds++ < DJITCP_READ_ROUNDS)) {
         const int received = djitcp_recv(host->sockets[link], buffer, (int)sizeof(buffer), 0);
 
         if (received > 0) {
@@ -334,7 +394,7 @@ static void DJITCP_LinkEvents(DJITCP_Host *host, int link)
         SDL_DJITCP_Connected(host->state, link, connected, SDL_GetTicks());
     }
     if (events.lNetworkEvents & (FD_READ | FD_CLOSE)) {
-        DJITCP_Read(host, link);
+        DJITCP_Read(host, link, (events.lNetworkEvents & FD_CLOSE) != 0);
     }
     if ((events.lNetworkEvents & FD_CLOSE) && host->sockets[link] != INVALID_SOCKET) {
         DJITCP_CloseLink(host, link);
@@ -362,11 +422,21 @@ static void DJITCP_RunActions(DJITCP_Host *host)
             DJITCP_CloseLink(host, action.link);
             break;
         case SDL_DJI_TCP_SEND:
-            if (host->sockets[action.link] != INVALID_SOCKET &&
-                djitcp_send(host->sockets[action.link], (const char *)action.data, (int)action.length, 0) != (int)action.length) {
-                DJITCP_LogError(host, "send", djitcp_wsa_get_last_error());
-                DJITCP_CloseLink(host, action.link);
-                SDL_DJITCP_Lost(host->state, action.link, now);
+            if (host->sockets[action.link] != INVALID_SOCKET) {
+                const int sent = djitcp_send(host->sockets[action.link], (const char *)action.data, (int)action.length, 0);
+
+                /* The socket asks for no FD_WRITE, so a send that would block
+                   or takes fewer bytes ends the link. A short count sets no
+                   Winsock error, so the count is what gets logged. */
+                if (sent != (int)action.length) {
+                    if (sent < 0) {
+                        DJITCP_LogError(host, "send", djitcp_wsa_get_last_error());
+                    } else {
+                        DJITCP_Note(host, "send took %d of %d bytes", sent, (int)action.length);
+                    }
+                    DJITCP_CloseLink(host, action.link);
+                    SDL_DJITCP_Lost(host->state, action.link, now);
+                }
             }
             break;
         }
@@ -513,7 +583,8 @@ static DJITCP_Host *DJITCP_StartHost(const SDL_DJITCPHost *address)
     return host;
 }
 
-/* Removes the host's joystick, stops its thread and frees it */
+/* Removes the host's joystick, stops its thread, logs what the thread kept
+   and the actions its session dropped, and frees the host */
 static void DJITCP_StopHost(DJITCP_Host *host, bool notify)
 {
     DJITCP_Host **link;
@@ -532,6 +603,12 @@ static void DJITCP_StopHost(DJITCP_Host *host, bool notify)
     SetEvent(host->stop_event);
     SDL_WaitThread(host->thread, NULL);
     host->thread = NULL;
+    DJITCP_FlushNotes(host);
+    /* The thread has ended, so its session can be read without a lock */
+    if (host->state->dropped_actions) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "DJI remote %s: %u actions dropped with the action queue full", host->address.key,
+                     (unsigned int)host->state->dropped_actions);
+    }
 
     for (link = &djitcp_hosts; *link; link = &(*link)->next) {
         if (*link == host) {
@@ -614,6 +691,18 @@ static void DJITCP_CheckPresence(DJITCP_Host *host)
         host->registered = 0;
     }
     if (!host->registered && generation) {
+        /* SDL's device lists, SDL_HINT_JOYSTICK_BLACKLIST_DEVICES and
+           SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES with its _EXCEPT allow
+           list, read here in Detect under the joystick lock, which the WGI
+           driver also holds when it reads them. A remote carries no VID or
+           PID, so it is checked as 0000:0000 with its joystick name, and an
+           allow list leaves out every remote. A remote left out keeps its
+           links, since the hint names it, and gets no joystick. Each
+           presence is checked anew. */
+        if (SDL_ShouldIgnoreJoystick(0, 0, 0, identity.name)) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "DJI remote %s (%s): ignored by SDL's device lists", host->address.key, identity.name);
+            return;
+        }
         host->registered = generation;
         host->joystick_identity = identity;
         host->instance_id = SDL_GetNextObjectID();
@@ -686,6 +775,7 @@ static void DJITCP_JoystickDetect(void)
             SDL_SetAtomicInt(&host->presence_changed, 0);
             DJITCP_CheckPresence(host);
         }
+        DJITCP_FlushNotes(host);
     }
 }
 
@@ -760,6 +850,9 @@ static void DJITCP_SendControls(SDL_Joystick *joystick, const SDL_SerialControls
     for (i = 0; i < joystick->nbuttons; ++i) {
         SDL_SendJoystickButton(timestamp, joystick, (Uint8)i, SDL_Serial_GetButton(controls, i));
     }
+    for (i = 0; i < joystick->nhats; ++i) {
+        SDL_SendJoystickHat(timestamp, joystick, (Uint8)i, controls->hats[i]);
+    }
 }
 
 static void DJITCP_SendBattery(SDL_Joystick *joystick, int battery)
@@ -788,11 +881,12 @@ static bool DJITCP_JoystickOpen(SDL_Joystick *joystick, int device_index)
     joystick->hwdata = hwdata;
     joystick->naxes = host->joystick_identity.naxes;
     joystick->nbuttons = host->joystick_identity.nbuttons;
+    joystick->nhats = host->joystick_identity.nhats;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
     /* The state so far, sent by the first update, as SDL allocates the
-       joystick's axes and buttons only after Open returns. Queued snapshots
-       up to it are skipped. */
+       joystick's axes, buttons and hats only after Open returns. Queued
+       snapshots up to it are skipped. */
     SDL_LockMutex(host->mutex);
     hwdata->initial = host->latest;
     hwdata->sequence = host->latest_sequence;
@@ -842,7 +936,11 @@ static bool DJITCP_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enable
     return SDL_Unsupported();
 }
 
-/* Drains the host's snapshot queue in order */
+/* Drains the host's snapshot queue in order. The state Open took goes out
+   stamped at the Open, and a snapshot the host thread stamped just before
+   the Open but queued after it carries an earlier time, so every event takes
+   SDL_DJITCP_EventStamp and the joystick's events keep their order in
+   time. */
 static void DJITCP_JoystickUpdate(SDL_Joystick *joystick)
 {
     struct joystick_hwdata *hwdata = joystick->hwdata;
@@ -855,7 +953,7 @@ static void DJITCP_JoystickUpdate(SDL_Joystick *joystick)
     }
     if (hwdata->send_initial) {
         hwdata->send_initial = false;
-        DJITCP_SendControls(joystick, &hwdata->initial, hwdata->initial_stamp);
+        DJITCP_SendControls(joystick, &hwdata->initial, SDL_DJITCP_EventStamp(&hwdata->last_stamp, hwdata->initial_stamp));
     }
     host = hwdata->host;
     SDL_LockMutex(host->mutex);
@@ -871,7 +969,7 @@ static void DJITCP_JoystickUpdate(SDL_Joystick *joystick)
             continue;
         }
         hwdata->sequence = entry->sequence;
-        DJITCP_SendControls(joystick, &entry->controls, entry->stamp_ns);
+        DJITCP_SendControls(joystick, &entry->controls, SDL_DJITCP_EventStamp(&hwdata->last_stamp, entry->stamp_ns));
     }
     DJITCP_SendBattery(joystick, battery);
 }
@@ -898,6 +996,8 @@ static void DJITCP_JoystickQuit(void)
     }
 }
 
+/* As SERIAL_MapInput converts it. A hat's target carries its bit, as
+   SDL_InputMapping encodes it. */
 static void DJITCP_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
 {
     SDL_zerop(out);
@@ -907,6 +1007,9 @@ static void DJITCP_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
         break;
     case SDL_SERIAL_MAP_AXIS:
         out->kind = EMappingKind_Axis;
+        break;
+    case SDL_SERIAL_MAP_HAT:
+        out->kind = EMappingKind_Hat;
         break;
     case SDL_SERIAL_MAP_AXIS_POSITIVE:
         out->kind = EMappingKind_Axis;

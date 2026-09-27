@@ -12,7 +12,7 @@
 
 /* Replay tests for src/joystick/dji/SDL_dji_tcp_proto.c, the DJI screen
    remotes over TCP of hifihedgehog/SDL#33 Part 6: the links, keepalives,
-   acknowledgements, liveness, the joystick and the host hint. The session
+   acknowledgments, liveness, the joystick and the host hint. The session
    runs on an injected clock and every action it asks for is logged. Test
    numbers follow the part's TCP section. */
 
@@ -478,7 +478,7 @@ static void TestNames(void)
     free(t);
 }
 
-/* 4: a request asking for an acknowledgement gets one empty response */
+/* 4: a request asking for an acknowledgment gets one empty response */
 static void TestAcknowledge(void)
 {
     TCPHarness *t = T_Up();
@@ -520,6 +520,29 @@ static void TestAcknowledge(void)
     T_Receive(t, 0, buffer, Envelope(buffer, 0x06, 0x02, 3, 0x20, 0x18, 0x40, NULL, 0));
     T_Receive(t, 0, buffer, Envelope(buffer, 0x06, 0x02, 4, 0x60, 0x00, 0x77, NULL, 0));
     CHECK(T_Is(T_Next(t), SDL_DJI_TCP_SEND, 0, 7) && T_Is(T_Next(t), SDL_DJI_TCP_SEND, 0, 7) && T_Next(t) == NULL);
+    free(t);
+}
+
+/* More requests asking for an acknowledgment in one read than the action
+   queue holds: the first SDL_DJI_TCP_MAX_ACTIONS get their responses, and
+   the session counts the rest as dropped for the driver's log */
+static void TestAckBurst(void)
+{
+    TCPHarness *t = T_Up();
+    uint8_t burst[40 * 32];
+    size_t length = 0;
+    int i, sends = 0;
+    const T_Action *a;
+
+    t->now = 9;
+    for (i = 0; i < 40; ++i) {
+        length += Envelope(burst + length, 0x06, 0x02, (uint16_t)(100 + i), 0x20, 0x18, 0x40, NULL, 0);
+    }
+    T_Receive(t, 0, burst, length);
+    while ((a = T_Next(t)) != NULL) {
+        sends += T_Is(a, SDL_DJI_TCP_SEND, 0, 9) ? 1 : 0;
+    }
+    CHECK(sends == SDL_DJI_TCP_MAX_ACTIONS && t->state.dropped_actions == 40 - SDL_DJI_TCP_MAX_ACTIONS);
     free(t);
 }
 
@@ -712,7 +735,8 @@ static void TestHosts(void)
     CHECK(SDL_DJITCP_ParseHosts(" 127.0.0.1:40008 , 10.0.0.2 ,, ", hosts, SDL_DJI_TCP_MAX_HOSTS, LogHost, &log) == 2);
     CHECK(hosts[0].port == 40008 && hosts[0].address == 0x7F000001u && strcmp(hosts[1].key, "10.0.0.2:40007") == 0);
     CHECK(log.count == 0);
-    /* An address named twice keeps one entry */
+    /* An address and port named twice keep one entry, and a second port of
+       one address is another host */
     CHECK(SDL_DJITCP_ParseHosts("10.0.0.2,10.0.0.2:40007,10.0.0.2:1", hosts, SDL_DJI_TCP_MAX_HOSTS, LogHost, &log) == 2);
     CHECK(log.count == 0);
     /* Entries that cannot be used, one log each */
@@ -731,6 +755,19 @@ static void TestHosts(void)
     CHECK(SDL_DJITCP_ParseHosts("bad", hosts, 2, NULL, NULL) == 0);
 }
 
+/* The state Open took goes out stamped at the Open, and a change the host
+   thread stamped just before the Open, but queued after it, carries an
+   earlier time. The joystick's events keep their order in time. */
+static void TestEventStamp(void)
+{
+    uint64_t last = 0;
+
+    CHECK(SDL_DJITCP_EventStamp(&last, 116650000) == 116650000 && last == 116650000);
+    CHECK(SDL_DJITCP_EventStamp(&last, 111610000) == 116650000 && last == 116650000);
+    CHECK(SDL_DJITCP_EventStamp(&last, 116650000) == 116650000 && last == 116650000);
+    CHECK(SDL_DJITCP_EventStamp(&last, 120000000) == 120000000 && last == 120000000);
+}
+
 int main(void)
 {
     TestControls();
@@ -739,11 +776,13 @@ int main(void)
     TestKeepalive();
     TestNames();
     TestAcknowledge();
+    TestAckBurst();
     TestLiveness();
     TestLostConnect();
     TestSharedLiveness();
     TestBattery();
     TestStale();
     TestHosts();
+    TestEventStamp();
     return H_Finish();
 }

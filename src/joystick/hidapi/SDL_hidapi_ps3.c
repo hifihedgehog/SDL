@@ -52,7 +52,8 @@ SDL_COMPILE_TIME_ASSERT(ps3ext_button_right_stick, SDL_PS3EXT_BUTTON_RIGHT_STICK
 
 #if defined(SDL_PLATFORM_WIN32) || defined(SDL_PLATFORM_WINGDK)
 /* HidD_SetFeature cuts a feature report to the declared length, 8 bytes on
-   the Rock Band 3 Pro instruments, so their 40-byte enable goes as five */
+   the Rock Band 3 Pro instruments, so their 40-byte enable goes as five
+   through the Windows HID backend. Through libusb it goes whole. */
 #define HIDAPI_PS3_SPLIT_RB3PRO_ENABLE true
 #else
 #define HIDAPI_PS3_SPLIT_RB3PRO_ENABLE false
@@ -824,7 +825,8 @@ static bool HIDAPI_DriverPS3ThirdParty_InitDevice(SDL_HIDAPI_Device *device)
         device->joystick_type = (rb3pro.variant == SDL_RB3PRO_GUITAR) ? SDL_JOYSTICK_TYPE_GUITAR : SDL_JOYSTICK_TYPE_UNKNOWN;
 
         /* The PS3 models send keys and frets only after the enable */
-        SDL_RB3ProEnable_Init(&ctx->rb3pro_enable, rb3pro.ps3, HIDAPI_PS3_SPLIT_RB3PRO_ENABLE);
+        SDL_RB3ProEnable_Init(&ctx->rb3pro_enable, rb3pro.ps3,
+                              HIDAPI_PS3_SPLIT_RB3PRO_ENABLE && !SDL_hid_device_is_libusb(device->dev));
         if (SDL_RB3ProEnable_Open(&ctx->rb3pro_enable, SDL_NS_TO_US(SDL_GetTicksNS()))) {
             HIDAPI_DriverPS3ThirdParty_StartEnable(ctx);
         }

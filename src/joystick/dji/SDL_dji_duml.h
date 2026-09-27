@@ -58,7 +58,7 @@
 #define SDL_DJI_MODULE_PC         0x0A
 #define SDL_DJI_MODULE_HD_GROUND  0x0E
 
-/* Command type: bit 7 marks a response, bits 5-6 ask for an acknowledgement */
+/* Command type: bit 7 marks a response, bits 5-6 ask for an acknowledgment */
 #define SDL_DJI_TYPE_RESPONSE 0x80
 #define SDL_DJI_TYPE_ACK_MASK 0x60
 #define SDL_DJI_TYPE_REQUEST  0x40

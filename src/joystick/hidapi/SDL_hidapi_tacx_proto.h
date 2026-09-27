@@ -29,9 +29,10 @@
  * 0x82. It first sends the version request 02 00 00 00, without which the
  * head unit reports no cadence, then a 12-byte frame every 100 ms. The head
  * unit asks the brake only after a frame from the host, and each brake
- * answer comes back in a reply of 64 bytes from the T1904 and T1932, or 48
- * from the T1942. Bytes 24 to 27 of a reply are its header: 00021303 for
- * data, 00000C03 for the brake's version. Multi-byte fields are
+ * answer comes back in a reply of 64 bytes from a T1904 or T1932 on a
+ * magnetic brake, or 48 from the T1942. FortiusANT issue 104 reports 48-byte
+ * replies from a T1932 too. Bytes 24 to 27 of a reply are its header:
+ * 00021303 for data, 00000C03 for the brake's version. Multi-byte fields are
  * little-endian. A 24-byte reply carries no brake answer and is ignored.
  *
  * The frames this module hands out are the version request and the stop
@@ -42,10 +43,13 @@
  * after it) need a Tacx firmware image from the host at every power-up.
  * The part leaves them outside the ticket, so they are not handled.
  *
- * The facts are restated from FortiusANT (GPL-3.0), TotalReverse's ttyT1941
- * and its wiki (GPL-3.0) and the fortius_1942 Linux driver (GPL-2.0), all
- * for facts only, and from antifier's captures (MIT). No code from them is
- * copied.
+ * The facts are restated from FortiusANT (GPL-3.0) at 0eee910, from
+ * TotalReverse's ttyT1941 (GPL-3.0) at b50095a and its wiki at b8ba962, both
+ * at https://github.com/totalreverse/ttyT1941, and from the fortius_1942
+ * Linux driver (GPL-2.0 or later), the patch posted to linux-usb on
+ * 2009-03-16 (https://www.spinics.net/lists/linux-usb/msg15908.html), all
+ * for facts only, and from antifier's captures (MIT) at 487bedc. No code
+ * from them is copied.
  */
 
 #ifndef SDL_hidapi_tacx_proto_h_
@@ -92,6 +96,13 @@ extern void SDL_Tacx_VersionRequest(uint8_t out[SDL_TACX_VERSION_LENGTH]);
 #define SDL_TACX_READ_SIZE     64 /* The longest reply */
 #define SDL_TACX_REPLY_MINIMUM 48 /* The shortest reply that is decoded */
 
+/* The IN transfer timeout of the head units' vendor rule, in ms. A reply
+ * shorter than 64 bytes that ends on a full packet ends no transfer, so each
+ * transfer ends this long after it starts, within the 100 ms between
+ * frames, and hands over the reply it holds. FortiusANT reads each reply
+ * with a 30 ms timeout. */
+#define SDL_TACX_READ_TIMEOUT_MS 50
+
 #define SDL_TACX_HEADER_DATA    0x00021303u
 #define SDL_TACX_HEADER_VERSION 0x00000C03u
 
@@ -131,7 +142,10 @@ extern bool SDL_Tacx_DecodeData(const uint8_t *reply, size_t length, SDL_TacxDat
 extern bool SDL_Tacx_DecodeBrake(const uint8_t *reply, size_t length, SDL_TacxBrake *brake);
 
 /* The joystick. The axes are clamped to 16 bits:
- * - 0: the steering, axis 1 - 32768. The raw value covers all 16 bits.
+ * - 0: the steering, axis 1 - 32768. The raw value covers all 16 bits. A
+ *   steering unit moves it from about 0300 at full right to 0500 at full
+ *   left, so the axis rises toward the left, and 0A0D means no steering
+ *   unit (the ttyT1941 wiki). Trainer code calibrates the range.
  * - 1: the wheel speed, up to 32767, about 113 km/h by FortiusANT's factor.
  * - 2: the cadence x 128, at most 32640.
  * - 3: the heart rate x 128, at most 32640.
@@ -194,10 +208,13 @@ extern void SDL_Tacx_Init(SDL_TacxState *state, uint64_t now);
  * version request, 4 bytes, or the stop frame, 12. */
 extern bool SDL_Tacx_NextFrame(SDL_TacxState *state, uint64_t now, uint8_t out[SDL_TACX_FRAME_LENGTH], size_t *length);
 
-/* Completes the frame in flight. written is the byte count the write
- * reported, or a negative value when it failed. The next frame is due one
- * interval later. A version request counts only when all 4 bytes went out,
- * so a failed one goes again with the next frame. */
+/* Completes the frame in flight. written is the byte count the driver's
+ * send reported, or a negative value when it failed. The driver queues each
+ * frame for the HIDAPI rumble thread to write, so the count is the bytes
+ * queued. The next frame is due one interval later. A version request
+ * counts only when all 4 bytes were queued, so one that could not be queued
+ * goes again with the next frame, and one whose write fails later counts all
+ * the same. */
 extern void SDL_Tacx_FrameDone(SDL_TacxState *state, int written, uint64_t now);
 
 /* Applies one reply and returns SDL_TACX_CHANGED_* flags. A data reply
