@@ -483,6 +483,101 @@ static void TestPortLoss(void)
     H_Destroy(h);
 }
 
+/* The value of a property the identity carries, or fallback */
+static int64_t Property(const SDL_SerialIdentity *identity, const char *name, int64_t fallback)
+{
+    int i;
+
+    for (i = 0; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        if (identity->properties[i].name && strcmp(identity->properties[i].name, name) == 0) {
+            return identity->properties[i].value;
+        }
+    }
+    return fallback;
+}
+
+/* hifihedgehog/SDL#35: the identity carries the query results the I-Force
+   haptic driver reads, which the serial driver sets as joystick properties.
+   N's effect count and B's memory end go only with effects, as the USB
+   driver publishes them. M and P always go, since they pick the model. */
+static void TestProperties(void)
+{
+    Harness *h = PresentBoeder();
+    uint8_t m[16], p[16], b[16];
+    size_t m_length, p_length, b_length;
+
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_VENDOR_NUMBER, -1) == 0x05EF);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_PRODUCT_NUMBER, -1) == 0x8886);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_EFFECTS_NUMBER, -1) == 10);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_MEMORY_NUMBER, -1) == 200);
+    H_Destroy(h);
+
+    h = H_Create(&SDL_SerialIForceModule);
+    H_Start(h);
+    Answer(h, reply_m_trust, sizeof(reply_m_trust), reply_p_trust, sizeof(reply_p_trust));
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_VENDOR_NUMBER, -1) == 0x06D6);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_PRODUCT_NUMBER, -1) == 0x29BC);
+    H_Destroy(h);
+
+    /* A pair the table lacks goes along as the device gave it, and B's end
+       is the device's own */
+    h = H_Create(&SDL_SerialIForceModule);
+    H_Start(h);
+    m_length = Frame(m, 0xFF, (const uint8_t *)"\x4D\x34\x12", 3);
+    p_length = Frame(p, 0xFF, (const uint8_t *)"\x50\x78\x56", 3);
+    b_length = Frame(b, 0xFF, (const uint8_t *)"\x42\x00\x04", 3);
+    H_Feed(h, reply_o, sizeof(reply_o));
+    H_Feed(h, m, m_length);
+    H_Feed(h, p, p_length);
+    H_Feed(h, b, b_length);
+    H_Feed(h, reply_n, sizeof(reply_n));
+    H_Feed(h, reply_c, sizeof(reply_c));
+    H_Feed(h, reply_e, sizeof(reply_e));
+    H_Feed(h, reply_o, sizeof(reply_o));
+    H_Feed(h, reply_v, sizeof(reply_v));
+    CHECK(h->presence[0] == 1);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_VENDOR_NUMBER, -1) == 0x1234);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_PRODUCT_NUMBER, -1) == 0x5678);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_MEMORY_NUMBER, -1) == 0x0400);
+    H_Destroy(h);
+
+    /* B unanswered: the memory end Linux assumes */
+    h = H_Create(&SDL_SerialIForceModule);
+    H_Start(h);
+    H_Feed(h, reply_o, sizeof(reply_o));
+    H_Feed(h, reply_m_boeder, sizeof(reply_m_boeder));
+    H_Feed(h, reply_p_boeder, sizeof(reply_p_boeder));
+    H_Advance(h, 1000);
+    H_Feed(h, reply_n, sizeof(reply_n));
+    H_Feed(h, reply_c, sizeof(reply_c));
+    H_Feed(h, reply_e, sizeof(reply_e));
+    H_Feed(h, reply_o, sizeof(reply_o));
+    H_Feed(h, reply_v, sizeof(reply_v));
+    CHECK(h->presence[0] == 1);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_EFFECTS_NUMBER, -1) == 10);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_MEMORY_NUMBER, -1) == SDL_IFORCE_MEMORY_DEFAULT);
+    H_Destroy(h);
+
+    /* N unanswered: no effect count and no memory end, so no haptic side */
+    h = H_Create(&SDL_SerialIForceModule);
+    H_Start(h);
+    H_Feed(h, reply_o, sizeof(reply_o));
+    H_Feed(h, reply_m_boeder, sizeof(reply_m_boeder));
+    H_Feed(h, reply_p_boeder, sizeof(reply_p_boeder));
+    H_Feed(h, reply_b, sizeof(reply_b));
+    CHECK(h->presence[0] == 0);
+    H_Advance(h, 1000);
+    H_Feed(h, reply_c, sizeof(reply_c));
+    H_Feed(h, reply_e, sizeof(reply_e));
+    H_Feed(h, reply_o, sizeof(reply_o));
+    H_Feed(h, reply_v, sizeof(reply_v));
+    CHECK(h->presence[0] == 1 && strcmp(h->identity[0].name, "Boeder Force Feedback Wheel") == 0);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_VENDOR_NUMBER, -1) == 0x05EF);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_EFFECTS_NUMBER, -1) == -1);
+    CHECK(Property(&h->identity[0], SDL_IFORCE_PROP_MEMORY_NUMBER, -1) == -1);
+    H_Destroy(h);
+}
+
 int main(void)
 {
     TestQueries();
@@ -492,5 +587,6 @@ int main(void)
     TestChecksum();
     TestOutput();
     TestPortLoss();
+    TestProperties();
     return H_Finish();
 }

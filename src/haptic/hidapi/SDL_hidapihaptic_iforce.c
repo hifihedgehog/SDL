@@ -31,9 +31,12 @@
 
 /* I-Force force feedback, hifihedgehog/SDL#33 Part 8. The I-Force HIDAPI
  * joystick driver writes each command this builds to the interrupt OUT
- * endpoint, and its joystick properties carry the effect count and memory
- * end the device's N and B replies gave, so a device without them has no
- * haptic side. Opening sends Linux's start, the centering spring off and
+ * endpoint, and the serial driver's I-Force module writes it in an RS-232
+ * frame (hifihedgehog/SDL#35). Both joysticks' properties carry the effect
+ * count and memory end the device's N and B replies gave, so a device
+ * without them has no haptic side. A serial joystick's own IDs are 0, and
+ * its properties also carry the IDs of the M and P replies, which pick the
+ * model. Opening sends Linux's start, the centering spring off and
  * force feedback on, and closing stops everything. Effects take the units
  * SDL's Linux haptic backend converts to, and the encoding follows Linux's
  * iforce-ff.c. A parameter block is written at most every 20 ms, the
@@ -91,11 +94,28 @@ static bool IForceHaptic_SendAll(SDL_HIDAPI_IForceHaptic *ctx, const SDL_IForceC
     return result;
 }
 
+/* A serial device's model comes from its M and P replies, as the serial
+   module picks it, with Linux's layout for a device the table lacks: Linux
+   gives such a device force feedback when N reports effects. A USB device's
+   model comes from its IDs. */
+static const SDL_IForceModel *IForceHaptic_FindModel(SDL_Joystick *joystick)
+{
+    const SDL_PropertiesID props = SDL_GetJoystickProperties(joystick);
+
+    if (SDL_HasProperty(props, SDL_IFORCE_PROP_VENDOR_NUMBER)) {
+        const SDL_IForceModel *model = SDL_IForce_FindModel((Uint16)SDL_GetNumberProperty(props, SDL_IFORCE_PROP_VENDOR_NUMBER, 0),
+                                                            (Uint16)SDL_GetNumberProperty(props, SDL_IFORCE_PROP_PRODUCT_NUMBER, 0), false);
+
+        return model ? model : SDL_IForce_UnknownModel();
+    }
+    return SDL_IForce_FindModel(SDL_GetJoystickVendor(joystick), SDL_GetJoystickProduct(joystick), true);
+}
+
 static bool SDL_HIDAPI_HapticDriverIForce_JoystickSupported(SDL_Joystick *joystick)
 {
     SDL_PropertiesID props;
 
-    if (!SDL_IForce_FindModel(SDL_GetJoystickVendor(joystick), SDL_GetJoystickProduct(joystick), true)) {
+    if (!IForceHaptic_FindModel(joystick)) {
         return false;
     }
     props = SDL_GetJoystickProperties(joystick);
@@ -156,7 +176,7 @@ static void *SDL_HIDAPI_HapticDriverIForce_Open(SDL_Joystick *joystick)
     SDL_IForceCommand spring[2];
     SDL_IForceCommand enable;
     SDL_IForceIdentity identity;
-    const SDL_IForceModel *model = SDL_IForce_FindModel(SDL_GetJoystickVendor(joystick), SDL_GetJoystickProduct(joystick), true);
+    const SDL_IForceModel *model = IForceHaptic_FindModel(joystick);
 
     if (!model || !SDL_HIDAPI_HapticDriverIForce_JoystickSupported(joystick)) {
         SDL_SetError("The device reported no I-Force effects");
@@ -590,6 +610,7 @@ SDL_HIDAPI_HapticDriver SDL_HIDAPI_HapticDriverIForce = {
     SDL_HIDAPI_HapticDriverIForce_Pause,
     SDL_HIDAPI_HapticDriverIForce_Resume,
     SDL_HIDAPI_HapticDriverIForce_StopEffects,
+    true /* The serial I-Force wheels and joysticks, hifihedgehog/SDL#35 */
 };
 
 #endif /* SDL_HAPTIC_HIDAPI_IFORCE */

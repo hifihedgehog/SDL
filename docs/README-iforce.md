@@ -3,8 +3,7 @@
 Immersion's I-Force controller runs the force feedback wheels and joysticks
 below. On current Windows only Saitek's R440 driver of 2007 and two community
 bridges read them. This fork reads their input over USB and RS-232 and drives
-the force feedback of the USB models through SDL's haptic API. It loads no
-firmware. The protocol facts come from Linux's `iforce` driver and protocol
+their force feedback through SDL's haptic API. It loads no firmware. The protocol facts come from Linux's `iforce` driver and protocol
 document and from the two bridges.
 
 ## Devices
@@ -64,10 +63,20 @@ device that reports a USB model's IDs gets that model's layout, and any other
 gets the joystick layout, named `Unknown I-Force Device [vvvv:pppp]`. Input
 that arrives before the answers is dropped, as Linux drops it.
 
-The SDL haptic API serves the USB models only. On a serial device
+The joystick appears once the queries are over, with their results as
+properties: `SDL.joystick.iforce.vendor` and `SDL.joystick.iforce.product`
+from `M` and `P`, and, when `N` reported effects,
+`SDL.joystick.iforce.effects` and `SDL.joystick.iforce.memory` from `N` and
+`B`. Its GUID keeps vendor 0, as for every port the hint names. SDL's haptic
+API serves a serial device whose `N` reported effects, with the model its `M`
+and `P` replies pick. A device that no table lists gets force feedback too,
+as Linux gives it.
+
 `SDL_SendJoystickEffect` takes one whole I-Force command, the command byte and
 exactly its data, and the driver frames it. Any other bytes fail the call.
-Commands go out in the order sent, and the call fails while 16 wait.
+Commands go out in the order sent, and the call fails while 16 wait. A burst
+beyond 16, such as six effects created in a row, can fail the call that finds
+the queue full, and the haptic driver then undoes that update.
 
 ## Controls
 
@@ -106,7 +115,10 @@ mapping.
 Opening the haptic device sends `40 03 00` and `40 04 01`, which turn the
 centering spring off, then `42 04`, which enables force feedback. Closing it
 sends `42 01`, which stops every effect. A wheel used for input alone keeps
-the centering it powers up with.
+the centering it powers up with. The commands are the same over USB and
+RS-232, where each goes out in a frame. `SDL_Quit` closes the joysticks
+before the haptic devices, so a haptic device still open at `SDL_Quit` sends
+no `42 01`. Close it first.
 
 - Effects: constant, sine, square, triangle, sawtooth up and down, spring and
   damper, with gain and autocenter. The device's `N` reply gives the effect
@@ -161,4 +173,7 @@ against the packets and commands, and `test/serial-joystick` runs
 `testserialiforce` against the framing and the query sequence on a scripted
 port. `test/libusb-backend` runs `testiforcedriver`: the USB joystick driver
 against a fake libusb, and the haptic driver against a joystick that records
-its commands. All three run in normal and AddressSanitizer builds.
+its commands. `test/serial-driver` runs `testserialdriver`: the serial driver
+in a static SDL against scripted COM ports, with SDL's haptic API on a serial
+wheel, whose frames it compares with the commands the haptic driver sends a
+USB device. All four run in normal and AddressSanitizer builds.

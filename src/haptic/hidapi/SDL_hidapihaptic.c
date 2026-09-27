@@ -77,6 +77,25 @@ bool SDL_HIDAPI_HapticIsHidapi(SDL_Haptic *haptic)
 }
 
 
+// PadForge fork: a joystick of the serial driver (hifihedgehog/SDL#35)
+static bool SDL_HIDAPI_HapticIsSerialJoystick(SDL_Joystick *joystick)
+{
+#ifdef SDL_JOYSTICK_SERIAL
+    return joystick->driver == &SDL_SERIAL_JoystickDriver;
+#else
+    (void)joystick;
+    return false;
+#endif
+}
+
+// Every driver serves the HIDAPI joysticks, and a driver that declares it
+// also serves the serial driver's
+static bool SDL_HIDAPI_HapticDriverServes(const SDL_HIDAPI_HapticDriver *driver, SDL_Joystick *joystick)
+{
+    return joystick->driver == &SDL_HIDAPI_JoystickDriver ||
+           (driver->serial && SDL_HIDAPI_HapticIsSerialJoystick(joystick));
+}
+
 bool SDL_HIDAPI_JoystickIsHaptic(SDL_Joystick *joystick)
 {
     const int numdrivers = SDL_arraysize(drivers) - 1;
@@ -84,12 +103,8 @@ bool SDL_HIDAPI_JoystickIsHaptic(SDL_Joystick *joystick)
 
     SDL_AssertJoysticksLocked();
 
-    if (joystick->driver != &SDL_HIDAPI_JoystickDriver) {
-        return false;
-    }
-
     for (i = 0; i < numdrivers; ++i) {
-        if (drivers[i]->JoystickSupported(joystick)) {
+        if (SDL_HIDAPI_HapticDriverServes(drivers[i], joystick) && drivers[i]->JoystickSupported(joystick)) {
             return true;
         }
     }
@@ -103,12 +118,12 @@ bool SDL_HIDAPI_HapticOpenFromJoystick(SDL_Haptic *haptic, SDL_Joystick *joystic
 
     SDL_AssertJoysticksLocked();
 
-    if (joystick->driver != &SDL_HIDAPI_JoystickDriver) {
+    if (joystick->driver != &SDL_HIDAPI_JoystickDriver && !SDL_HIDAPI_HapticIsSerialJoystick(joystick)) {
         return SDL_SetError("Cannot open hidapi haptic from non hidapi joystick");
     }
 
     for (i = 0; i < numdrivers; ++i) {
-        if (drivers[i]->JoystickSupported(joystick)) {
+        if (SDL_HIDAPI_HapticDriverServes(drivers[i], joystick) && drivers[i]->JoystickSupported(joystick)) {
             SDL_HIDAPI_HapticDevice *device;
             haptic_list_node *list_node;
             // the driver is responsible for calling SDL_SetError
@@ -190,7 +205,7 @@ bool SDL_HIDAPI_JoystickSameHaptic(SDL_Haptic *haptic, SDL_Joystick *joystick)
     SDL_HIDAPI_HapticDevice *device;
 
     SDL_AssertJoysticksLocked();
-    if (joystick->driver != &SDL_HIDAPI_JoystickDriver) {
+    if (joystick->driver != &SDL_HIDAPI_JoystickDriver && !SDL_HIDAPI_HapticIsSerialJoystick(joystick)) {
         return false;
     }
 

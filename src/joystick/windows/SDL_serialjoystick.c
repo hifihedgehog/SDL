@@ -62,6 +62,64 @@
 #include "../serial/SDL_serial_zhenhua_proto.h"
 #include "../dji/SDL_dji_remote_proto.h"
 
+/* Every call through which the driver reaches a COM port, the
+   configuration manager, the registry or a library goes through these
+   names. test/testserialdriver.c defines each name before it includes
+   this file, so the driver runs against a scripted port there, as the
+   iCade driver's test runs it against a fake system. Events and waits
+   stay the system's. */
+#ifndef SERIAL_CancelIo
+#define SERIAL_CancelIo CancelIo
+#endif
+#ifndef SERIAL_CloseHandle
+#define SERIAL_CloseHandle CloseHandle
+#endif
+#ifndef SERIAL_CreateFileW
+#define SERIAL_CreateFileW CreateFileW
+#endif
+#ifndef SERIAL_EscapeCommFunction
+#define SERIAL_EscapeCommFunction EscapeCommFunction
+#endif
+#ifndef SERIAL_FlushFileBuffers
+#define SERIAL_FlushFileBuffers FlushFileBuffers
+#endif
+#ifndef SERIAL_FreeLibrary
+#define SERIAL_FreeLibrary FreeLibrary
+#endif
+#ifndef SERIAL_GetCommState
+#define SERIAL_GetCommState GetCommState
+#endif
+#ifndef SERIAL_GetOverlappedResult
+#define SERIAL_GetOverlappedResult GetOverlappedResult
+#endif
+#ifndef SERIAL_GetProcAddress
+#define SERIAL_GetProcAddress GetProcAddress
+#endif
+#ifndef SERIAL_LoadLibraryW
+#define SERIAL_LoadLibraryW LoadLibraryW
+#endif
+#ifndef SERIAL_PurgeComm
+#define SERIAL_PurgeComm PurgeComm
+#endif
+#ifndef SERIAL_ReadFile
+#define SERIAL_ReadFile ReadFile
+#endif
+#ifndef SERIAL_RegCloseKey
+#define SERIAL_RegCloseKey RegCloseKey
+#endif
+#ifndef SERIAL_RegQueryValueExW
+#define SERIAL_RegQueryValueExW RegQueryValueExW
+#endif
+#ifndef SERIAL_SetCommState
+#define SERIAL_SetCommState SetCommState
+#endif
+#ifndef SERIAL_SetCommTimeouts
+#define SERIAL_SetCommTimeouts SetCommTimeouts
+#endif
+#ifndef SERIAL_WriteFile
+#define SERIAL_WriteFile WriteFile
+#endif
+
 /* The pure engine carries the Windows values */
 SDL_COMPILE_TIME_ASSERT(serial_noparity, NOPARITY == SDL_SERIAL_NOPARITY);
 SDL_COMPILE_TIME_ASSERT(serial_oddparity, ODDPARITY == SDL_SERIAL_ODDPARITY);
@@ -400,17 +458,17 @@ static void SERIAL_LoadConfigManager(void)
     if (serial_cfgmgr32) {
         return;
     }
-    serial_cfgmgr32 = LoadLibraryW(L"cfgmgr32.dll");
+    serial_cfgmgr32 = SERIAL_LoadLibraryW(L"cfgmgr32.dll");
     if (!serial_cfgmgr32) {
         return;
     }
-    serial_list_size = (SERIAL_CM_Get_Device_Interface_List_SizeW)GetProcAddress(serial_cfgmgr32, "CM_Get_Device_Interface_List_SizeW");
-    serial_list = (SERIAL_CM_Get_Device_Interface_ListW)GetProcAddress(serial_cfgmgr32, "CM_Get_Device_Interface_ListW");
-    serial_interface_property = (SERIAL_CM_Get_Device_Interface_PropertyW)GetProcAddress(serial_cfgmgr32, "CM_Get_Device_Interface_PropertyW");
-    serial_locate_devnode = (SERIAL_CM_Locate_DevNodeW)GetProcAddress(serial_cfgmgr32, "CM_Locate_DevNodeW");
-    serial_open_devnode_key = (SERIAL_CM_Open_DevNode_Key)GetProcAddress(serial_cfgmgr32, "CM_Open_DevNode_Key");
-    serial_register_notification = (SERIAL_CM_Register_Notification)GetProcAddress(serial_cfgmgr32, "CM_Register_Notification");
-    serial_unregister_notification = (SERIAL_CM_Unregister_Notification)GetProcAddress(serial_cfgmgr32, "CM_Unregister_Notification");
+    serial_list_size = (SERIAL_CM_Get_Device_Interface_List_SizeW)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Get_Device_Interface_List_SizeW");
+    serial_list = (SERIAL_CM_Get_Device_Interface_ListW)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Get_Device_Interface_ListW");
+    serial_interface_property = (SERIAL_CM_Get_Device_Interface_PropertyW)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Get_Device_Interface_PropertyW");
+    serial_locate_devnode = (SERIAL_CM_Locate_DevNodeW)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Locate_DevNodeW");
+    serial_open_devnode_key = (SERIAL_CM_Open_DevNode_Key)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Open_DevNode_Key");
+    serial_register_notification = (SERIAL_CM_Register_Notification)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Register_Notification");
+    serial_unregister_notification = (SERIAL_CM_Unregister_Notification)SERIAL_GetProcAddress(serial_cfgmgr32, "CM_Unregister_Notification");
     if (serial_register_notification && serial_unregister_notification) {
         SDL_zero(filter);
         filter.cbSize = sizeof(filter);
@@ -429,7 +487,7 @@ static void SERIAL_UnloadConfigManager(void)
     }
     serial_notification = NULL;
     if (serial_cfgmgr32) {
-        FreeLibrary(serial_cfgmgr32);
+        SERIAL_FreeLibrary(serial_cfgmgr32);
         serial_cfgmgr32 = NULL;
     }
     serial_list_size = NULL;
@@ -538,12 +596,12 @@ static bool SERIAL_PortName(const char *instance_id, unsigned int *number)
     }
     SDL_free(wide);
     SDL_zeroa(name);
-    if (RegQueryValueExW(key, L"PortName", NULL, &type, (LPBYTE)name, &size) == ERROR_SUCCESS && type == REG_SZ) {
+    if (SERIAL_RegQueryValueExW(key, L"PortName", NULL, &type, (LPBYTE)name, &size) == ERROR_SUCCESS && type == REG_SZ) {
         utf8 = WIN_StringToUTF8W(name);
         result = utf8 && SDL_Serial_IsComKey(utf8, number);
         SDL_free(utf8);
     }
-    RegCloseKey(key);
+    SERIAL_RegCloseKey(key);
     return result;
 }
 
@@ -571,7 +629,7 @@ static bool SERIAL_Open(void *userdata)
     }
     /* Share mode 0, OPEN_EXISTING and no template, as a communications
      * resource requires */
-    port->handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    port->handle = SERIAL_CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     SDL_free(path);
     if (port->handle == INVALID_HANDLE_VALUE) {
         SERIAL_LogError(port, "CreateFile", GetLastError());
@@ -595,7 +653,7 @@ static bool SERIAL_SetLine(void *userdata, const SDL_SerialLineConfig *config)
 
     SDL_zero(dcb);
     dcb.DCBlength = sizeof(dcb);
-    if (!GetCommState(port->handle, &dcb)) {
+    if (!SERIAL_GetCommState(port->handle, &dcb)) {
         SERIAL_LogError(port, "GetCommState", GetLastError());
         return false;
     }
@@ -616,7 +674,7 @@ static bool SERIAL_SetLine(void *userdata, const SDL_SerialLineConfig *config)
     dcb.fNull = config->fNull;
     dcb.fRtsControl = config->fRtsControl;
     dcb.fAbortOnError = config->fAbortOnError;
-    if (!SetCommState(port->handle, &dcb)) {
+    if (!SERIAL_SetCommState(port->handle, &dcb)) {
         SERIAL_LogError(port, "SetCommState", GetLastError());
         return false;
     }
@@ -634,7 +692,7 @@ static bool SERIAL_SetTimeouts(void *userdata, const SDL_SerialTimeouts *timeout
     commtimeouts.ReadTotalTimeoutConstant = timeouts->ReadTotalTimeoutConstant;
     commtimeouts.WriteTotalTimeoutMultiplier = timeouts->WriteTotalTimeoutMultiplier;
     commtimeouts.WriteTotalTimeoutConstant = timeouts->WriteTotalTimeoutConstant;
-    if (!SetCommTimeouts(port->handle, &commtimeouts)) {
+    if (!SERIAL_SetCommTimeouts(port->handle, &commtimeouts)) {
         SERIAL_LogError(port, "SetCommTimeouts", GetLastError());
         return false;
     }
@@ -645,7 +703,7 @@ static bool SERIAL_Purge(void *userdata, uint32_t flags)
 {
     SERIAL_Port *port = (SERIAL_Port *)userdata;
 
-    if (!PurgeComm(port->handle, flags)) {
+    if (!SERIAL_PurgeComm(port->handle, flags)) {
         SERIAL_LogError(port, "PurgeComm", GetLastError());
         return false;
     }
@@ -656,7 +714,7 @@ static bool SERIAL_Escape(void *userdata, uint32_t function)
 {
     SERIAL_Port *port = (SERIAL_Port *)userdata;
 
-    if (!EscapeCommFunction(port->handle, function)) {
+    if (!SERIAL_EscapeCommFunction(port->handle, function)) {
         SERIAL_LogError(port, "EscapeCommFunction", GetLastError());
         return false;
     }
@@ -676,7 +734,7 @@ static SDL_SerialIO SERIAL_Write(void *userdata, const uint8_t *data, size_t len
     SDL_zero(port->write_overlapped);
     port->write_overlapped.hEvent = port->write_event;
     ResetEvent(port->write_event);
-    if (WriteFile(port->handle, port->write_buffer, port->write_length, &written, &port->write_overlapped)) {
+    if (SERIAL_WriteFile(port->handle, port->write_buffer, port->write_length, &written, &port->write_overlapped)) {
         /* Done at once: the completion goes through the same path */
         port->write_pending = true;
         SetEvent(port->write_event);
@@ -695,7 +753,7 @@ static bool SERIAL_Drain(void *userdata)
     SERIAL_Port *port = (SERIAL_Port *)userdata;
 
     /* On a communications handle this returns once the written bytes are sent */
-    if (!FlushFileBuffers(port->handle)) {
+    if (!SERIAL_FlushFileBuffers(port->handle)) {
         SERIAL_LogError(port, "FlushFileBuffers", GetLastError());
         return false;
     }
@@ -714,17 +772,17 @@ static void SERIAL_Close(void *userdata)
     if (serial_cancel_io_ex) {
         serial_cancel_io_ex(port->handle, NULL);
     } else {
-        CancelIo(port->handle);
+        SERIAL_CancelIo(port->handle);
     }
     if (port->read_pending) {
-        GetOverlappedResult(port->handle, &port->read_overlapped, &transferred, TRUE);
+        SERIAL_GetOverlappedResult(port->handle, &port->read_overlapped, &transferred, TRUE);
         port->read_pending = false;
     }
     if (port->write_pending) {
-        GetOverlappedResult(port->handle, &port->write_overlapped, &transferred, TRUE);
+        SERIAL_GetOverlappedResult(port->handle, &port->write_overlapped, &transferred, TRUE);
         port->write_pending = false;
     }
-    CloseHandle(port->handle);
+    SERIAL_CloseHandle(port->handle);
     port->handle = INVALID_HANDLE_VALUE;
     /* Bytes read and not yet fed belong to the closed port */
     port->gathered_length = 0;
@@ -823,7 +881,7 @@ static void SERIAL_ReadMore(SERIAL_Port *port)
         SDL_zero(port->read_overlapped);
         port->read_overlapped.hEvent = port->read_event;
         ResetEvent(port->read_event);
-        if (ReadFile(port->handle, port->read_buffer, sizeof(port->read_buffer), &transferred, &port->read_overlapped)) {
+        if (SERIAL_ReadFile(port->handle, port->read_buffer, sizeof(port->read_buffer), &transferred, &port->read_overlapped)) {
             if (transferred == 0) {
                 port->read_idle = true;
                 return;
@@ -848,7 +906,7 @@ static void SERIAL_ReadDone(SERIAL_Port *port)
 {
     DWORD transferred = 0;
 
-    if (!GetOverlappedResult(port->handle, &port->read_overlapped, &transferred, FALSE)) {
+    if (!SERIAL_GetOverlappedResult(port->handle, &port->read_overlapped, &transferred, FALSE)) {
         const DWORD error = GetLastError();
 
         if (error == ERROR_IO_INCOMPLETE) {
@@ -871,7 +929,7 @@ static void SERIAL_WriteDone(SERIAL_Port *port)
 {
     DWORD transferred = 0;
 
-    if (!GetOverlappedResult(port->handle, &port->write_overlapped, &transferred, FALSE)) {
+    if (!SERIAL_GetOverlappedResult(port->handle, &port->write_overlapped, &transferred, FALSE)) {
         const DWORD error = GetLastError();
 
         if (error == ERROR_IO_INCOMPLETE) {
@@ -1008,19 +1066,19 @@ static int SDLCALL SERIAL_PortThread(void *data)
 static void SERIAL_FreePort(SERIAL_Port *port)
 {
     if (port->stop_event) {
-        CloseHandle(port->stop_event);
+        SERIAL_CloseHandle(port->stop_event);
     }
     if (port->read_event) {
-        CloseHandle(port->read_event);
+        SERIAL_CloseHandle(port->read_event);
     }
     if (port->write_event) {
-        CloseHandle(port->write_event);
+        SERIAL_CloseHandle(port->write_event);
     }
     if (port->output_event) {
-        CloseHandle(port->output_event);
+        SERIAL_CloseHandle(port->output_event);
     }
     if (port->rescan_event) {
-        CloseHandle(port->rescan_event);
+        SERIAL_CloseHandle(port->rescan_event);
     }
     if (port->mutex) {
         SDL_DestroyMutex(port->mutex);
@@ -1500,7 +1558,7 @@ static bool SERIAL_JoystickInit(void)
     if (!serial_lock) {
         return false;
     }
-    serial_cancel_io_ex = (SERIAL_CancelIoEx)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "CancelIoEx");
+    serial_cancel_io_ex = (SERIAL_CancelIoEx)SERIAL_GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "CancelIoEx");
     SDL_SetAtomicInt(&serial_rescan, 1);
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_SERIAL_AUTO, SERIAL_AutoHintChanged, NULL);
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_KONAMI_ACIO, SERIAL_ACIOHintChanged, NULL);
@@ -1675,7 +1733,8 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
     SERIAL_Port *port;
     SERIAL_Sub *s;
     struct joystick_hwdata *hwdata;
-    int sub;
+    SDL_PropertiesID props;
+    int sub, i;
 
     if (!SERIAL_GetDevice(device_index, &port, &sub)) {
         return SDL_SetError("Serial joystick index out of range");
@@ -1694,8 +1753,18 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
     joystick->nhats = s->joystick_identity.nhats;
     joystick->nballs = s->joystick_identity.nballs;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRED;
+    props = SDL_GetJoystickProperties(joystick);
     if (port->module->rumble) {
-        SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+        SDL_SetBooleanProperty(props, SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+    }
+    /* What the module learned about the device, such as the I-Force query
+       results the I-Force haptic driver reads */
+    for (i = 0; i < SDL_SERIAL_MAX_PROPERTIES; ++i) {
+        const SDL_SerialProperty *property = &s->joystick_identity.properties[i];
+
+        if (property->name) {
+            SDL_SetNumberProperty(props, property->name, property->value);
+        }
     }
 
     /* The state so far, sent by the first update. Queued snapshots up to it

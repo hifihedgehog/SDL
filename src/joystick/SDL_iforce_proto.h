@@ -72,10 +72,15 @@
 /* A USB query is a vendor IN control request to the interface */
 #define SDL_IFORCE_QUERY_REQUEST_TYPE 0xC1
 
-/* Joystick properties the HIDAPI driver sets once N and B are known, and
- * the haptic driver reads: the effects from N, and B's memory end */
+/* Joystick properties the haptic driver reads: the effects from N and B's
+ * memory end, which the HIDAPI driver sets once N and B are known and the
+ * serial module publishes with its device, both only when N reported
+ * effects. A serial device also carries the IDs its M and P answers gave,
+ * since the joystick of a port the serial hint names has IDs 0. */
 #define SDL_IFORCE_PROP_EFFECTS_NUMBER "SDL.joystick.iforce.effects"
 #define SDL_IFORCE_PROP_MEMORY_NUMBER  "SDL.joystick.iforce.memory"
+#define SDL_IFORCE_PROP_VENDOR_NUMBER  "SDL.joystick.iforce.vendor"
+#define SDL_IFORCE_PROP_PRODUCT_NUMBER "SDL.joystick.iforce.product"
 
 /* Hat bits, equal to SDL_HAT_UP, SDL_HAT_RIGHT, SDL_HAT_DOWN and SDL_HAT_LEFT */
 #define SDL_IFORCE_HAT_UP    0x01
