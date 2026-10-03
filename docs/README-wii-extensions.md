@@ -56,3 +56,19 @@ binds the stick buttons, to its faces.
 
 None of these runs behind an active Motion Plus. The driver leaves the Motion
 Plus inactive, so no gyro is reported with them.
+
+## Sensors and the IR camera
+
+The remote alone, with a Nunchuk and with a Classic Controller registers the
+remote's accelerometer as `SDL_SENSOR_ACCEL`, and the gyro of a Motion Plus,
+built into the Wii Remote Plus, as `SDL_SENSOR_GYRO`. The Nunchuk adds its own
+accelerometer as `SDL_SENSOR_ACCEL_L`. Enabling the first of them powers the
+IR camera, whose first two dots are axes 6 to 9, the X and Y of each, -1 for
+a dot the camera does not see. Disabling the last one turns the camera off.
+
+In these configurations, enabling a sensor also activates a Motion Plus, in
+the pass-through mode of an attached Nunchuk or Classic Controller. Its
+reports then alternate with the extension's, the Nunchuk's accelerometer
+values lose their lowest bit, and the Classic Controller's left stick loses
+its lowest bit. The Wii U Pro Controller, the Balance Board, the extensions
+above and an extension SDL does not recognize power no camera.

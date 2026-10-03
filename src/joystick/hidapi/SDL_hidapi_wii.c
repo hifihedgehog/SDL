@@ -1183,8 +1183,16 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
         ResetButtonPacketType(ctx);
     }
 
+    /* The remote's accelerometer, and the gyro of a Motion Plus, serve every
+       configuration with a camera. Enabling a sensor is the only way the camera
+       powers on, and SDL passes that request only for a registered sensor, so
+       the Classic Controller needs one too (hifihedgehog/SDL#36). With a Motion
+       Plus present, enabling sensors runs the Classic in the M+'s Classic
+       passthrough mode, as Dolphin's real-Wiimote backend does
+       (WiimoteController.cpp:731-737), so its gyro is registered as well. */
     if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None ||
-        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
+        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk ||
+        ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Gamepad) {
         SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 100.0f);
         if (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_Nunchuk) {
             SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL_L, 100.0f);
