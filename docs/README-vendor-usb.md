@@ -79,7 +79,16 @@ a rule is left to the libusb backend, and the platform HID backend skips it.
   without counting the claim, and libusb 1.0.29 sets it up a second time, and
   loses the first, when interface 0 opens afterward.
 - The Switch 2 controllers keep their input on the platform HID backend. Their
-  drivers open WinUSB separately for bulk I/O.
+  drivers open WinUSB separately for bulk I/O, on the libusb device whose
+  serial number string is the one the HID interface reports. A device with
+  the same IDs and another serial is a different unit and is never opened in
+  its place. That covers a HIDMaestro virtual controller, which the HID
+  enumeration hides and libusb still lists. A device whose serial string
+  cannot be read is opened only when no other matches. When the HID interface
+  reports no serial, the driver opens the first device whose serial is not a
+  HIDMaestro virtual controller's. The four Switch 2 controllers whose
+  descriptors are on record all answer the serial string with `00`, so two
+  of one model wired at once cannot be told apart this way.
 - The Prodikeys PC-MIDI's rule names interface 1, the music keys, and serves
   Windows only. Prodikeys64, the one Windows reader, found no piano keys
   through Windows' HID stack and reads the interface over WinUSB: interrupt

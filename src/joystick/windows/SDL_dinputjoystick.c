@@ -360,7 +360,7 @@ void FreeRumbleEffectData(DIEFFECT *effect)
 // filtered by DIDOI_FFACTUATOR, mirroring DXSDK Jun 2010 FFConst sample
 // (Samples/C++/DirectInput/FFConst/ffconst.cpp lines 244-267). Previously
 // CreateRumbleEffectData left rgdwAxes zeroed via SDL_calloc, producing a
-// DIEFFECT with cAxes=2 and rgdwAxes={DIJOFS_X, DIJOFS_X} — two references
+// DIEFFECT with cAxes=2 and rgdwAxes={DIJOFS_X, DIJOFS_X}, two references
 // to the same axis. Tolerant FFB drivers (wheels, Sidewinder FF2, dinput8
 // XInput bridge) accepted it; stricter homebrew drivers (e.g. aitte2's
 // JoyFF.dll for Twin USB 0810:0001) returned no rumble.

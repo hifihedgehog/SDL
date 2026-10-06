@@ -887,7 +887,7 @@ static void RAWINPUT_AddDevice(HANDLE hDevice)
 
     /* PadForge: skip HIDMaestro virtual controllers if/when RawInput is
        enabled. Walks the HID's PnP parent chain looking for HIDMaestro
-       in Hardware IDs. Defense in depth — SDL3's default is RawInput off,
+       in Hardware IDs. Defense in depth: SDL3's default is RawInput off,
        but if it's turned on this keeps the backend clean. */
     {
         extern int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path);
