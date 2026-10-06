@@ -1142,7 +1142,7 @@ static int hid_internal_is_hidmaestro_device(const wchar_t *device_interface, in
 	return is_hm;
 }
 
-/* PadForge/HIDMaestro filter — ANSI HID interface path entry point.
+/* PadForge/HIDMaestro filter. ANSI HID interface path entry point.
 
    Exported for SDL's RawInput and DirectInput joystick backends, which
    receive HID interface paths as char* from GetRawInputDeviceInfoA and
@@ -1156,6 +1156,103 @@ int SDL_HidmaestroIsAnsiHidPathHm(const char *ansi_path)
 	n = MultiByteToWideChar(CP_ACP, 0, ansi_path, -1, wpath, 512);
 	if (n <= 0) return 0;
 	return hid_internal_is_hidmaestro_device(wpath, HM_FILTER_MAX_DEPTH);
+}
+
+/* Whether a HID serial number is the given one, in the form
+   libusb_get_string_descriptor_ascii() gives the same string descriptor:
+   it keeps a UTF-16 code unit below 0x80 and writes '?' for any other. */
+static int hm_serial_is(const wchar_t *hid_serial, const char *serial)
+{
+	for (; *hid_serial && *serial; ++hid_serial, ++serial) {
+		char c = (*hid_serial < 0x80) ? (char)*hid_serial : '?';
+		if (c != *serial) {
+			return 0;
+		}
+	}
+	return (*hid_serial == L'\0' && *serial == '\0');
+}
+
+/* PadForge/HIDMaestro filter. USB serial number entry point.
+
+   Returns 1 if a HIDMaestro virtual controller with this vendor and product
+   ID reports this serial number on a HID interface.
+
+   hid_enumerate() never lists such an interface, so no caller holds a path
+   to ask about. The Switch 2 driver reaches the persona by another route:
+   it walks libusb's device list for the controller's bulk interface, where
+   the persona is one more device with the controller's IDs. The serial
+   number is the one value both routes report (hifihedgehog/SDL#37). */
+int SDL_HidmaestroOwnsUsbSerial(unsigned short vendor_id, unsigned short product_id, const char *serial)
+{
+	GUID interface_class_guid;
+	CONFIGRET cr;
+	wchar_t *device_interface_list = NULL;
+	DWORD len;
+	int owned = 0;
+
+	if (!serial || !serial[0]) {
+		return 0;
+	}
+
+	if (hid_init() < 0) {
+		return 0;
+	}
+
+	HidD_GetHidGuid(&interface_class_guid);
+
+	/* The list is read as hid_enumerate() reads it */
+	do {
+		cr = CM_Get_Device_Interface_List_SizeW(&len, &interface_class_guid, NULL, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+		if (cr != CR_SUCCESS) {
+			break;
+		}
+
+		free(device_interface_list);
+
+		device_interface_list = (wchar_t*)calloc(len, sizeof(wchar_t));
+		if (device_interface_list == NULL) {
+			return 0;
+		}
+		cr = CM_Get_Device_Interface_ListW(&interface_class_guid, NULL, device_interface_list, len, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+	} while (cr == CR_BUFFER_SMALL);
+
+	if (cr != CR_SUCCESS) {
+		free(device_interface_list);
+		return 0;
+	}
+
+	for (wchar_t* device_interface = device_interface_list; *device_interface && !owned; device_interface += wcslen(device_interface) + 1) {
+		HANDLE device_handle;
+		HIDD_ATTRIBUTES attrib;
+
+		if (!hid_internal_is_hidmaestro_device(device_interface, HM_FILTER_MAX_DEPTH)) {
+			continue;
+		}
+
+		device_handle = open_device(device_interface, FALSE);
+		if (device_handle == INVALID_HANDLE_VALUE) {
+			continue;
+		}
+
+		attrib.Size = sizeof(HIDD_ATTRIBUTES);
+		if (HidD_GetAttributes(device_handle, &attrib) &&
+		    attrib.VendorID == vendor_id && attrib.ProductID == product_id) {
+			/* The serial number hidapi would report for the interface */
+			struct hid_device_info *info = hid_internal_get_device_info(device_interface, device_handle);
+			if (info) {
+				if (info->serial_number && hm_serial_is(info->serial_number, serial)) {
+					owned = 1;
+				}
+				hid_free_enumeration(info);
+			}
+		}
+
+		CloseHandle(device_handle);
+	}
+
+	free(device_interface_list);
+
+	return owned;
 }
 
 
