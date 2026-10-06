@@ -371,6 +371,31 @@ static bool FindBulkEndpoints(SDL_LibUSBContext *libusb, libusb_device_handle *h
     return false;
 }
 
+#ifdef SDL_PLATFORM_WIN32
+// In the Windows HID backend, beside the HIDMaestro filter
+extern int SDL_HidmaestroOwnsUsbSerial(unsigned short vendor_id, unsigned short product_id, const char *serial);
+
+// A string descriptor holds at most 126 UTF-16 code units
+#define SWITCH2_SERIAL_SIZE 128
+
+// The serial number the HID interface reports, in the form
+// libusb_get_string_descriptor_ascii() gives the same string descriptor:
+// a code unit below 0x80 is kept and any other becomes '?'.
+static void GetHIDSerial(SDL_HIDAPI_Device *device, char *serial, size_t size)
+{
+    wchar_t hid_serial[SWITCH2_SERIAL_SIZE];
+    size_t i = 0;
+
+    hid_serial[0] = L'\0';
+    if (device->dev && SDL_hid_get_serial_number_string(device->dev, hid_serial, SDL_arraysize(hid_serial)) == 0) {
+        hid_serial[SDL_arraysize(hid_serial) - 1] = L'\0';
+        for (; hid_serial[i] && i + 1 < size; ++i) {
+            serial[i] = (hid_serial[i] < 0x80) ? (char)hid_serial[i] : '?';
+        }
+    }
+    serial[i] = '\0';
+}
+#endif // SDL_PLATFORM_WIN32
 
 static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
 {
@@ -393,13 +418,27 @@ static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
         libusb_device **list = NULL;
         ssize_t count, i;
         libusb_device_handle *fallback = NULL;
+        char hid_serial[SWITCH2_SERIAL_SIZE];
         if (ctx->libusb->init(&ctx->own_ctx) < 0) {
             return SDL_SetError("Couldn't create libusb context");
         }
+        // Every libusb device with this controller's IDs is a candidate: a
+        // second wired controller, or a HIDMaestro virtual one, which the HID
+        // enumeration hides and libusb lists. The HID interface reports the
+        // unit's iSerialNumber string, so that string is read from the open
+        // HID device on every start and compared with each candidate's.
+        // device->serial is that string on the first start only. From then on
+        // it holds the serial from flash, set below, while a real controller's
+        // string is "00" (switch2_controller_research, descriptors.md and
+        // memory_layout.md). Two real controllers of one model both answer
+        // "00", so the string cannot tell those two apart.
+        GetHIDSerial(device, hid_serial, sizeof(hid_serial));
         count = ctx->libusb->get_device_list(ctx->own_ctx, &list);
         for (i = 0; i < count; ++i) {
             struct libusb_device_descriptor desc;
             libusb_device_handle *handle = NULL;
+            char serial[SWITCH2_SERIAL_SIZE];
+            bool has_serial = false;
             if (ctx->libusb->get_device_descriptor(list[i], &desc) != 0 ||
                 desc.idVendor != USB_VENDOR_NINTENDO ||
                 desc.idProduct != device->product_id) {
@@ -408,22 +447,29 @@ static bool HIDAPI_DriverSwitch2_InitUSB(SDL_HIDAPI_Device *device)
             if (ctx->libusb->open(list[i], &handle) != 0) {
                 continue;
             }
-            // Two identical wired controllers share VID+product_id, so opening
-            // the first match would attach both SDL devices to the same physical
-            // unit. The HID backend already recorded this unit's serial in
-            // device->serial (read from the same iSerialNumber string descriptor),
-            // so matching the libusb device's serial pins us to the exact HID
-            // device SDL enumerated.
-            if (device->serial && desc.iSerialNumber) {
-                unsigned char serial[64];
-                int len = ctx->libusb->get_string_descriptor_ascii(handle, desc.iSerialNumber, serial, sizeof(serial));
-                if (len > 0 && SDL_strcmp((const char *)serial, device->serial) == 0) {
+            if (desc.iSerialNumber) {
+                int len = ctx->libusb->get_string_descriptor_ascii(handle, desc.iSerialNumber, (unsigned char *)serial, sizeof(serial));
+                has_serial = (len > 0 && serial[0] != '\0');
+            }
+            if (has_serial && hid_serial[0]) {
+                if (SDL_strcmp(serial, hid_serial) == 0) {
                     ctx->device_handle = handle;
                     break;
                 }
+                // Its serial read back as something else, so it is another
+                // unit and never the fallback (hifihedgehog/SDL#37).
+                ctx->libusb->close(handle);
+                continue;
             }
-            // Not our target (or no serial to compare). Keep the first such device
-            // as a fallback for the single-controller path, close any extras.
+            if (has_serial && SDL_HidmaestroOwnsUsbSerial(desc.idVendor, desc.idProduct, serial)) {
+                // The HID side gave no serial to compare, but this serial is a
+                // HIDMaestro virtual controller's, and the HID enumeration
+                // lists none of those.
+                ctx->libusb->close(handle);
+                continue;
+            }
+            // No serial to compare. Keep the first such device as a fallback for
+            // the single-controller path, close any extras.
             if (!fallback) {
                 fallback = handle;
             } else {
