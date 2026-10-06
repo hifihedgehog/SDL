@@ -40,8 +40,10 @@
       controller's serial is not, and its interface is never opened.
    2. The serial is the one hidapi reports for the interface: when the string
       read gives nothing, the USB device's instance ID supplies it.
-   3. The classification decides, not the serial's look: the same tree
-      without the host controller's token owns nothing.
+   3. The classification decides, not the serial's look: without the host
+      controller's token the persona's serial is not owned and its interface
+      is not opened. The serial of a device marked in its own hardware IDs
+      is still owned.
    4. The serial compares in the form libusb gives a string descriptor, with
       '?' for a code unit outside ASCII.
    5. Every interface the lookup opens is closed. */
