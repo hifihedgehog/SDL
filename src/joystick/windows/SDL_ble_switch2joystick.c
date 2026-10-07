@@ -31,10 +31,11 @@
  * Part 12): the runtime, the awaits, the delegates, the advertisement watcher,
  * the open, the uncached discovery and the writes.
  *
- * Hardware-gated: the BLE report byte offsets and IMU scale are reasoned from
- * the reference reimplementations (ndeadly/Nadeflore/joycon2cpp) and must be
- * confirmed against a physical controller. The build is the only verification
- * available in the SDL-fork environment.
+ * The report offsets come from the reference reimplementations (ndeadly,
+ * Nadeflore, joycon2cpp) and, for a Joy-Con 2 (R), the OEM capture of
+ * PadForge discussion #491. The console path of the Joy-Con 2 clones follows
+ * joycon2android (hifihedgehog/SDL#38). test/ble-driver runs this driver
+ * against a scripted Switch 2 (testblegattswitch2.c).
  */
 
 #include "SDL_internal.h"
@@ -92,7 +93,49 @@ DEFINE_GUID(GUID_Switch2VibeJCL,  0x289326cb, 0xa471, 0x485d, 0xa8, 0xf4, 0x24, 
 DEFINE_GUID(GUID_Switch2VibeJCR,  0xfa19b0fb, 0xcd1f, 0x46a7, 0x84, 0xa1, 0xbb, 0xb0, 0x9e, 0x00, 0xc1, 0x49);
 DEFINE_GUID(GUID_Switch2VibeGC,   0x3f8fb670, 0xab25, 0x45bf, 0xb5, 0x40, 0x38, 0xc7, 0x28, 0x34, 0xd0, 0x64);
 
+// The channel a Switch 2 console opens on a Joy-Con 2 (hifihedgehog/SDL#38):
+// the session service and its start characteristic (handles 0x0001-0x0007),
+// each side's command (0x0016), input (0x000E) and extended response
+// (0x001E), and the report-rate descriptor of the input (0x0010), from the
+// GATT table in switch2_controller_research bluetooth_interface.md and
+// joycon2android ConsoleChannel.kt.
+DEFINE_GUID(GUID_Switch2SessionService,     0x00c5af5d, 0x1964, 0x4e30, 0x8f, 0x51, 0x19, 0x56, 0xf9, 0x6b, 0xd2, 0x80);
+DEFINE_GUID(GUID_Switch2SessionStart,       0x00c5af5d, 0x1964, 0x4e30, 0x8f, 0x51, 0x19, 0x56, 0xf9, 0x6b, 0xd2, 0x82);
+DEFINE_GUID(GUID_Switch2ConsoleCommandJCL,  0xce49a830, 0xdced, 0x48ae, 0x93, 0x1e, 0xc8, 0xcf, 0x88, 0xaa, 0xdb, 0xea);
+DEFINE_GUID(GUID_Switch2ConsoleCommandJCR,  0x65a724b3, 0xf1e7, 0x4a61, 0x80, 0x78, 0xa3, 0x42, 0x37, 0x6b, 0x27, 0xff);
+DEFINE_GUID(GUID_Switch2NativeInputJCL,     0xcc1bbbb5, 0x7354, 0x4d32, 0xa7, 0x16, 0xa8, 0x1c, 0xb2, 0x41, 0xa3, 0x2a);
+DEFINE_GUID(GUID_Switch2NativeInputJCR,     0xd5a9e01e, 0x2ffc, 0x4cca, 0xb2, 0x0c, 0x8b, 0x67, 0x14, 0x2b, 0xf4, 0x42);
+DEFINE_GUID(GUID_Switch2ExtendedResponseJCL, 0x63a3810f, 0xaec7, 0x474b, 0x90, 0x10, 0x3d, 0x52, 0x40, 0x3c, 0xb9, 0x96);
+DEFINE_GUID(GUID_Switch2ExtendedResponseJCR, 0x640ca58e, 0x0e88, 0x410c, 0xa7, 0xf3, 0x42, 0x6f, 0xaf, 0x2b, 0x69, 0x0b);
+DEFINE_GUID(GUID_Switch2ReportRate,         0x679d5510, 0x5a24, 0x4dee, 0x95, 0x57, 0x95, 0xdf, 0x80, 0x48, 0x6e, 0xcb);
+
 #define NINTENDO_BLE_COMPANY_ID 0x0553
+
+// How long a Joy-Con 2 may stay silent on the unified input after its
+// notifications are enabled before the console session starts. A genuine
+// Joy-Con 2 streams within about 100 ms of the write (tarabdaar
+// JoyConBLE.swift altFallbackDelay), and joycon2android waits 1.5 s
+// (JoyconConnection.kt CONSOLE_FALLBACK_MS).
+#define BLE_CONSOLE_FALLBACK_MS 1500
+
+// A command for the console channel follows 17 zero bytes: report ID 00 and
+// 16 bytes of HD rumble (bluetooth_interface.md handle 0x0016, joycon2android
+// ConsoleChannel.COMMAND_PREFIX_LENGTH).
+#define BLE_CONSOLE_PREFIX_LENGTH 17
+
+// How long a command on the console channel waits for its reply, as
+// joycon2android ConsoleTransport waits (REPLY_TIMEOUT_MS). The unified path
+// keeps its 500 ms.
+#define BLE_CONSOLE_REPLY_MS 700
+
+// The longest command frame, header included. The 0x0A/0x08 vibration
+// command is the longest the driver builds, 8 + 20 bytes.
+#define BLE_COMMAND_FRAME_MAX 64
+
+// The value handlers' characteristic index: the unified input, or the
+// side's own input on the console channel
+#define BLE_INPUT_UNIFIED 0
+#define BLE_INPUT_NATIVE  1
 
 // Keep-alive cadence for the continuous-drive rumble pump (about 100 Hz). The
 // reference paces its ESP32 bridge at 7.5 ms; on a direct BLE link 10 ms sustains
@@ -132,6 +175,24 @@ typedef struct BLE_Controller
     EventRegistrationToken status_token;
     void *status_handler;   // ConnectionStatusChanged delegate, leaked like the others
     SDL_AtomicInt link_lost; // set by the status callback (MTA), drained by Detect
+    Uint64 connected_ms;    // when the joystick was added, for the link-loss log
+
+    // The console channel of a Joy-Con 2 clone that never notifies on the
+    // unified input (hifihedgehog/SDL#38). console is written under
+    // report_lock on the connect thread before the joystick is added, and
+    // never changes after.
+    bool console;
+    GattChar *console_command_char;
+    GattChar *native_input_char;
+    GattChar *extended_response_char;
+    EventRegistrationToken native_input_token;
+    EventRegistrationToken extended_response_token;
+    void *native_input_handler;      // leaked like the others
+    void *extended_response_handler; // leaked like the others
+    SDL_AtomicInt unified_reports;   // notifications on the unified input
+    SDL_Semaphore *first_report_sem; // signaled by the first of them
+    bool logged_unified_in_console;  // one-shot debug line, joystick thread
+    SDL_AtomicInt logged_vendor_frame; // one-shot debug line, MTA thread
 
     SDL_Joystick *joystick; // set in Open, NULL otherwise
 
@@ -146,12 +207,19 @@ typedef struct BLE_Controller
     bool logged_first_report; // one-shot debug dump of the first input notification
 
     // Command/response channel: a write to command_char produces a notification
-    // on response_char. The ValueChanged handler stashes it and signals. A flash
-    // read reply is 0x10 header + 0x40 data = 0x50 bytes, so size for that.
+    // on response_char. The ValueChanged handler keeps the reply to the command
+    // the sender waits on, from its header on, and signals. A flash read reply
+    // is 0x10 header + 0x40 data = 0x50 bytes, so size for that.
     SDL_Mutex *response_lock;
     SDL_Semaphore *response_sem;
     Uint8 response[128];
     int response_size;
+    bool expecting;     // a sender waits for the reply to expect_cmd/expect_sub
+    Uint8 expect_cmd;
+    Uint8 expect_sub;
+    bool expect_read;   // the reply must echo a memory read's length and address
+    Uint8 expect_length;
+    Uint32 expect_address;
 
     // Stick calibration (reimplemented from the wired driver; static there).
     Switch2_AxisCal left_x, left_y, right_x, right_y;
@@ -176,14 +244,24 @@ typedef struct BLE_Controller
     int player_index;
 } BLE_Controller;
 
-static void BLE_ParseStickCalibration(Switch2_AxisCal *x, Switch2_AxisCal *y, const Uint8 *data)
+// A 9-byte block of all 0xFF holds no calibration, the Linux v13 rule
+// (switch2_parse_stick_calibration compares against nine 0xFF bytes). Parsed,
+// it would give neutral = max = min = 4095 and pin the stick (hifihedgehog/SDL#38),
+// so the axes keep their zeros and BLE_MapStickAxis maps them linearly.
+static bool BLE_ParseStickCalibration(Switch2_AxisCal *x, Switch2_AxisCal *y, const Uint8 *data)
 {
+    static const Uint8 blank[9] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+    if (SDL_memcmp(data, blank, sizeof(blank)) == 0) {
+        return false;
+    }
     x->neutral = (Uint16)(data[0] | ((data[1] & 0x0F) << 8));
     y->neutral = (Uint16)((data[1] >> 4) | (data[2] << 4));
     x->max = (Uint16)(data[3] | ((data[4] & 0x0F) << 8));
     y->max = (Uint16)((data[4] >> 4) | (data[5] << 4));
     x->min = (Uint16)(data[6] | ((data[7] & 0x0F) << 8));
     y->min = (Uint16)((data[7] >> 4) | (data[8] << 4));
+    return true;
 }
 
 static Sint16 BLE_MapStickAxis(const Switch2_AxisCal *calib, float value, bool invert)
@@ -398,61 +476,119 @@ static BLE_Controller *BLE_GetControllerByAddress(Uint64 address)
 // Input characteristic ValueChanged: copy the raw report into the ring slot.
 // Runs on a WinRT thread-pool (MTA) thread, called by the shared value delegate
 // (SDL_ble_gatt.c) with the whole value. The report keeps its first 64 bytes.
+// characteristic is BLE_INPUT_UNIFIED or BLE_INPUT_NATIVE, and only the stream
+// of the path the connect chose reaches the slot, so a report of the other
+// layout is never decoded. The first unified report wakes the connect thread
+// waiting to choose the path.
 // ---------------------------------------------------------------------------
 static void BLE_OnInputValue(void *userdata, int characteristic, const Uint8 *data, size_t length)
 {
     BLE_Controller *ctrl = (BLE_Controller *)userdata;
-    int size = (int)SDL_min(length, sizeof(ctrl->report));
-    (void)characteristic;
+    int size;
 
     if (!ctrl) {
         return;
     }
-    if (size > 0) {
-        SDL_LockMutex(ctrl->report_lock);
+    size = (int)SDL_min(length, sizeof(ctrl->report));
+    if (size <= 0) {
+        return;
+    }
+    SDL_LockMutex(ctrl->report_lock);
+    if ((characteristic == BLE_INPUT_NATIVE) == ctrl->console) {
         SDL_memcpy(ctrl->report, data, size);
         ctrl->report_size = size;
         ctrl->report_pending = true;
-        SDL_UnlockMutex(ctrl->report_lock);
+    }
+    SDL_UnlockMutex(ctrl->report_lock);
+    if (characteristic == BLE_INPUT_UNIFIED && SDL_AddAtomicInt(&ctrl->unified_reports, 1) == 0 && ctrl->first_report_sem) {
+        SDL_SignalSemaphore(ctrl->first_report_sem);
     }
 }
 
+// Where the reply the sender waits on starts in a notification, or -1. A
+// reply echoes the command at [i], 0x01 at [i+1] and the subcommand at [i+3]
+// (joycon2android ConsoleTransport.replyStart). Replies on the extended
+// response start with a run of zero bytes, the header at 0xF
+// (bluetooth_interface.md handle 0x001E), and those on c765a961 start with
+// it (switch2-controllers controller.py:316 checks [0] and [1]). A memory
+// read's reply also echoes the length at [i+8] and the address at [i+12],
+// which controller.py read_memory checks (:345), so a late reply to an
+// earlier read is not taken for this one. Called under response_lock.
+static int BLE_FindReply(const BLE_Controller *ctrl, const Uint8 *data, int length)
+{
+    int i;
+
+    for (i = 0; i + 8 <= length; ++i) {
+        if (data[i] != ctrl->expect_cmd || data[i + 1] != 0x01 || data[i + 3] != ctrl->expect_sub) {
+            continue;
+        }
+        if (ctrl->expect_read &&
+            (i + 16 > length || data[i + 8] != ctrl->expect_length ||
+             (Uint32)(data[i + 12] | (data[i + 13] << 8) | (data[i + 14] << 16) | ((Uint32)data[i + 15] << 24)) != ctrl->expect_address)) {
+            continue;
+        }
+        return i;
+    }
+    return -1;
+}
+
+// NYXI Hyperion 3 Ultra vendor input on c765a961 (tarabdaar
+// JoyConNYXIReport.swift: a frame of at least 16 bytes that starts
+// EA 01 00 8B 00 78 00 00 0C). Not decoded, only logged.
+static bool BLE_IsVendorFrame(const Uint8 *data, size_t length)
+{
+    static const Uint8 header[] = { 0xEA, 0x01, 0x00, 0x8B, 0x00, 0x78, 0x00, 0x00, 0x0C };
+
+    return length >= 16 && SDL_memcmp(data, header, sizeof(header)) == 0;
+}
+
 // ---------------------------------------------------------------------------
-// Command-response characteristic ValueChanged: stash the reply and signal.
-// Called by the shared value delegate, like BLE_OnInputValue. The reply keeps
-// its first 128 bytes.
+// Command-response ValueChanged, for c765a961 and on the console channel the
+// side's extended response: keep the reply to the command a sender waits on,
+// from its header on, and signal. A notification that holds no such reply,
+// such as a reply that came after its sender stopped waiting or a vendor
+// frame, is not a reply (hifihedgehog/SDL#38). Called by the shared value
+// delegate, like BLE_OnInputValue. The reply keeps its first 128 bytes.
 // ---------------------------------------------------------------------------
 static void BLE_OnResponseValue(void *userdata, int characteristic, const Uint8 *data, size_t length)
 {
     BLE_Controller *ctrl = (BLE_Controller *)userdata;
+    int size = (int)SDL_min(length, (size_t)SDL_MAX_SINT32);
+    bool matched = false;
     (void)characteristic;
 
     if (!ctrl) {
         return;
     }
     SDL_LockMutex(ctrl->response_lock);
-    ctrl->response_size = (int)SDL_min(length, sizeof(ctrl->response));
-    SDL_memcpy(ctrl->response, data, ctrl->response_size);
+    if (ctrl->expecting) {
+        const int start = BLE_FindReply(ctrl, data, size);
+        if (start >= 0) {
+            ctrl->response_size = SDL_min(size - start, (int)sizeof(ctrl->response));
+            SDL_memcpy(ctrl->response, &data[start], ctrl->response_size);
+            ctrl->expecting = false;
+            matched = true;
+        }
+    }
     SDL_UnlockMutex(ctrl->response_lock);
-    if (ctrl->response_size > 0) {
+    if (matched) {
         SDL_SignalSemaphore(ctrl->response_sem);
+    } else if (BLE_IsVendorFrame(data, length) && SDL_CompareAndSwapAtomicInt(&ctrl->logged_vendor_frame, 0, 1)) {
+        BLE_LogBytes("first vendor frame", data, size);
     }
 }
 
-// Send a command and wait (briefly) for the reply on the response characteristic.
-// Frame: [cmd] 0x91 0x01 [subcmd] 0x00 [data_len] 0x00 0x00 [data...]. Returns
-// the number of reply bytes copied, or 0 on timeout.
-static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len, Uint8 *reply, int reply_len)
+// A command frame: [cmd] 0x91 0x01 [subcmd] 0x00 [data_len] 0x00 0x00 [data...]
+// (commands.md "Command Header", 0x01 the Bluetooth transport). Returns its
+// length, or 0 when it would not fit BLE_COMMAND_FRAME_MAX.
+static int BLE_BuildCommand(Uint8 *frame, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len)
 {
-    Uint8 frame[64];
-    int got = 0;
-
-    if (!ctrl->command_char || data_len < 0 || data_len + 8 > (int)sizeof(frame)) {
+    if (data_len < 0 || 8 + data_len > BLE_COMMAND_FRAME_MAX) {
         return 0;
     }
     frame[0] = cmd;
     frame[1] = 0x91;
-    frame[2] = 0x01; // Bluetooth transport
+    frame[2] = 0x01;
     frame[3] = subcmd;
     frame[4] = 0x00;
     frame[5] = (Uint8)data_len;
@@ -461,13 +597,72 @@ static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const 
     if (data_len > 0) {
         SDL_memcpy(&frame[8], data, data_len);
     }
-    while (SDL_TryWaitSemaphore(ctrl->response_sem)) {
-        // drain stale replies
+    return 8 + data_len;
+}
+
+// The one write path for command frames (hifihedgehog/SDL#38). On the
+// unified path the frame goes to 649d4ac9. On the console path it goes to the
+// side's command characteristic behind BLE_CONSOLE_PREFIX_LENGTH zero bytes,
+// as joycon2android ConsoleTransport.send writes it. Both characteristics
+// take only writes without response (bluetooth_interface.md, handles 0x0014
+// and 0x0016), so SDL_BLEGATT_WriteCharacteristic writes them that way
+// whatever prefer_response asks, as joycon2android and tarabdaar do.
+static bool BLE_WriteCommandFrame(BLE_Controller *ctrl, const Uint8 *frame, int length, bool prefer_response)
+{
+    Uint8 prefixed[BLE_CONSOLE_PREFIX_LENGTH + BLE_COMMAND_FRAME_MAX];
+
+    if (length <= 0 || length > BLE_COMMAND_FRAME_MAX) {
+        return false;
     }
-    if (!SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
+    if (ctrl->console) {
+        if (!ctrl->console_command_char) {
+            return false;
+        }
+        SDL_memset(prefixed, 0, BLE_CONSOLE_PREFIX_LENGTH);
+        SDL_memcpy(&prefixed[BLE_CONSOLE_PREFIX_LENGTH], frame, length);
+        return SDL_BLEGATT_WriteCharacteristic(ctrl->console_command_char, prefixed, BLE_CONSOLE_PREFIX_LENGTH + length, prefer_response);
+    }
+    if (!ctrl->command_char) {
+        return false;
+    }
+    return SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, length, prefer_response);
+}
+
+static bool BLE_HasCommandChannel(const BLE_Controller *ctrl)
+{
+    return ctrl->console ? (ctrl->console_command_char != NULL) : (ctrl->command_char != NULL);
+}
+
+// Send a command and wait (briefly) for its reply. The reply is the
+// notification that echoes the command (BLE_FindReply), copied from its
+// header on. read asks the reply to echo a memory read of read_length bytes
+// at read_address. Returns the number of reply bytes copied, or 0 on timeout.
+static int BLE_SendCommandFor(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len, Uint8 *reply, int reply_len,
+                              bool read, Uint8 read_length, Uint32 read_address)
+{
+    Uint8 frame[BLE_COMMAND_FRAME_MAX];
+    const int length = BLE_BuildCommand(frame, cmd, subcmd, data, data_len);
+    int got = 0;
+
+    if (length == 0 || !BLE_HasCommandChannel(ctrl) || !ctrl->response_sem) {
         return 0;
     }
-    if (ctrl->response_sem && SDL_WaitSemaphoreTimeout(ctrl->response_sem, 500)) {
+    // A signal left by a reply that matched after an earlier sender gave up.
+    // Nothing matches between this and the expectation below, since none is
+    // set.
+    while (SDL_TryWaitSemaphore(ctrl->response_sem)) {
+    }
+    SDL_LockMutex(ctrl->response_lock);
+    ctrl->expect_cmd = cmd;
+    ctrl->expect_sub = subcmd;
+    ctrl->expect_read = read;
+    ctrl->expect_length = read_length;
+    ctrl->expect_address = read_address;
+    ctrl->expecting = true;
+    ctrl->response_size = 0;
+    SDL_UnlockMutex(ctrl->response_lock);
+    if (BLE_WriteCommandFrame(ctrl, frame, length, true) &&
+        SDL_WaitSemaphoreTimeout(ctrl->response_sem, ctrl->console ? BLE_CONSOLE_REPLY_MS : 500)) {
         SDL_LockMutex(ctrl->response_lock);
         got = ctrl->response_size;
         if (reply && reply_len > 0) {
@@ -476,19 +671,28 @@ static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const 
         }
         SDL_UnlockMutex(ctrl->response_lock);
     }
+    SDL_LockMutex(ctrl->response_lock);
+    ctrl->expecting = false;
+    SDL_UnlockMutex(ctrl->response_lock);
     return got;
+}
+
+static int BLE_SendCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len, Uint8 *reply, int reply_len)
+{
+    return BLE_SendCommandFor(ctrl, cmd, subcmd, data, data_len, reply, reply_len, false, 0, 0);
 }
 
 // Read controller memory, transcribed from the BLE reference controller.py
 // read_memory (switch2-controllers/controller.py:339-347): command 0x02/0x04
 // with data {length, 0x7e, 0, 0, addr LE}. controller.py strips an 8-byte header
 // in write_command and another 8 in read_memory, so the payload sits at raw reply
-// offset 0x10. Returns the number of payload bytes copied (0 on failure).
+// offset 0x10. The reply taken echoes the length and the address
+// (BLE_FindReply). Returns the number of payload bytes copied (0 on failure).
 static int BLE_ReadMemory(BLE_Controller *ctrl, Uint8 length, Uint32 addr, Uint8 *out, int out_len)
 {
     Uint8 req[8] = { length, 0x7e, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
     Uint8 reply[128];
-    int got = BLE_SendCommand(ctrl, 0x02, 0x04, req, (int)sizeof(req), reply, (int)sizeof(reply));
+    int got = BLE_SendCommandFor(ctrl, 0x02, 0x04, req, (int)sizeof(req), reply, (int)sizeof(reply), true, length, addr);
     int n;
 
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 memory read addr 0x%06x len %d: %d reply bytes", (unsigned)addr, length, got);
@@ -504,46 +708,50 @@ static int BLE_ReadMemory(BLE_Controller *ctrl, Uint8 length, Uint32 addr, Uint8
     return n;
 }
 
-// Read stick calibration, transcribed from controller.py read_calibration_data
-// (switch2-controllers/controller.py:353-368): user slot first (0x1FC042 /
-// 0x1FC062), falling back to factory (0x0130A8 / 0x0130E8) when the first 3 bytes
-// read 0xFFFFFF; parse StickCalibrationData directly from the 9-byte payload. A
-// Joy-Con stores its single-stick calibration in the first slot. The decoders use
-// left_x/left_y for the single Joy-Con stick, so both L and R store there. Best-
-// effort: on failure BLE_MapStickAxis falls back to a linear map.
-static bool BLE_ReadCalibSlot(BLE_Controller *ctrl, Uint32 user_addr, Uint32 factory_addr, Uint8 *out9)
+// A user calibration block: the B2 A1 magic, then the 9-byte stick block
+// (Linux v13 NS2_USER_CALIB_MAGIC 0xa1b2 read little-endian, and the wired
+// driver, SDL_hidapi_switch2.c:614-626). False when the magic is missing or
+// the block is blank.
+static bool BLE_ParseUserCalibration(Switch2_AxisCal *x, Switch2_AxisCal *y, const Uint8 *data, int length)
+{
+    return length >= 0x0b && data[0] == 0xB2 && data[1] == 0xA1 && BLE_ParseStickCalibration(x, y, &data[2]);
+}
+
+// Read one stick's calibration over the command channel: the user block
+// (0x0B bytes at 0x1FC040 or 0x1FC080), else the factory block (0x0130A8 or
+// 0x0130E8), as Linux v13 and the wired driver pick them, a user block
+// replacing the factory one. The addresses are those of Linux
+// (NS2_FLASH_ADDR_*_CALIB) and the wired driver, and replace the 0x1FC042 and
+// 0x1FC062 of controller.py read_calibration_data
+// (switch2-controllers/controller.py:353-368), which tested only the first
+// three bytes of a user block (hifihedgehog/SDL#38). A Joy-Con stores its
+// single-stick calibration in the first slot. The decoders use left_x/left_y
+// for the single Joy-Con stick, so both L and R store there. Best-effort: on
+// failure BLE_MapStickAxis falls back to a linear map.
+static bool BLE_ReadCalibSlot(BLE_Controller *ctrl, Uint32 user_addr, Uint32 factory_addr, Switch2_AxisCal *x, Switch2_AxisCal *y)
 {
     Uint8 cal[16];
-    if (BLE_ReadMemory(ctrl, 0x0b, user_addr, cal, sizeof(cal)) >= 9 &&
-        !(cal[0] == 0xFF && cal[1] == 0xFF && cal[2] == 0xFF)) {
-        SDL_memcpy(out9, cal, 9);
+    int got = BLE_ReadMemory(ctrl, 0x0b, user_addr, cal, sizeof(cal));
+
+    if (BLE_ParseUserCalibration(x, y, cal, got)) {
         return true;
     }
-    if (BLE_ReadMemory(ctrl, 0x0b, factory_addr, cal, sizeof(cal)) >= 9) {
-        SDL_memcpy(out9, cal, 9);
-        return true;
-    }
-    return false;
+    return BLE_ReadMemory(ctrl, 0x0b, factory_addr, cal, sizeof(cal)) >= 9 && BLE_ParseStickCalibration(x, y, cal);
 }
 
 static void BLE_ReadCalibration(BLE_Controller *ctrl)
 {
-    Uint8 slot1[9], slot2[9];
-
-    if (BLE_ReadCalibSlot(ctrl, 0x1FC042, 0x0130A8, slot1)) {
-        BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, slot1);
-    }
+    (void)BLE_ReadCalibSlot(ctrl, 0x1FC040, 0x0130A8, &ctrl->left_x, &ctrl->left_y);
     // Pro/GameCube have a second stick; a Joy-Con uses only the first slot.
     if (ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT &&
-        ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT &&
-        BLE_ReadCalibSlot(ctrl, 0x1FC062, 0x0130E8, slot2)) {
-        BLE_ParseStickCalibration(&ctrl->right_x, &ctrl->right_y, slot2);
+        ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT) {
+        (void)BLE_ReadCalibSlot(ctrl, 0x1FC080, 0x0130E8, &ctrl->right_x, &ctrl->right_y);
     }
     ctrl->calibrated = true;
 }
 
 // Player LED (command 0x09 / subcmd 0x07). The wired UpdateSlotLED
-// (SDL_hidapi_switch2.c:327-337) sends 8 data bytes with the pattern in data[0].
+// (SDL_hidapi_switch2.c:248-265) sends 8 data bytes with the pattern in data[0].
 static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
 {
     static const Uint8 pattern[] = { 0x1, 0x3, 0x7, 0xf, 0x9, 0x5, 0xd, 0x6 };
@@ -566,23 +774,10 @@ static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
 // controller.py _gc_pwm_loop).
 static bool BLE_WriteCommandNoReply(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len)
 {
-    Uint8 frame[64];
+    Uint8 frame[BLE_COMMAND_FRAME_MAX];
+    const int length = BLE_BuildCommand(frame, cmd, subcmd, data, data_len);
 
-    if (!ctrl->command_char || data_len < 0 || data_len + 8 > (int)sizeof(frame)) {
-        return false;
-    }
-    frame[0] = cmd;
-    frame[1] = 0x91;
-    frame[2] = 0x01; // Bluetooth transport
-    frame[3] = subcmd;
-    frame[4] = 0x00;
-    frame[5] = (Uint8)data_len;
-    frame[6] = 0x00;
-    frame[7] = 0x00;
-    if (data_len > 0) {
-        SDL_memcpy(&frame[8], data, data_len);
-    }
-    return SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, false);
+    return length != 0 && BLE_WriteCommandFrame(ctrl, frame, length, false);
 }
 
 // GameCube motor on/off, via command 0x0A subcommand 0x02. Motor on = data byte
@@ -735,6 +930,172 @@ static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void 
     }
 }
 
+// True once the unified input has reported, waiting up to
+// BLE_CONSOLE_FALLBACK_MS. The choice is made once: a genuine pad that missed
+// the wait keeps the console path until it reconnects.
+static bool BLE_AwaitUnifiedReport(BLE_Controller *ctrl)
+{
+    if (!ctrl->input_handler || !ctrl->first_report_sem) {
+        return false;
+    }
+    return SDL_GetAtomicInt(&ctrl->unified_reports) > 0 ||
+           SDL_WaitSemaphoreTimeout(ctrl->first_report_sem, BLE_CONSOLE_FALLBACK_MS);
+}
+
+// The unified path of a Joy-Con 2, once its first report has arrived.
+static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl)
+{
+    // Joy-Con 2 input-mode write (Format 3 / 0x30). windows10-gyro sends this
+    // raw 11-byte buffer to the command characteristic for the Joy-Cons
+    // before it subscribes their input (src/controller.py:2426-2441). Its
+    // comment says that without it the high status byte and the Left's bit 23
+    // leak into the button field as phantom ZL and ZR. Joy-Cons stay on the
+    // unified Report 0x05 layout that BLE_DecodeJoyConLeft/Right read. The
+    // write now follows the first unified report, so a Joy-Con 2 clone never
+    // receives it (hifihedgehog/SDL#38). The GameCube is deliberately
+    // excluded: Format 3 switches it to the native Report 0x0A layout,
+    // buttons at [2:5] and triggers at [12] and [13] (src/controller.py
+    // :1317-1370), which this driver's GameCube decoder does not parse.
+    static const Uint8 set_input_mode[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30 };
+    (void)BLE_WriteCommandFrame(ctrl, set_input_mode, (int)sizeof(set_input_mode), false);
+
+    /* Opt-in side-channel sensors (Joy-Con only, both L and R). Feature
+       flags command 0x0C: subcommand 0x02 (init) then 0x04 (enable), u32 LE
+       payload, mouse = bit 4 (controller.py:55-61/370-373, enabled at :268;
+       the report 0x05 Mouse Data block is "Activated via feature bit 4",
+       hid_reports.md), magnetometer = bit 7 (windows10-gyro
+       controller.py:713's FEATSEL 0x94 = motion | mouse | magnetometer).
+       Both ride one combined init+enable, the reference's own multi-feature
+       pattern, fire-and-forget like the Format-3 write above. */
+    if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE, false)) {
+        ctrl->mouse_enabled = true;
+    }
+    if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER, false)) {
+        ctrl->magnetometer_enabled = true;
+    }
+    if (ctrl->mouse_enabled || ctrl->magnetometer_enabled) {
+        const Uint8 feature_mask[4] = { (Uint8)((ctrl->mouse_enabled ? 0x10 : 0x00) | (ctrl->magnetometer_enabled ? 0x80 : 0x00)), 0x00, 0x00, 0x00 };
+        (void)BLE_WriteCommandNoReply(ctrl, 0x0C, 0x02, feature_mask, (int)sizeof(feature_mask));
+        (void)BLE_WriteCommandNoReply(ctrl, 0x0C, 0x04, feature_mask, (int)sizeof(feature_mask));
+    }
+}
+
+// The console path of a Joy-Con 2 (hifihedgehog/SDL#38). Third-party
+// Joy-Con 2s such as the NYXI Hyperion 3 and Hyperion 3 Ultra copy a Joy-Con 2's
+// identity and GATT table and never notify on the unified input. They stream
+// only on the channel a Switch 2 console opens. This opens that channel as
+// joycon2android ConsoleSession does, tested on a Hyperion 3: the session
+// start, the side's characteristics, the console's command sequence, the
+// report-rate descriptor, then the side's input. The sequence is the
+// console's own (switch2_controller_research bluetooth_interface.md
+// "JoyCon 2") without the pairing commands 0x15 and the two 0x03 commands
+// after them, which carry the host's address, as joycon2android sends it.
+// Pairing would store this host on the controller and unpair it from its
+// owner's console. The stick calibration comes from the console's reads:
+// the factory block at +0x28 in the 0x13080 read, where the wired driver
+// parses it (SDL_hidapi_switch2.c:581-586), and the user block at 0x1FC040.
+// True once the side's input is subscribed.
+static bool BLE_StartConsoleSession(BLE_Controller *ctrl, BleDevice3 *device3, GattService3 *service3)
+{
+    static const Uint8 session_start[] = { 0x01, 0x00 };
+    static const Uint8 report_rate[] = { 0x85, 0x00 };
+    static const Uint8 vibration_sample[] = { 0x03, 0x00, 0x00, 0x00 };
+    static const Uint8 features[] = { 0x37, 0x00, 0x00, 0x00 };
+    static const Uint8 vibration_data[] = {
+        0x01, 0x59, 0x09, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x35,
+        0x00, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    // All four player LEDs while no player is assigned, as joycon2android
+    // starts its session (JoyconConnection.kt LED_ALL_ON). Open sets the slot.
+    static const Uint8 led[8] = { 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const bool left = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT);
+    GattService3 *session_service;
+    bool session_started = false;
+    Uint8 block[0x40];
+    int got;
+
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 no report on the unified input within %d ms: starting the console session",
+                 BLE_CONSOLE_FALLBACK_MS);
+
+    ctrl->console_command_char = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2ConsoleCommandJCL : &GUID_Switch2ConsoleCommandJCR, NULL);
+    ctrl->native_input_char = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2NativeInputJCL : &GUID_Switch2NativeInputJCR, NULL);
+    ctrl->extended_response_char = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2ExtendedResponseJCL : &GUID_Switch2ExtendedResponseJCR, NULL);
+    if (!ctrl->console_command_char || !ctrl->native_input_char) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console channel missing: command=%d input=%d",
+                     ctrl->console_command_char != NULL, ctrl->native_input_char != NULL);
+        return false;
+    }
+
+    // Open the session: 01 00 to 00c5af5d-...-bd282 (handle 0x0005), with
+    // response as tarabdaar writes it (JoyConBLE.swift beginNYXISession)
+    session_service = SDL_BLEGATT_FindService(device3, &GUID_Switch2SessionService, 1, 1, "Switch2 session", NULL);
+    if (session_service) {
+        GattChar *start = SDL_BLEGATT_FindCharacteristic(session_service, &GUID_Switch2SessionStart, NULL);
+        if (start) {
+            session_started = SDL_BLEGATT_WriteCharacteristic(start, session_start, (int)sizeof(session_start), true);
+            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(start);
+        }
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_Release(session_service);
+    }
+
+    // The replies arrive on the side's extended response, or on c765a961,
+    // which is already subscribed
+    if (ctrl->extended_response_char) {
+        ctrl->extended_response_handler = SDL_BLEGATT_AddValueHandler(ctrl->extended_response_char, BLE_OnResponseValue, ctrl, 1,
+                                                                      &ctrl->extended_response_token);
+        if (ctrl->extended_response_handler) {
+            SDL_BLEGATT_EnableNotifications(ctrl->extended_response_char);
+        }
+    }
+
+    // From here every command frame goes to the side's command
+    // characteristic, and only the side's input reaches the report slot
+    SDL_LockMutex(ctrl->report_lock);
+    ctrl->console = true;
+    ctrl->report_pending = false;
+    SDL_UnlockMutex(ctrl->report_lock);
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: start %s, extended response %s",
+                 session_started ? "written" : "not written", ctrl->extended_response_handler ? "subscribed" : "absent");
+
+    BLE_SendCommand(ctrl, 0x07, 0x01, NULL, 0, NULL, 0);
+    (void)BLE_ReadMemory(ctrl, 0x40, 0x13000, block, (int)sizeof(block));
+    BLE_SendCommand(ctrl, 0x10, 0x01, NULL, 0, NULL, 0);
+    BLE_SendCommand(ctrl, 0x16, 0x01, NULL, 0, NULL, 0);
+    BLE_SendCommand(ctrl, 0x0A, 0x02, vibration_sample, (int)sizeof(vibration_sample), NULL, 0);
+    BLE_SendCommand(ctrl, 0x09, 0x07, led, (int)sizeof(led), NULL, 0);
+    BLE_SendCommand(ctrl, 0x0C, 0x02, features, (int)sizeof(features), NULL, 0);
+    SDL_zero(ctrl->left_x);
+    SDL_zero(ctrl->left_y);
+    got = BLE_ReadMemory(ctrl, 0x40, 0x13080, block, (int)sizeof(block));
+    if (got >= 0x28 + 9) {
+        (void)BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, &block[0x28]);
+    }
+    got = BLE_ReadMemory(ctrl, 0x40, 0x1FC040, block, (int)sizeof(block));
+    (void)BLE_ParseUserCalibration(&ctrl->left_x, &ctrl->left_y, block, got);
+    (void)BLE_ReadMemory(ctrl, 0x10, 0x13040, block, (int)sizeof(block));
+    (void)BLE_ReadMemory(ctrl, 0x18, 0x13100, block, (int)sizeof(block));
+    BLE_SendCommand(ctrl, 0x11, 0x03, NULL, 0, NULL, 0);
+    (void)BLE_ReadMemory(ctrl, 0x20, 0x13060, block, (int)sizeof(block));
+    BLE_SendCommand(ctrl, 0x0A, 0x08, vibration_data, (int)sizeof(vibration_data), NULL, 0);
+    BLE_SendCommand(ctrl, 0x11, 0x01, NULL, 0, NULL, 0);
+    BLE_SendCommand(ctrl, 0x0C, 0x04, features, (int)sizeof(features), NULL, 0);
+    ctrl->calibrated = true;
+
+    // The report rate, then the side's input (handles 0x0010 and 0x000F),
+    // the console's last two writes
+    if (!SDL_BLEGATT_WriteDescriptorValue(ctrl->native_input_char, &GUID_Switch2ReportRate, report_rate, (int)sizeof(report_rate))) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: report-rate descriptor not written");
+    }
+    ctrl->native_input_handler = SDL_BLEGATT_AddValueHandler(ctrl->native_input_char, BLE_OnInputValue, ctrl, BLE_INPUT_NATIVE,
+                                                             &ctrl->native_input_token);
+    if (!ctrl->native_input_handler || !SDL_BLEGATT_EnableNotifications(ctrl->native_input_char)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: the %s input could not be subscribed", left ? "left" : "right");
+        return false;
+    }
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: %s input subscribed", left ? "left" : "right");
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Connect + GATT discovery + subscribe (called from the connect thread). The
 // open, the uncached discovery and the lookups are the shared transport's
@@ -812,6 +1173,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
 
     ctrl->response_lock = SDL_CreateMutex();
     ctrl->response_sem = SDL_CreateSemaphore(0);
+    ctrl->first_report_sem = SDL_CreateSemaphore(0);
     ctrl->player_index = -1;
 
     ctrl->input_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Input, NULL);
@@ -847,57 +1209,24 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     // Read stick calibration over the command channel (best-effort).
     BLE_ReadCalibration(ctrl);
 
-    // Joy-Con 2 input-mode write (Format 3 / 0x30) before input notifications start.
-    // Without it the default report leaks the high status byte and the Left's
-    // bit-23 into the button field as phantom ZL/ZR. windows10-gyro sends this raw
-    // 11-byte buffer to the command characteristic for the Joy-Cons (controller.py
-    // :758-766). Joy-Cons stay on the unified Report 0x05 layout that
-    // BLE_DecodeJoyConLeft/Right read (controller.py:276-289 parses Joy-Cons there
-    // even with Format 3 set), so this only cleans the phantom bits. The GameCube is
-    // deliberately excluded: Format 3 switches it to the native Report 0x0A layout
-    // (controller.py:173-270, buttons at data[2:5], triggers data[12:13], IMU
-    // data[34:46]), which this driver's GameCube decoder does not parse. Sending it
-    // to a GameCube would break that decode, so GC stays on the unified layout and
-    // its Format-3 + native-decoder rework is a separate, hardware-gated task.
-    if (ctrl->command_char &&
-        (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
-         ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT)) {
-        static const Uint8 set_input_mode[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30 };
-        SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, set_input_mode, (int)sizeof(set_input_mode), false);
-
-        /* Opt-in side-channel sensors (Joy-Con only, both L and R). Feature
-           flags command 0x0C: subcommand 0x02 (init) then 0x04 (enable), u32 LE
-           payload, mouse = bit 4 (controller.py:55-61/370-373, enabled at :268;
-           the report 0x05 Mouse Data block is "Activated via feature bit 4",
-           hid_reports.md), magnetometer = bit 7 (windows10-gyro
-           controller.py:713's FEATSEL 0x94 = motion | mouse | magnetometer).
-           Both ride one combined init+enable, the reference's own multi-feature
-           pattern. The frames use the command channel convention
-           <cmd> 91 01 <subcmd> 00 <len> 00 00 <payload> that BLE_SendCommand
-           also builds; fire-and-forget like the Format-3 write above. */
-        if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE, false)) {
-            ctrl->mouse_enabled = true;
-        }
-        if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER, false)) {
-            ctrl->magnetometer_enabled = true;
-        }
-        if (ctrl->mouse_enabled || ctrl->magnetometer_enabled) {
-            Uint8 feature_init[12] = { 0x0C, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            Uint8 feature_enable[12] = { 0x0C, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            Uint8 feature_mask = (Uint8)((ctrl->mouse_enabled ? 0x10 : 0x00) |
-                                         (ctrl->magnetometer_enabled ? 0x80 : 0x00));
-            feature_init[8] = feature_mask;
-            feature_enable[8] = feature_mask;
-            SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, feature_init, (int)sizeof(feature_init), false);
-            SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, feature_enable, (int)sizeof(feature_enable), false);
+    if (ctrl->input_char) {
+        // Register the handler before enabling notifications (controller.py order).
+        ctrl->input_handler = SDL_BLEGATT_AddValueHandler(ctrl->input_char, BLE_OnInputValue, ctrl, BLE_INPUT_UNIFIED, &ctrl->input_token);
+        if (ctrl->input_handler) {
+            SDL_BLEGATT_EnableNotifications(ctrl->input_char);
         }
     }
 
-    if (ctrl->input_char) {
-        // Register the handler before enabling notifications (controller.py order).
-        ctrl->input_handler = SDL_BLEGATT_AddValueHandler(ctrl->input_char, BLE_OnInputValue, ctrl, 0, &ctrl->input_token);
-        if (ctrl->input_handler) {
-            SDL_BLEGATT_EnableNotifications(ctrl->input_char);
+    // A Joy-Con 2 that reports on the unified input takes the unified path.
+    // One that stays silent, as the Joy-Con 2 clones do, takes the console
+    // path, and one that has neither is not added (hifihedgehog/SDL#38).
+    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
+        ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT) {
+        if (BLE_AwaitUnifiedReport(ctrl)) {
+            BLE_StartUnifiedJoyCon(ctrl);
+        } else if (!BLE_StartConsoleSession(ctrl, device3, service3)) {
+            BLE_NoteConnectFailure(bluetooth_address);
+            goto cleanup;
         }
     }
 
@@ -929,6 +1258,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
             ble.controllers = grown;
             if (!BLE_GetControllerByAddress(bluetooth_address)) {
                 int c;
+                ctrl->connected_ms = SDL_GetTicks();
                 ble.controllers[ble.controller_count++] = ctrl;
                 SDL_PrivateJoystickAdded(ctrl->instance_id);
                 ctrl = NULL; // owned by the array now
@@ -968,6 +1298,66 @@ cleanup:
 // prefix, so the wired HandleSwitchProState layout applies at offset -1. Button
 // bytes: u32 LE at [4:8]; sticks at [10:16]; IMU accel [48:54] / gyro [54:60].
 // ---------------------------------------------------------------------------
+// The unified report's motion block, the same for every controller type
+// (hid_reports.md report 0x05, Motion Data at 0x2A: accelerometer at 0x30,
+// gyroscope at 0x36), transcribed from the wired HandleStatePacket
+// (SDL_hidapi_switch2.c:1321-1327) at BLE offset -1. The axes are not in
+// order: accel maps X<-0x30, Y<-0x34, Z<-0x32(neg), and the gyro X<-0x36,
+// Y<-0x3A, Z<-0x38(neg). The wired driver picks a gyro_coeff of 34.8 or 40
+// from the rate of its first 100 sensor timestamps (:1278-1301). That choice
+// is not ported, and 34.8, the nominal case, is used. Biases are 0. The
+// caller checks size >= 60.
+static void BLE_ReadMotion(const Uint8 *data, float accel[3], float gyro[3])
+{
+    const float accel_scale = SDL_STANDARD_GRAVITY * 8.0f / 32767.0f;
+    const float gyro_scale = 34.8f / 32767.0f;
+
+    accel[0] = (Sint16)(data[48] | (data[49] << 8)) * accel_scale;
+    accel[1] = (Sint16)(data[52] | (data[53] << 8)) * accel_scale;
+    accel[2] = (Sint16)(data[50] | (data[51] << 8)) * -accel_scale;
+    gyro[0] = (Sint16)(data[54] | (data[55] << 8)) * gyro_scale;
+    gyro[1] = (Sint16)(data[58] | (data[59] << 8)) * gyro_scale;
+    gyro[2] = (Sint16)(data[56] | (data[57] << 8)) * -gyro_scale;
+}
+
+// A Joy-Con held sideways, the wired driver's rotation for a single Joy-Con
+// (SDL_hidapi_switch2.c:1335-1341 left, :1354-1360 right). A Joy-Con held
+// upright keeps the axes of a Joy-Con in a pair, as the Switch 1 driver
+// rotates only its mini-gamepad mode (SDL_hidapi_switch.c SendSensorUpdate,
+// the !m_bVerticalMode tests).
+static void BLE_RotateSideways(bool left, float v[3])
+{
+    float tmp;
+
+    if (left) {
+        tmp = -v[0];
+        v[0] = v[2];
+        v[2] = tmp;
+    } else {
+        tmp = v[0];
+        v[0] = -v[2];
+        v[2] = tmp;
+    }
+}
+
+// Joy-Con 2 motion on the unified path (hifihedgehog/SDL#38): the Pro
+// decoder's offsets and scales, with the single Joy-Con's rotation
+static void BLE_PostJoyConMotion(BLE_Controller *ctrl, SDL_Joystick *joystick, const Uint8 *data, int size, Uint64 ts, bool left)
+{
+    float accel[3], gyro[3];
+
+    if (size < 60 || !ctrl->joystick || !ctrl->sensors_enabled) {
+        return;
+    }
+    BLE_ReadMotion(data, accel, gyro);
+    if (!ctrl->vertical_mode) {
+        BLE_RotateSideways(left, accel);
+        BLE_RotateSideways(left, gyro);
+    }
+    SDL_SendJoystickSensor(ts, joystick, SDL_SENSOR_GYRO, ts, gyro, 3);
+    SDL_SendJoystickSensor(ts, joystick, SDL_SENSOR_ACCEL, ts, accel, 3);
+}
+
 static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
 {
     Uint64 timestamp = SDL_GetTicksNS();
@@ -1031,21 +1421,10 @@ static void BLE_DecodeProReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Ui
     SDL_SendJoystickAxis(timestamp, joystick, SDL_GAMEPAD_AXIS_RIGHTY,
                          BLE_MapStickAxis(&ctrl->right_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
 
-    // IMU, transcribed from the wired HandleStatePacket (SDL_hidapi_switch2.c
-    // :1379-1392) at BLE offset -1. The axes are NOT sequential: accel maps
-    // X<-0x31, Y<-0x35, Z<-0x33(neg); gyro X<-0x37, Y<-0x3b, Z<-0x39(neg). The
-    // wired gyro_coeff is 34.8 (its dynamic 34.8-vs-40 calibration is not ported;
-    // 34.8 is the nominal case, flagged for hardware confirmation). Biases are 0.
+    // IMU (BLE_ReadMotion)
     if (size >= 60 && ctrl->joystick && ctrl->sensors_enabled) {
-        const float accel_scale = SDL_STANDARD_GRAVITY * 8.0f / 32767.0f;
-        const float gyro_scale = 34.8f / 32767.0f;
         float accel[3], gyro[3];
-        accel[0] = (Sint16)(data[48] | (data[49] << 8)) * accel_scale;
-        accel[1] = (Sint16)(data[52] | (data[53] << 8)) * accel_scale;
-        accel[2] = (Sint16)(data[50] | (data[51] << 8)) * -accel_scale;
-        gyro[0] = (Sint16)(data[54] | (data[55] << 8)) * gyro_scale;
-        gyro[1] = (Sint16)(data[58] | (data[59] << 8)) * gyro_scale;
-        gyro[2] = (Sint16)(data[56] | (data[57] << 8)) * -gyro_scale;
+        BLE_ReadMotion(data, accel, gyro);
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_ACCEL, timestamp, accel, 3);
         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_GYRO, timestamp, gyro, 3);
     }
@@ -1128,9 +1507,12 @@ static void BLE_PostMouseAxes(BLE_Controller *ctrl, SDL_Joystick *joystick, cons
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_COUNT + 1, counter_y);
 }
 
-/* Switch 2 magnetometer: three int16 LE at report offsets 0x16/0x18/0x1A
-   (joycon2cpp README report layout, fork issue #25), streamed when feature
-   bit 7 is enabled (windows10-gyro controller.py:713's FEATSEL 0x94).
+/* Switch 2 magnetometer: three int16 LE at report offsets 0x19/0x1B/0x1D
+   (hid_reports.md report 0x05 Magnetometer Data at 0x19, and
+   switch2-controllers controller.py:136 reads data[25:31]), streamed when
+   feature bit 7 is enabled (windows10-gyro controller.py:713's FEATSEL
+   0x94). Two OEM Joy-Con 2 (R) reports in the capture of PadForge discussion
+   #491 read (102, 299, -26) and (100, 301, -24) there (hifihedgehog/SDL#38).
    Raw samples on three dedicated axes, no fusion: the consumer owns
    orientation math. The axes follow the mouse counters when both are
    enabled, and the raw axis count is the availability contract
@@ -1141,13 +1523,13 @@ static void BLE_PostMagnetometerAxes(BLE_Controller *ctrl, SDL_Joystick *joystic
     Sint16 mag[3];
     int i;
 
-    if (!ctrl->magnetometer_enabled || size < 0x1C) {
+    if (!ctrl->magnetometer_enabled || size < 0x1F) {
         return;
     }
     base = SDL_GAMEPAD_AXIS_COUNT + (ctrl->mouse_enabled ? 2 : 0);
-    mag[0] = (Sint16)(data[0x16] | (data[0x17] << 8));
-    mag[1] = (Sint16)(data[0x18] | (data[0x19] << 8));
-    mag[2] = (Sint16)(data[0x1A] | (data[0x1B] << 8));
+    mag[0] = (Sint16)(data[0x19] | (data[0x1A] << 8));
+    mag[1] = (Sint16)(data[0x1B] | (data[0x1C] << 8));
+    mag[2] = (Sint16)(data[0x1D] | (data[0x1E] << 8));
     for (i = 0; i < 3; ++i) {
         /* Data axes: seed past the analog anti-jitter gate (hifihedgehog/SDL#14) */
         SDL_SeedJoystickDataAxis(joystick, base + i, mag[i]);
@@ -1196,6 +1578,7 @@ static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, U
         SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[11] >> 4) | (data[12] << 4)), true));
         BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
         BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
+        BLE_PostJoyConMotion(ctrl, joystick, data, size, ts, true);
         return;
     }
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_START, ((data[5] & 0x01) != 0));
@@ -1214,6 +1597,7 @@ static void BLE_DecodeJoyConLeft(BLE_Controller *ctrl, SDL_Joystick *joystick, U
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_x, (float)(data[10] | ((data[11] & 0x0F) << 8)), true));
     BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
     BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
+    BLE_PostJoyConMotion(ctrl, joystick, data, size, ts, true);
 }
 
 // Standalone (mini) Joy-Con 2 Right, held sideways.
@@ -1247,6 +1631,7 @@ static void BLE_DecodeJoyConRight(BLE_Controller *ctrl, SDL_Joystick *joystick, 
         SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_RIGHTY, BLE_MapStickAxis(&ctrl->left_y, (float)((data[14] >> 4) | (data[15] << 4)), true));
         BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
         BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
+        BLE_PostJoyConMotion(ctrl, joystick, data, size, ts, false);
         return;
     }
     SDL_SendJoystickButton(ts, joystick, SDL_GAMEPAD_BUTTON_WEST, ((data[4] & 0x01) != 0));
@@ -1265,6 +1650,103 @@ static void BLE_DecodeJoyConRight(BLE_Controller *ctrl, SDL_Joystick *joystick, 
     SDL_SendJoystickAxis(ts, joystick, SDL_GAMEPAD_AXIS_LEFTY, BLE_MapStickAxis(&ctrl->left_x, (float)(data[13] | ((data[14] & 0x0F) << 8)), false));
     BLE_PostMouseAxes(ctrl, joystick, data, size, ts);
     BLE_PostMagnetometerAxes(ctrl, joystick, data, size, ts);
+    BLE_PostJoyConMotion(ctrl, joystick, data, size, ts, false);
+}
+
+// The console path's report, 0x07 from a left Joy-Con 2 and 0x08 from a right
+// one (hid_reports.md, joycon2android ConsolePacketParser.kt, Linux v13
+// NS2_REPORT_JCL and NS2_REPORT_JCR). Its buttons, u16 LE at 2, and its stick,
+// packed 12-bit at 5, are put where the unified report holds them, so
+// BLE_DecodeJoyConLeft/Right post them in both layouts with the axis swaps
+// they apply to a unified report, as ConsolePacketParser translates them
+// into its common bitmask. The motion block follows its length byte, which
+// is 0x0E on the left and 0x0F on the right. The accelerometer is an int16
+// in the high half of each of three 4-byte words from the block's start
+// plus 0x12, low halves zero, 4096 = 1 g, and y running opposite a genuine
+// Joy-Con 2 (joycon2android protocol.md "Motion block", measured on a NYXI
+// Hyperion 3 against gravity). No gyroscope reaches it.
+static void BLE_DecodeConsoleReport(BLE_Controller *ctrl, SDL_Joystick *joystick, const Uint8 *data, int size)
+{
+    typedef struct
+    {
+        Uint8 bit;  // in the console report's u16
+        Uint8 byte; // of the unified report
+        Uint8 mask;
+    } BLE_ConsoleButton;
+    static const BLE_ConsoleButton right_buttons[] = {
+        { 0, 4, 0x04 },  // B
+        { 1, 4, 0x08 },  // A
+        { 2, 4, 0x01 },  // Y
+        { 3, 4, 0x02 },  // X
+        { 4, 4, 0x40 },  // R
+        { 5, 4, 0x80 },  // ZR
+        { 6, 5, 0x02 },  // Plus
+        { 7, 5, 0x04 },  // stick
+        { 8, 5, 0x10 },  // Home
+        { 12, 5, 0x40 }, // C
+        { 14, 4, 0x10 }, // SR
+        { 15, 4, 0x20 }  // SL
+    };
+    static const BLE_ConsoleButton left_buttons[] = {
+        { 0, 6, 0x01 },  // Down
+        { 1, 6, 0x04 },  // Right
+        { 2, 6, 0x08 },  // Left
+        { 3, 6, 0x02 },  // Up
+        { 4, 6, 0x40 },  // L
+        { 5, 6, 0x80 },  // ZL
+        { 6, 5, 0x01 },  // Minus
+        { 7, 5, 0x08 },  // stick
+        { 8, 5, 0x20 },  // Capture
+        { 14, 6, 0x10 }, // SR
+        { 15, 6, 0x20 }  // SL
+    };
+    const bool left = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT);
+    const BLE_ConsoleButton *table = left ? left_buttons : right_buttons;
+    const int count = left ? (int)SDL_arraysize(left_buttons) : (int)SDL_arraysize(right_buttons);
+    Uint8 unified[16];
+    int buttons, i;
+
+    if (size < 8) {
+        return;
+    }
+    SDL_zeroa(unified);
+    buttons = data[2] | (data[3] << 8);
+    for (i = 0; i < count; ++i) {
+        if (buttons & (1 << table[i].bit)) {
+            unified[table[i].byte] |= table[i].mask;
+        }
+    }
+    SDL_memcpy(&unified[left ? 10 : 13], &data[5], 3);
+    if (left) {
+        BLE_DecodeJoyConLeft(ctrl, joystick, unified, (int)sizeof(unified));
+    } else {
+        BLE_DecodeJoyConRight(ctrl, joystick, unified, (int)sizeof(unified));
+    }
+
+    if (ctrl->joystick && ctrl->sensors_enabled) {
+        const int block = left ? 0x0F : 0x10;
+        const int first = block + 0x12;
+
+        if (size >= first + 10 && data[block - 1] >= 0x1C &&
+            (data[first - 2] | data[first - 1] | data[first + 2] | data[first + 3] | data[first + 6] | data[first + 7]) == 0) {
+            const float scale = SDL_STANDARD_GRAVITY * 8.0f / 32767.0f;
+            const Uint64 ts = SDL_GetTicksNS();
+            // y negated into a genuine Joy-Con 2's frame, then the order
+            // BLE_ReadMotion gives the unified report's X, Y and Z
+            const int x = (Sint16)(data[first] | (data[first + 1] << 8));
+            const int y = -(Sint16)(data[first + 4] | (data[first + 5] << 8));
+            const int z = (Sint16)(data[first + 8] | (data[first + 9] << 8));
+            float accel[3];
+
+            accel[0] = (float)x * scale;
+            accel[1] = (float)z * scale;
+            accel[2] = (float)-y * scale;
+            if (!ctrl->vertical_mode) {
+                BLE_RotateSideways(left, accel);
+            }
+            SDL_SendJoystickSensor(ts, joystick, SDL_SENSOR_ACCEL, ts, accel, 3);
+        }
+    }
 }
 
 static void BLE_DecodeReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8 *data, int size)
@@ -1349,6 +1831,13 @@ static void BLE_JoystickDetect(void)
     for (i = 0; i < ble.controller_count; ) {
         BLE_Controller *ctrl = ble.controllers[i];
         if (SDL_GetAtomicInt(&ctrl->link_lost)) {
+            // How long the link held. Windows reclaims an unpaired Joy-Con 2
+            // link about 31 s after it opens (an HCI capture in FlexInput
+            // crates/joycon2/src/dongle.rs), and a Joy-Con 2 clone drops its
+            // link after 60 s without the console handshake (tarabdaar
+            // JoyConBLE.swift maybeBeginInit, hifihedgehog/SDL#38).
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link lost %" SDL_PRIu64 " ms after the joystick was added (%s path)",
+                         SDL_GetTicks() - ctrl->connected_ms, ctrl->console ? "console" : "unified");
             SDL_PrivateJoystickRemoved(ctrl->instance_id);
             ble.controllers[i] = ble.controllers[--ble.controller_count];
             BLE_FreeController(ctrl);
@@ -1471,7 +1960,10 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
     joystick->nhats = 1;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
-    SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 250.0f);
+    // The console report carries no gyroscope (hifihedgehog/SDL#38)
+    if (!ctrl->console) {
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 250.0f);
+    }
     SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 250.0f);
 
     // Advertise the rumble capability so apps that gate on it (PadForge's FFB
@@ -1548,43 +2040,35 @@ static bool BLE_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green, U
    commands.md "Shutdown Controller?"). Mirrors the upstream hidapi Switch
    driver's SendEffect-as-raw-passthrough philosophy.
 
-   The frame layout matches BLE_SendCommand (:794-801). The write is
-   fire-and-forget rather than routed through BLE_SendCommand because that
-   helper always waits up to 500 ms on the response semaphore and returns the
-   reply byte count. A shutdown powers the pad off instead of replying
-   (commands.md documents an empty response), so the helper would stall and
-   then read a successful shutdown as a failure. Success here means the write
-   was delivered. A stale reply from a command that does respond is drained by
-   BLE_SendCommand before its next send (:812-814). */
+   The frame is BLE_BuildCommand's and goes out through BLE_WriteCommandFrame,
+   so on the console path it reaches the side's command characteristic. The
+   write is fire-and-forget rather than routed through BLE_SendCommand because
+   that helper waits for the reply and returns its byte count. A shutdown
+   powers the pad off instead of replying (commands.md documents an empty
+   response), so the helper would stall and then read a successful shutdown as
+   a failure. Success here means the write was delivered. A reply to an effect
+   can count only for a later sender of the same command and subcommand,
+   since a reply must echo both (BLE_FindReply). */
 static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
     const Uint8 *bytes = (const Uint8 *)data;
-    Uint8 frame[64];
-    int data_len;
+    Uint8 frame[BLE_COMMAND_FRAME_MAX];
+    int length;
 
-    if (!ctrl || !ctrl->command_char) {
+    if (!ctrl || !BLE_HasCommandChannel(ctrl)) {
         return SDL_SetError("No BLE command channel for joystick");
     }
     if (size < 2) {
         return SDL_SetError("Switch 2 effect needs at least [cmd, subcmd]");
     }
-    data_len = size - 2;
-    if (data_len + 8 > (int)sizeof(frame)) {
+    length = BLE_BuildCommand(frame, bytes[0], bytes[1], bytes + 2, size - 2);
+    if (length == 0) {
         return SDL_SetError("Switch 2 effect payload too large");
     }
-    frame[0] = bytes[0];
-    frame[1] = 0x91;
-    frame[2] = 0x01; // Bluetooth transport
-    frame[3] = bytes[1];
-    frame[4] = 0x00;
-    frame[5] = (Uint8)data_len;
-    frame[6] = 0x00;
-    frame[7] = 0x00;
-    if (data_len > 0) {
-        SDL_memcpy(&frame[8], bytes + 2, data_len);
-    }
-    if (!SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, 8 + data_len, true)) {
+    // On the console path the command goes to the side's command
+    // characteristic (BLE_WriteCommandFrame)
+    if (!BLE_WriteCommandFrame(ctrl, frame, length, true)) {
         return SDL_SetError("Switch 2 command write failed");
     }
     return true;
@@ -1605,6 +2089,14 @@ static bool BLE_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
     Uint8 flags[4] = { 0x00, 0x00, 0x00, 0x00 };
     if (!ctrl) {
         return SDL_SetError("No BLE controller for joystick");
+    }
+    if (ctrl->console) {
+        // The console session's feature mask 0x37 already runs motion, and
+        // no feature-select reply changes the report on this hardware
+        // (joycon2android protocol.md "Motion block"), so only the posting
+        // follows the request (hifihedgehog/SDL#38).
+        ctrl->sensors_enabled = enabled;
+        return true;
     }
     flags[0] = (Uint8)((enabled ? 0x04 : 0x00) |
                        (ctrl->mouse_enabled ? 0x10 : 0x00) |
@@ -1637,9 +2129,19 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
         // decoders use absolute BLE offsets. Dispatch by controller type.
         if (!ctrl->logged_first_report) {
             ctrl->logged_first_report = true;
-            BLE_LogBytes("first input report", data, size); // confirms the byte offsets
+            BLE_LogBytes(ctrl->console ? "first console report" : "first input report", data, size); // confirms the byte offsets
         }
-        BLE_DecodeReport(ctrl, joystick, data, size);
+        if (ctrl->console) {
+            BLE_DecodeConsoleReport(ctrl, joystick, data, size);
+        } else {
+            BLE_DecodeReport(ctrl, joystick, data, size);
+        }
+    }
+    if (ctrl->console && !ctrl->logged_unified_in_console && SDL_GetAtomicInt(&ctrl->unified_reports) > 0) {
+        // A genuine pad that missed BLE_CONSOLE_FALLBACK_MS keeps the console
+        // path until it reconnects
+        ctrl->logged_unified_in_console = true;
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 unified input reported after the console path was chosen");
     }
 
     // Rumble keep-alive: re-send the last commanded amplitudes, rate-gated, so a
@@ -1693,6 +2195,21 @@ static void BLE_FreeController(BLE_Controller *ctrl)
     }
     if (ctrl->vibration_char) {
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->vibration_char);
+    }
+    if (ctrl->console_command_char) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->console_command_char);
+    }
+    if (ctrl->native_input_char) {
+        if (ctrl->native_input_handler) {
+            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->native_input_char, ctrl->native_input_token);
+        }
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->native_input_char);
+    }
+    if (ctrl->extended_response_char) {
+        if (ctrl->extended_response_handler) {
+            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->extended_response_char, ctrl->extended_response_token);
+        }
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->extended_response_char);
     }
     if (ctrl->device) {
         if (ctrl->status_handler) {

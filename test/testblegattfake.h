@@ -45,6 +45,7 @@
 #define SDL_BLEGATT_FindCharacteristic  Fake_BLEGATT_FindCharacteristic
 #define SDL_BLEGATT_WriteCharacteristic Fake_BLEGATT_WriteCharacteristic
 #define SDL_BLEGATT_EnableNotifications Fake_BLEGATT_EnableNotifications
+#define SDL_BLEGATT_WriteDescriptorValue Fake_BLEGATT_WriteDescriptorValue
 #define SDL_BLEGATT_AddValueHandler     Fake_BLEGATT_AddValueHandler
 #define SDL_BLEGATT_AddStatusHandler    Fake_BLEGATT_AddStatusHandler
 

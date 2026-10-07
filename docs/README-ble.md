@@ -203,5 +203,8 @@ The session and the device modules are C99 with no SDL runtime and no I/O.
 normal and AddressSanitizer builds. `test/ble-driver` runs
 `testblegattdriver`, the driver inside a static SDL against a fake transport,
 in both builds, with the Switch 2 driver against the same fake for its
-watcher check. It and `testblegearvr` read the Gear VR packets from the
-gearvr-controller clone.
+watcher check. The Switch 2 driver also runs against a scripted Switch 2
+in `testblegattswitch2.c`: genuine Joy-Con 2s and a Pro Controller on the
+unified input, Joy-Con 2 clones on the console channel, and lost links.
+It and `testblegearvr` read the Gear VR packets from the gearvr-controller
+clone.

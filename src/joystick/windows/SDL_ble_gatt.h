@@ -177,6 +177,12 @@ extern bool SDL_BLEGATT_WriteCharacteristic(SDL_BLEGATTCharacteristic *character
    3 s, whatever its status. */
 extern bool SDL_BLEGATT_EnableNotifications(SDL_BLEGATTCharacteristic *characteristic);
 
+/* Writes bytes to the characteristic's first descriptor with the UUID,
+   looked up uncached. True when the write completed within 3 s with
+   Success. */
+extern bool SDL_BLEGATT_WriteDescriptorValue(SDL_BLEGATTCharacteristic *characteristic, const struct _GUID *descriptor_uuid,
+                                             const Uint8 *bytes, int length);
+
 /* Registers a ValueChanged delegate that calls callback with userdata and
    index. Returns the delegate, which is never freed, or NULL when it cannot
    be allocated. A delegate whose registration fails is returned too. */

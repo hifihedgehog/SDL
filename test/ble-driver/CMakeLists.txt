@@ -7,7 +7,9 @@ project(SDLBLEDriverTests LANGUAGES C CXX)
 # Update, Close and Quit, the joystick and gamepad APIs, the GUID, the
 # gamepad mapping, touchpads, sensors and battery all run without a radio.
 # The Switch 2 driver, which shares the transport, runs against the same
-# fake for its watcher check.
+# fake for its watcher check, and against the scripted Switch 2 of
+# testblegattswitch2.c for its connect, its unified and console paths, its
+# reports and its link loss (hifihedgehog/SDL#38).
 if(NOT WIN32 OR NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The driver test requires native MSVC for 64-bit Windows.")
 endif()
