@@ -2351,6 +2351,9 @@ extern "C" {
  *
  * This is a PadForge fork addition. The counters are raw accumulating u16
  * values bit-preserved as Sint16. The consumer derives wraparound deltas.
+ * The driver reads no counters from a Joy-Con 2 clone that answers only the
+ * console channel, such as the NYXI Hyperion 3, and that joystick keeps 6
+ * axes.
  *
  * The variable can be set to the following values:
  *
@@ -2371,7 +2374,8 @@ extern "C" {
  * fusion: the consumer owns orientation math. The three axes follow the
  * mouse counters when both are enabled, and the raw axis count is the
  * availability contract: 6 = neither, 8 = mouse, 9 = magnetometer,
- * 11 = both.
+ * 11 = both. The driver reads no magnetometer from a Joy-Con 2 clone that
+ * answers only the console channel, such as the NYXI Hyperion 3.
  *
  * The variable can be set to the following values:
  *
