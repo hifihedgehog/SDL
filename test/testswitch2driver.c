@@ -57,6 +57,9 @@
       in HIDMaestro's unfiltered acceptance build.
    7. A serial with a character outside ASCII, and one of the longest length
       a string descriptor holds, match their own unit only.
+   8. The stick calibration read from flash (hifihedgehog/SDL#38): a block
+      of nine 0xFF bytes leaves the stick as it was, and a user block with
+      the B2 A1 magic replaces the factory block.
 
    The driver in this file calls the fake, not libusb or SDL's HID backends.
    Each name through which it reaches a device is defined below before the
@@ -157,6 +160,14 @@ typedef struct Unit
     int open_error;           /* What the open returns in its place */
     const char *flash_serial; /* 0x13002 */
     bool persona;             /* A HIDMaestro persona, whose HID interface the filter hides */
+    /* The stick calibration blocks (switch2_controller_research
+       memory_layout.md): 9 bytes at 0x130A8 and 0x130E8, and 11 at
+       0x1FC040 and 0x1FC080, the B2 A1 magic then a stick block. NULL
+       where nothing was written. */
+    const Uint8 *factory_primary;
+    const Uint8 *factory_secondary;
+    const Uint8 *user_primary;
+    const Uint8 *user_secondary;
 } Unit;
 
 typedef struct FakeUnit
@@ -471,6 +482,36 @@ static int LIBUSB_CALL Fake_set_auto_detach_kernel_driver(libusb_device_handle *
     return LIBUSB_ERROR_NOT_SUPPORTED;
 }
 
+/* The unit's stick calibration blocks over a read of 0x40 bytes at address */
+static void Fake_FlashBlocks(const FakeUnit *unit, Uint32 address, Uint8 *out)
+{
+    const struct
+    {
+        Uint32 address;
+        const Uint8 *bytes;
+        Uint32 length;
+    } blocks[] = {
+        { 0x130A8, unit->unit.factory_primary, 9 },
+        { 0x130E8, unit->unit.factory_secondary, 9 },
+        { 0x1FC040, unit->unit.user_primary, 11 },
+        { 0x1FC080, unit->unit.user_secondary, 11 }
+    };
+    Uint32 i, b;
+
+    for (b = 0; b < SDL_arraysize(blocks); ++b) {
+        if (!blocks[b].bytes) {
+            continue;
+        }
+        for (i = 0; i < 0x40; ++i) {
+            const Uint32 at = address + i;
+
+            if (at >= blocks[b].address && at < blocks[b].address + blocks[b].length) {
+                out[i] = blocks[b].bytes[at - blocks[b].address];
+            }
+        }
+    }
+}
+
 /* One bulk OUT payload and the reply it queues. The reply starts with the
    command, status 01, the transport, the subcommand, 10 78 00 00, as
    commands.md records for a controller. A Read Memory Block follows with
@@ -518,6 +559,7 @@ static void Fake_Command(FakeUnit *unit, const Uint8 *data, int length)
             SDL_memset(&unit->reply[18], 0, 16);
             SDL_memcpy(&unit->reply[18], unit->unit.flash_serial, serial_length);
         }
+        Fake_FlashBlocks(unit, address, &unit->reply[16]);
         unit->reply_length = FAKE_REPLY_SIZE;
     } else if (command == 0x03 && subcommand == 0x0D) {
         unit->started = true;
@@ -1200,6 +1242,73 @@ static void TestSerialForms(void)
     }
 }
 
+static bool StickIs(const Switch2_StickCalibration *stick, int x_neutral, int x_max, int x_min, int y_neutral, int y_max, int y_min)
+{
+    return stick->x.neutral == x_neutral && stick->x.max == x_max && stick->x.min == x_min &&
+           stick->y.neutral == y_neutral && stick->y.max == y_max && stick->y.min == y_min;
+}
+
+#define STICK_FORMAT    "neutral (%u, %u), max (%u, %u), min (%u, %u)"
+#define STICK_VALUES(s) (s).x.neutral, (s).y.neutral, (s).x.max, (s).y.max, (s).x.min, (s).y.min
+
+/* 8. The stick calibration the driver reads from flash (hifihedgehog/SDL#38).
+   A block of nine 0xFF bytes holds none, as Linux reads it
+   (switch2_parse_stick_calibration), so it leaves the stick as it was: a
+   factory block a blank user block follows, or the zeros MapJoystickAxis
+   maps linearly. A user block with the B2 A1 magic replaces the factory
+   block. */
+static void TestStickCalibration(void)
+{
+    /* The factory block of the OEM Joy-Con 2 (R) in PadForge discussion #491,
+       neutral (2043, 2071), max (1175, 1179) and min (1243, 1204). A user
+       block, the magic then neutral (2100, 1990), max (1300, 1310) and min
+       (1200, 1210), and one that holds only the magic. */
+    static const Uint8 factory[9] = { 0xFB, 0x77, 0x81, 0x97, 0xB4, 0x49, 0xDB, 0x44, 0x4B };
+    static const Uint8 user[11] = { 0xB2, 0xA1, 0x34, 0x68, 0x7C, 0x14, 0xE5, 0x51, 0xB0, 0xA4, 0x4B };
+    static const Uint8 user_erased[11] = { 0xB2, 0xA1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    const SDL_DriverSwitch2_Context *ctx;
+    Unit unit;
+
+    scenario = "stick calibration";
+    unit = RealController(PRODUCT_PRO);
+    unit.factory_primary = factory;
+    unit.user_primary = user_erased;
+    unit.user_secondary = user;
+    Bus(&unit, 1);
+    AddDevice(PRODUCT_PRO, "00");
+    CHECK(Start(), "start failed: %s", SDL_GetError());
+    CheckStarted(0, "the controller");
+    ctx = (const SDL_DriverSwitch2_Context *)device.context;
+    CHECK(ctx != NULL, "the start left no context");
+    if (ctx) {
+        CHECK(StickIs(&ctx->left_stick, 2043, 1175, 1243, 2071, 1179, 1204),
+              "the primary stick lost its factory block to a blank user block: " STICK_FORMAT, STICK_VALUES(ctx->left_stick));
+        CHECK(StickIs(&ctx->right_stick, 2100, 1300, 1200, 1990, 1310, 1210),
+              "the secondary stick did not take its user block: " STICK_FORMAT, STICK_VALUES(ctx->right_stick));
+    }
+    Stop();
+    CheckReleased("stick calibration");
+    RemoveDevice();
+
+    scenario = "erased stick calibration";
+    unit = RealController(PRODUCT_PRO);
+    Bus(&unit, 1);
+    AddDevice(PRODUCT_PRO, "00");
+    CHECK(Start(), "start failed: %s", SDL_GetError());
+    CheckStarted(0, "the controller");
+    ctx = (const SDL_DriverSwitch2_Context *)device.context;
+    CHECK(ctx != NULL, "the start left no context");
+    if (ctx) {
+        CHECK(StickIs(&ctx->left_stick, 0, 0, 0, 0, 0, 0), "erased flash calibrated the primary stick: " STICK_FORMAT,
+              STICK_VALUES(ctx->left_stick));
+        CHECK(StickIs(&ctx->right_stick, 0, 0, 0, 0, 0, 0), "erased flash calibrated the secondary stick: " STICK_FORMAT,
+              STICK_VALUES(ctx->right_stick));
+    }
+    Stop();
+    CheckReleased("erased stick calibration");
+    RemoveDevice();
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1235,6 +1344,7 @@ int main(int argc, char *argv[])
     TestUncomparable();
     TestTwoPersonas();
     TestSerialForms();
+    TestStickCalibration();
 
     SDL_Quit();
 

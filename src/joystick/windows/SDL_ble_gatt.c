@@ -82,6 +82,8 @@ typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDevi
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristicsResult                 GattCharsResult;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic                        GattChar;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic3                       GattChar3;
+typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptorsResult                     GattDescriptorsResult;
+typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptor                            GattDescriptor;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattValueChangedEventArgs                 GattValueArgs;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CGattCommunicationStatus                    GattCommStatus;
 typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattWriteResult                           GattWriteResult;
@@ -155,6 +157,7 @@ DEFINE_GUID(IID_AsyncSessionHandler,  0xcae01a28, 0xfd33, 0x542e, 0xa5, 0xad, 0x
 DEFINE_GUID(IID_AsyncWriteHandler,    0x6fa8c9c3, 0xff7e, 0x5fa1, 0xa2, 0xf3, 0x27, 0x14, 0xcf, 0x04, 0xb8, 0x99); // <GattWriteResult> gatt.h:2157
 DEFINE_GUID(IID_AsyncPairingHandler,  0x7ee0247f, 0x5f57, 0x5cb2, 0xb4, 0x0e, 0x18, 0xb5, 0xa2, 0x11, 0xd6, 0xc3); // <DevicePairingResult> enum.h:962
 DEFINE_GUID(IID_AsyncUnpairingHandler, 0x9bbe6eb9, 0xdb2d, 0x5160, 0xa2, 0x0c, 0xf0, 0xc2, 0x65, 0xf2, 0x0d, 0x8e); // <DeviceUnpairingResult> enum.h:1105
+DEFINE_GUID(IID_AsyncDescriptorsHandler, 0xdf09ae77, 0xf606, 0x53e4, 0x8b, 0xa6, 0x79, 0x9f, 0x59, 0x92, 0xc8, 0x5e); // <GattDescriptorsResult> gatt.h:1365
 
 // Ceilings. The open keeps the Switch 2 driver's 20 s (SDL_BLEGATT_AwaitDevice),
 // and a pairing or bond removal gets the same, since Windows runs the whole
@@ -684,6 +687,74 @@ bool SDL_BLEGATT_EnableNotifications(GattChar *characteristic)
         result = SDL_BLEGATT_Await(op, &IID_AsyncStatusHandler, NULL);
         ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
     }
+    return result;
+}
+
+// Write a descriptor other than the CCCD, as the Switch 2 console writes the
+// report-rate descriptor (hifihedgehog/SDL#38). The descriptor is looked up
+// uncached, as SDL_BLEGATT_FindCharacteristic looks up characteristics, with
+// IGattCharacteristic3::GetDescriptorsForUuidWithCacheModeAsync (SDK
+// windows.devices.bluetooth.genericattributeprofile.h:4257), and the first one
+// found is written with IGattDescriptor::WriteValueAsync (same header, :14874),
+// awaited as SDL_BLEGATT_EnableNotifications awaits its write.
+bool SDL_BLEGATT_WriteDescriptorValue(GattChar *characteristic, const GUID *descriptor_uuid, const Uint8 *bytes, int length)
+{
+    GattChar3 *characteristic3 = NULL;
+    __FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptorsResult *op = NULL;
+    GattDescriptor *descriptor = NULL;
+    GattCommStatus status = GattCommunicationStatus_Unreachable;
+    bool result = false;
+
+    if (!characteristic || !descriptor_uuid || !bytes || length <= 0) {
+        return false;
+    }
+    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_QueryInterface(characteristic, &IID_GattChar3, (void **)&characteristic3)) || !characteristic3) {
+        return false;
+    }
+    if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic3_GetDescriptorsForUuidWithCacheModeAsync(characteristic3, *descriptor_uuid, BluetoothCacheMode_Uncached, &op)) && op) {
+        if (SDL_BLEGATT_Await(op, &IID_AsyncDescriptorsHandler, NULL)) {
+            GattDescriptorsResult *found = NULL;
+            if (SUCCEEDED(__FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptorsResult_GetResults(op, &found)) && found) {
+                __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptor *descriptors = NULL;
+                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptorsResult_get_Status(found, &status);
+                if (status == GattCommunicationStatus_Success &&
+                    SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptorsResult_get_Descriptors(found, &descriptors)) && descriptors) {
+                    unsigned size = 0;
+                    __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptor_get_Size(descriptors, &size);
+                    if (size > 0) {
+                        __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptor_GetAt(descriptors, 0, &descriptor);
+                    }
+                    __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptor_Release(descriptors);
+                }
+                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptorsResult_Release(found);
+            }
+        }
+        __FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptorsResult_Release(op);
+    }
+    __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic3_Release(characteristic3);
+    if (!descriptor) {
+        SDL_BLEGATT_LOG("BLE GATT descriptor lookup failed: status %d", (int)status);
+        return false;
+    }
+
+    {
+        Buffer *buffer = SDL_BLEGATT_BufferFromBytes(bytes, (UINT32)length);
+        StatusOp *write = NULL;
+
+        status = GattCommunicationStatus_Unreachable;
+        if (buffer) {
+            if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptor_WriteValueAsync(descriptor, buffer, &write)) && write) {
+                if (SDL_BLEGATT_Await(write, &IID_AsyncStatusHandler, NULL) &&
+                    SUCCEEDED(__FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCommunicationStatus_GetResults(write, &status))) {
+                    result = (status == GattCommunicationStatus_Success);
+                }
+                __FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCommunicationStatus_Release(write);
+            }
+            __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release(buffer);
+        }
+        SDL_BLEGATT_LOG("BLE GATT descriptor write: status %d", (int)status);
+    }
+    __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptor_Release(descriptor);
     return result;
 }
 

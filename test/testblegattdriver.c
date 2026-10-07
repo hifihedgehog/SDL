@@ -57,6 +57,7 @@ extern void SDL_ZwiftCrypto_Destroy(SDL_ZwiftKeys *keys);
 #include "core/windows/SDL_windows.h"
 #include "joystick/SDL_joystick_c.h"
 #include "joystick/SDL_sysjoystick.h"
+#include "joystick/usb_ids.h"
 #include "joystick/windows/SDL_ble_gatt.h"
 #include "joystick/ble/SDL_ble_devices.h"
 #include "joystick/ble/SDL_ble_pokeball_proto.h"
@@ -66,6 +67,9 @@ extern void SDL_ZwiftCrypto_Destroy(SDL_ZwiftKeys *keys);
 #include "joystick/ble/SDL_ble_ghlios_proto.h"
 #include "joystick/ble/SDL_ble_zwift_proto.h"
 #include "joystick/ble/SDL_ble_myo_proto.h"
+
+/* The scripted Switch 2, in testblegattswitch2.c */
+#include "testblegattswitch2.h"
 
 #include <process.h>
 #include <stdarg.h>
@@ -313,7 +317,6 @@ typedef struct FakeTransport
     SDL_AtomicInt close_release; /* Ends every hanging Close */
     int calls_held;       /* Writes and subscriptions held now */
     SDL_AtomicInt hold_release; /* Ends every hold */
-    SDL_AtomicInt switch2_helpers; /* Calls of the Switch 2 driver's own helpers */
     SDL_AtomicInt hold_destroy;    /* Fake_ZwiftCrypto_Destroy waits while set */
     SDL_AtomicInt destroys_entered;
     SDL_AtomicInt destroys_left;
@@ -383,6 +386,7 @@ static void Fake_Reset(void)
     fake.config.subscribe_fail = -1;
     fake.config.battery = DT_BATTERY;
     SDL_UnlockMutex(mutex);
+    SW2_ResetHelperCalls();
 }
 
 static Uint8 Fake_Properties(const SDL_BLEUUID *uuid)
@@ -839,84 +843,9 @@ void Fake_BLEGATT_Close(SDL_BLEGATTLink *link)
     }
 }
 
-/* The Switch 2 driver's own helpers. No scenario sends it an advertisement
-   of a Switch 2, so no connect thread calls these. Each is counted and
-   fails at once. */
-SDL_BLEGATTDevice *Fake_BLEGATT_OpenDevice(Uint64 address, SDL_AtomicInt *cancel)
-{
-    (void)address;
-    (void)cancel;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return NULL;
-}
-
-SDL_BLEGATTService *Fake_BLEGATT_FindService(SDL_BLEGATTDevice3 *device3, const struct _GUID *uuids, int nuuids,
-                                             int attempts, const char *label, SDL_AtomicInt *cancel)
-{
-    (void)device3;
-    (void)uuids;
-    (void)nuuids;
-    (void)attempts;
-    (void)label;
-    (void)cancel;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return NULL;
-}
-
-void Fake_BLEGATT_RequestThroughput(SDL_BLEGATTDevice *device)
-{
-    (void)device;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-}
-
-SDL_BLEGATTCharacteristic *Fake_BLEGATT_FindCharacteristic(SDL_BLEGATTService *service3, const struct _GUID *uuid,
-                                                           SDL_AtomicInt *cancel)
-{
-    (void)service3;
-    (void)uuid;
-    (void)cancel;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return NULL;
-}
-
-bool Fake_BLEGATT_WriteCharacteristic(SDL_BLEGATTCharacteristic *characteristic, const Uint8 *bytes, int length,
-                                      bool prefer_response)
-{
-    (void)characteristic;
-    (void)bytes;
-    (void)length;
-    (void)prefer_response;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return false;
-}
-
-bool Fake_BLEGATT_EnableNotifications(SDL_BLEGATTCharacteristic *characteristic)
-{
-    (void)characteristic;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return false;
-}
-
-void *Fake_BLEGATT_AddValueHandler(SDL_BLEGATTCharacteristic *characteristic, SDL_BLEGATT_ValueCallback callback,
-                                   void *userdata, int index, struct EventRegistrationToken *token)
-{
-    (void)characteristic;
-    (void)callback;
-    (void)userdata;
-    (void)index;
-    (void)token;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return NULL;
-}
-
-void *Fake_BLEGATT_AddStatusHandler(SDL_BLEGATTDevice *device, SDL_AtomicInt *lost, struct EventRegistrationToken *token)
-{
-    (void)device;
-    (void)lost;
-    (void)token;
-    SDL_AddAtomicInt(&fake.switch2_helpers, 1);
-    return NULL;
-}
+/* The Switch 2 driver's own helpers answer for the scripted Switch 2 of
+   testblegattswitch2.c, which counts them and answers only the device a
+   scenario arms (testblegattswitch2.h). */
 
 /* The Zwift keys of a session thread that ends. While hold_destroy is set,
    this waits, as a slow destruction would, until the scenario clears it or
@@ -1774,7 +1703,8 @@ static void DT_CheckMapping(int line, SDL_Gamepad *gamepad, const char *const *e
    scenario (s), and the one it writes when it gives up waiting for a close
    for scenario (v). SDL_Quit's report of a thread still joinable is
    counted, and so are the lines of an ended session and of a device SDL's
-   lists ignore. */
+   lists ignore. The Switch 2 driver's lines are kept for its scenarios,
+   (E) to (M). */
 
 static SDL_Mutex *dt_log_lock;
 static char dt_log_watch[256];
@@ -1786,6 +1716,10 @@ static int dt_log_ended_lines;
 static char dt_log_close_wait[256];
 static int dt_log_close_wait_lines;
 static int dt_log_ignored_lines;
+#define DT_SW2_LOG_LINES 512
+static char dt_sw2_log[DT_SW2_LOG_LINES][160];
+static int dt_sw2_log_count;
+static int dt_sw2_log_dropped;
 
 static void SDLCALL DT_LogOutput(void *userdata, int category, SDL_LogPriority priority, const char *message)
 {
@@ -1814,6 +1748,13 @@ static void SDLCALL DT_LogOutput(void *userdata, int category, SDL_LogPriority p
         }
         if (SDL_strstr(message, "ignored by SDL's device lists")) {
             ++dt_log_ignored_lines;
+        }
+        if (SDL_strncmp(message, "BLE Switch2 ", 12) == 0) {
+            if (dt_sw2_log_count < DT_SW2_LOG_LINES) {
+                SDL_strlcpy(dt_sw2_log[dt_sw2_log_count++], message, sizeof(dt_sw2_log[0]));
+            } else {
+                ++dt_sw2_log_dropped;
+            }
         }
         SDL_UnlockMutex(dt_log_lock);
     }
@@ -4984,12 +4925,1394 @@ static void ScenarioSwitch2WatcherCheck(void)
         DT_CHECK(call.time_ns - added.time_ns >= SDL_MS_TO_NS(BLEGATT_WATCHER_CHECK_MS - DT_TICK_SLACK_MS),
                  "the first watcher check came %" SDL_PRIu64 " ms after the listener", SDL_NS_TO_MS(call.time_ns - added.time_ns));
     }
-    DT_CHECK(SDL_GetAtomicInt(&fake.switch2_helpers) == 0, "the Switch 2 driver called %d helpers with no Switch 2 in range",
-             SDL_GetAtomicInt(&fake.switch2_helpers));
+    DT_CHECK(SW2_HelperCalls() == 0, "the Switch 2 driver called %d helpers with no Switch 2 in range", SW2_HelperCalls());
 
 done:
     DT_Stop();
     dt_switch2 = false;
+    DT_End();
+}
+
+/* The Switch 2 driver against the scripted Switch 2 of testblegattswitch2.c
+   (hifihedgehog/SDL#38). Each scenario arms one device, starts SDL with
+   only the Switch 2 driver on, hands the driver the device's advertisement
+   and waits for its connect thread to end. */
+
+/* A clone's connect: two reads of 500 ms that nothing answers, the wait for
+   the unified input and the console session */
+#define DT_SW2_WAIT_MS 10000
+
+/* BLE_CONSOLE_FALLBACK_MS of SDL_ble_switch2joystick.c */
+#define DT_SW2_FALLBACK_MS 1500
+
+/* How much sooner than its timeout a semaphore wait may end, at the
+   granularity of the Windows clock */
+#define DT_SW2_WAIT_SLACK_MS 50
+
+/* The console's commands with every reply matched. Each reply arrives
+   within a few ms, and a reply the driver misses costs its 700 ms wait
+   (BLE_CONSOLE_REPLY_MS). */
+#define DT_SW2_SESSION_LIMIT_MS 3000
+
+/* BLE_ReadMotion's scales: 8 g, and 34.8 rad/s, over 32767 */
+#define DT_SW2_ACCEL (9.80665 * 8.0 / 32767.0)
+#define DT_SW2_GYRO  (34.8 / 32767.0)
+
+/* A scenario's own address. The driver keeps a failed address's backoff
+   across SDL_Quit (BLE_NoteConnectFailure), so no two scenarios share one. */
+#define DT_SW2_ADDRESS(n) (0x98B6E9000000ULL | (Uint64)(n))
+
+#define DT_SW2_BUTTON(b) ((Uint32)1 << (b))
+
+/* The first two reports of an OEM Joy-Con 2 (R) on the unified input, and
+   its factory stick block at 0x130A8, from the capture in PadForge
+   discussion #491 */
+static const char dt_sw2_oem_report1[] =
+    "9b080000000000e0ff0ffff77fc2b78100000000ff11080c0066002b01e6ff480d000000000000000001d1900000bdfe1ffdb9047f0e6d0095ff7b00000000";
+static const char dt_sw2_oem_report2[] =
+    "a2080000000000e0ff0ffff77fc2b78100000000ff11080c0064002d01e8ff480d00000000000000000127930000b8fedffc1305df0e8a00feff5f00000000";
+static const char dt_sw2_oem_factory[] = "fb 77 81 97 b4 49 db 44 4b";
+
+/* Console reports of a NYXI Hyperion 3 from joycon2android
+   ConsolePacketParserTest.kt: the right half at rest, and both halves lying
+   flat with gravity on z and no button down */
+static const char dt_sw2_resting_right[] = "02 18 00 00 07 00 F8 7F 00 00 00 00 00 00 00 1E";
+static const char dt_sw2_flat_right[] =
+    "46 18 00 00 07 00 B8 7F 00 00 00 00 00 00 00 1E FF 86 01 0C 02 00 33 56 01 2F 0F 2C 00 "
+    "3A AB 89 00 00 02 01 00 00 84 FF 00 00 F6 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00";
+static const char dt_sw2_flat_left[] =
+    "46 18 00 00 07 F1 17 82 00 00 00 00 00 00 1E FC 8E 01 0C 00 2E 88 BA 01 8E 52 08 01 A3 "
+    "ED 77 00 00 99 FF 00 00 1C 00 00 00 EF 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00";
+
+/* A user block, the B2 A1 magic then neutral (2100, 1990), max (1300, 1310)
+   and min (1200, 1210), and a second factory block, neutral (2000, 2060),
+   max (1250, 1260) and min (1150, 1160) */
+static const char dt_sw2_user[] = "B2 A1 34 68 7C 14 E5 51 B0 A4 4B";
+static const char dt_sw2_factory2[] = "D0 C7 80 E2 C4 4E 7E 84 48";
+
+/* The user block without the magic, which holds no user calibration */
+static const char dt_sw2_user_no_magic[] = "00 00 34 68 7C 14 E5 51 B0 A4 4B";
+
+/* The unified path's input-mode write (BLE_StartUnifiedJoyCon) */
+static const char dt_sw2_input_mode[] = "01 00 00 00 00 00 00 00 00 03 30";
+
+/* A console's commands, as the side's command characteristic receives them
+   after their 17 zero bytes: switch2_controller_research
+   bluetooth_interface.md "JoyCon 2" without the pairing commands 0x15 and
+   the two 0x03 commands after them, as joycon2android ConsoleCommands.kt and
+   ConsoleSession.kt send it. The LED byte lights all four, as joycon2android
+   starts its session with no player assigned. */
+static const char *const dt_sw2_console_sequence[] = {
+    "07 91 01 01 00 00 00 00",
+    "02 91 01 04 00 08 00 00 40 7E 00 00 00 30 01 00",
+    "10 91 01 01 00 00 00 00",
+    "16 91 01 01 00 00 00 00",
+    "0A 91 01 02 00 04 00 00 03 00 00 00",
+    "09 91 01 07 00 08 00 00 0F 00 00 00 00 00 00 00",
+    "0C 91 01 02 00 04 00 00 37 00 00 00",
+    "02 91 01 04 00 08 00 00 40 7E 00 00 80 30 01 00",
+    "02 91 01 04 00 08 00 00 40 7E 00 00 40 C0 1F 00",
+    "02 91 01 04 00 08 00 00 10 7E 00 00 40 30 01 00",
+    "02 91 01 04 00 08 00 00 18 7E 00 00 00 31 01 00",
+    "11 91 01 03 00 00 00 00",
+    "02 91 01 04 00 08 00 00 20 7E 00 00 60 30 01 00",
+    "0A 91 01 08 00 14 00 00 01 59 09 00 00 FF FF FF FF 35 00 46 00 00 00 00 00 00 00 00",
+    "11 91 01 01 00 00 00 00",
+    "0C 91 01 04 00 04 00 00 37 00 00 00"
+};
+
+/* A transport call of the Switch 2 driver, as the scripted Switch 2
+   records it */
+typedef struct DT_SW2Step
+{
+    SW2EventKind kind;
+    int characteristic;
+    bool response;   /* a write's */
+    const char *hex; /* the bytes, NULL for none, a console command's after its 17 zero bytes */
+} DT_SW2Step;
+
+#define DT_SW2_HANDLER(c)     { SW2_EVENT_HANDLER, (c), false, NULL }
+#define DT_SW2_NOTIFY(c)      { SW2_EVENT_NOTIFY, (c), false, NULL }
+#define DT_SW2_WRITE(c, r, h) { SW2_EVENT_WRITE, (c), (r), (h) }
+#define DT_SW2_RATE           { SW2_EVENT_DESCRIPTOR, SW2_NATIVE_INPUT, false, "85 00" }
+#define DT_SW2_STATUS         { SW2_EVENT_STATUS, -1, false, NULL }
+#define DT_SW2_LED(c, led)    DT_SW2_WRITE((c), true, "09 91 01 07 00 08 00 00 " led " 00 00 00 00 00 00 00")
+
+/* The steps of a clone's connect up to its console commands: the two reads
+   of the stick calibration that nothing answers, the unified input, then
+   the session start and the side's extended response */
+static const DT_SW2Step dt_sw2_clone_before[] = {
+    DT_SW2_HANDLER(SW2_RESPONSE),
+    DT_SW2_NOTIFY(SW2_RESPONSE),
+    DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 40 C0 1F 00"),
+    DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 A8 30 01 00"),
+    DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
+    DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
+    DT_SW2_WRITE(SW2_SESSION_START, true, "01 00"),
+    DT_SW2_HANDLER(SW2_EXTENDED_RESPONSE),
+    DT_SW2_NOTIFY(SW2_EXTENDED_RESPONSE)
+};
+
+static const char *const dt_sw2_roles[SW2_CHARACTERISTICS] = {
+    "the unified input", "649d4ac9", "c765a961", "the vibration output",
+    "the side's command", "the side's input", "the side's extended response", "the session start"
+};
+
+static SW2Event dt_sw2_events[SW2_MAX_EVENTS];
+static int dt_sw2_nevents;
+
+/* Takes the scripted Switch 2's record of the driver's calls */
+static int DT_SW2Events(void)
+{
+    dt_sw2_nevents = SDL_min(SW2_Events(dt_sw2_events, SW2_MAX_EVENTS), SW2_MAX_EVENTS);
+    return dt_sw2_nevents;
+}
+
+static void DT_SW2Describe(SW2EventKind kind, int characteristic, bool response, const Uint8 *data, int length, char *out, size_t size)
+{
+    static const char *const kinds[] = { "a write to", "notifications on", "a handler on", "a descriptor write to", "the status handler of" };
+    char hex[3 * sizeof(dt_sw2_events[0].data) + 1];
+
+    DT_HexText(data, (size_t)SDL_max(length, 0), hex, sizeof(hex));
+    (void)SDL_snprintf(out, size, "%s %s%s%s%s", kinds[kind],
+                       (characteristic >= 0 && characteristic < SW2_CHARACTERISTICS) ? dt_sw2_roles[characteristic] : "the device",
+                       response ? " with response" : "", length > 0 ? ": " : "", hex);
+}
+
+static bool DT_SW2Matches(const SW2Event *event, const DT_SW2Step *step)
+{
+    Uint8 bytes[sizeof(event->data)];
+    int length = 0, skip = 0, i;
+
+    if (event->kind != step->kind || event->characteristic != step->characteristic) {
+        return false;
+    }
+    if (step->kind == SW2_EVENT_WRITE && event->response != step->response) {
+        return false;
+    }
+    if (step->kind == SW2_EVENT_DESCRIPTOR && !event->report_rate) {
+        return false;
+    }
+    if (step->hex) {
+        length = (int)DT_Hex(step->hex, bytes, sizeof(bytes));
+    }
+    if (step->kind == SW2_EVENT_WRITE && step->characteristic == SW2_CONSOLE_COMMAND) {
+        skip = 17;
+        if (event->length < skip) {
+            return false;
+        }
+        for (i = 0; i < skip; ++i) {
+            if (event->data[i] != 0) {
+                return false;
+            }
+        }
+    }
+    return event->length - skip == length && SDL_memcmp(&event->data[skip], bytes, (size_t)length) == 0;
+}
+
+/* The recorded calls from first on are the steps, in order. Returns the
+   index after them, or -1. */
+static int DT_SW2CheckSteps(int line, int first, const DT_SW2Step *steps, int nsteps)
+{
+    char expected[400], got[400];
+    Uint8 bytes[sizeof(dt_sw2_events[0].data)];
+    int i, length;
+
+    if (first < 0) {
+        return -1;
+    }
+    for (i = 0; i < nsteps; ++i) {
+        const DT_SW2Step *step = &steps[i];
+
+        length = step->hex ? (int)DT_Hex(step->hex, bytes, sizeof(bytes)) : 0;
+        DT_SW2Describe(step->kind, step->characteristic, step->response, bytes, length, expected, sizeof(expected));
+        if (first + i >= dt_sw2_nevents) {
+            DT_Check(false, line, "call %d: the driver made none where %s was due", first + i, expected);
+            return -1;
+        }
+        if (!DT_SW2Matches(&dt_sw2_events[first + i], step)) {
+            const SW2Event *event = &dt_sw2_events[first + i];
+
+            DT_SW2Describe(event->kind, event->characteristic, event->response, event->data, event->length, got, sizeof(got));
+            DT_Check(false, line, "call %d: the driver made %s where %s was due", first + i, got, expected);
+            return -1;
+        }
+    }
+    DT_Check(true, line, "steps");
+    return first + nsteps;
+}
+
+/* The index of the first recorded call of that kind on that characteristic
+   from first on, or -1 */
+static int DT_SW2Find(int first, SW2EventKind kind, int characteristic)
+{
+    int i;
+
+    for (i = SDL_max(first, 0); i < dt_sw2_nevents; ++i) {
+        if (dt_sw2_events[i].kind == kind && dt_sw2_events[i].characteristic == characteristic) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int DT_SW2Count(SW2EventKind kind, int characteristic)
+{
+    int i, count = 0;
+
+    for (i = 0; i < dt_sw2_nevents; ++i) {
+        if (dt_sw2_events[i].kind == kind && dt_sw2_events[i].characteristic == characteristic) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* The index of the first write of exactly these bytes, on any
+   characteristic and a console command's after its 17 zero bytes, or -1 */
+static int DT_SW2FindWrite(const char *hex)
+{
+    Uint8 bytes[sizeof(dt_sw2_events[0].data)];
+    const int length = (int)DT_Hex(hex, bytes, sizeof(bytes));
+    int i;
+
+    for (i = 0; i < dt_sw2_nevents; ++i) {
+        const SW2Event *event = &dt_sw2_events[i];
+        const int skip = (event->characteristic == SW2_CONSOLE_COMMAND) ? 17 : 0;
+
+        if (event->kind == SW2_EVENT_WRITE && event->length - skip == length &&
+            SDL_memcmp(&event->data[skip], bytes, (size_t)length) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* The Switch 2 driver's lines since DT_SW2Start that hold text */
+static int DT_SW2LogCount(const char *text)
+{
+    int i, count = 0;
+
+    SDL_LockMutex(dt_log_lock);
+    for (i = 0; i < dt_sw2_log_count; ++i) {
+        if (SDL_strstr(dt_sw2_log[i], text)) {
+            ++count;
+        }
+    }
+    SDL_UnlockMutex(dt_log_lock);
+    return count;
+}
+
+static bool DT_SW2WaitLog(const char *text, int timeout_ms)
+{
+    const Uint64 start = SDL_GetTicks();
+
+    for (;;) {
+        if (DT_SW2LogCount(text) > 0) {
+            return true;
+        }
+        if (DT_Expired(start, timeout_ms)) {
+            return false;
+        }
+        DT_Pump();
+    }
+}
+
+/* The advertisement of a Switch 2 controller: Nintendo's company ID, then
+   the vendor and product IDs at 3 and 5, where BLE_OnAdvertisement reads
+   them */
+static bool DT_SW2Advertise(Uint64 address, Uint16 product)
+{
+    const Uint8 data[] = { 0x01, 0x00, 0x03, 0x7E, 0x05, (Uint8)product, (Uint8)(product >> 8), 0x00, 0x01, 0x00,
+                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F };
+    SDL_BLEAdvertisement ad;
+
+    DT_Ad(&ad, address, SDL_BLE_AD_ADVERTISEMENT, NULL);
+    DT_AdManufacturer(&ad, 0x0553, data, (Uint8)sizeof(data));
+    return DT_Advertise(&ad);
+}
+
+/* Arms the script and starts SDL with only the Switch 2 driver on */
+static bool DT_SW2Start(const SW2Script *script)
+{
+    SDL_LockMutex(dt_log_lock);
+    dt_sw2_log_count = 0;
+    dt_sw2_log_dropped = 0;
+    SDL_UnlockMutex(dt_log_lock);
+    SW2_Arm(script);
+    dt_switch2 = true;
+    return DT_Start(NULL, NULL);
+}
+
+/* Pumps until count connect threads have ended. Each joins the MTA through
+   SDL_BLEGATT_InitThread first and leaves it last (BLE_ConnectThread). */
+static bool DT_SW2WaitConnects(int count, int timeout_ms)
+{
+    const Uint64 start = SDL_GetTicks();
+
+    for (;;) {
+        int inits, quits;
+
+        SDL_LockMutex(fake.mutex);
+        inits = fake.thread_inits;
+        quits = fake.thread_quits;
+        SDL_UnlockMutex(fake.mutex);
+        if (inits >= count && quits == inits) {
+            return true;
+        }
+        if (DT_Expired(start, timeout_ms)) {
+            return false;
+        }
+        DT_Pump();
+    }
+}
+
+/* Hands the driver the script's advertisement and waits for its connect
+   thread to end. Returns the joystick it added, or 0. */
+static SDL_JoystickID DT_SW2Connect(const SW2Script *script)
+{
+    SDL_JoystickID id = 0;
+
+    if (!DT_CHECK(DT_SW2Advertise(script->address, script->product), "the Switch 2 driver added no listener")) {
+        return 0;
+    }
+    if (!DT_CHECK(DT_SW2WaitConnects(1, DT_SW2_WAIT_MS), "the Switch 2 driver's connect thread did not end within %d ms",
+                  DT_SW2_WAIT_MS)) {
+        return 0;
+    }
+    return (DT_Joysticks(&id) == 1) ? id : 0;
+}
+
+/* SDL_Quit, then what the driver must leave of the device: no reference
+   held and no call that breaks its rules */
+static void DT_SW2Stop(void)
+{
+    int dropped;
+
+    DT_Stop();
+    dt_switch2 = false;
+    DT_CHECK(SW2_References() == 0, "the Switch 2 driver held %d references after SDL_Quit", SW2_References());
+    DT_CHECK(SW2_BadCalls() == 0, "the Switch 2 driver made %d calls that break the device's rules", SW2_BadCalls());
+    SDL_LockMutex(dt_log_lock);
+    dropped = dt_sw2_log_dropped;
+    SDL_UnlockMutex(dt_log_lock);
+    DT_CHECK(dropped == 0, "%d of the Switch 2 driver's log lines did not fit", dropped);
+    SW2_Disarm();
+}
+
+/* Each helper makes its call before the message reads SDL_GetError: the
+   order in which a call's arguments are evaluated is unspecified */
+static void DT_SW2EnableSensor(int line, SDL_Gamepad *gamepad, SDL_SensorType type)
+{
+    const bool enabled = SDL_SetGamepadSensorEnabled(gamepad, type, true);
+
+    DT_Check(enabled, line, "sensor %d did not turn on: %s", (int)type, SDL_GetError());
+}
+
+static void DT_SW2SendEffect(int line, SDL_Gamepad *gamepad, const Uint8 *effect, int size)
+{
+    const bool sent = SDL_SendGamepadEffect(gamepad, effect, size);
+
+    DT_Check(sent, line, "SDL_SendGamepadEffect failed: %s", SDL_GetError());
+}
+
+static SDL_Gamepad *DT_SW2Open(int line, SDL_JoystickID id)
+{
+    SDL_Gamepad *gamepad = SDL_OpenGamepad(id);
+
+    DT_Check(gamepad != NULL, line, "SDL_OpenGamepad failed: %s", SDL_GetError());
+    return gamepad;
+}
+
+static bool DT_SW2Push(int line, int characteristic, const Uint8 *data, int length)
+{
+    return DT_Check(SW2_Push(characteristic, data, length), line, "the scripted Switch 2 could not send on %s",
+                    dt_sw2_roles[characteristic]);
+}
+
+/* Puts a 12-bit stick at report[at], as the decoders read one. A stick far
+   over, at (3500, 600), takes the axes past SDL's jitter filter:
+   SDL_OpenJoystick starts every axis of a joystick with a HIDAPI GUID at 0,
+   and SDL_SendJoystickAxis holds an axis there through a first move of 409
+   or less. So a scenario sends a stick far over before one near the
+   center. */
+static void DT_SW2SetStick(Uint8 *report, int at, int x, int y)
+{
+    report[at] = (Uint8)x;
+    report[at + 1] = (Uint8)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
+    report[at + 2] = (Uint8)(y >> 4);
+}
+
+/* The wait runs before the axis is read for the message: the order in which
+   a call's arguments are evaluated is unspecified */
+static void DT_SW2CheckAxis(int line, SDL_Joystick *joystick, int axis, Sint16 value)
+{
+    const bool reached = DT_WaitJoystickAxis(joystick, axis, value, DT_WAIT_MS);
+
+    DT_Check(reached, line, "axis %d is %d, not %d", axis, SDL_GetJoystickAxis(joystick, axis), value);
+}
+
+/* The joystick's raw buttons, one bit each */
+static Uint32 DT_SW2Buttons(SDL_Joystick *joystick)
+{
+    Uint32 mask = 0;
+    int i;
+
+    for (i = 0; i < SDL_GetNumJoystickButtons(joystick) && i < 32; ++i) {
+        if (SDL_GetJoystickButton(joystick, i)) {
+            mask |= DT_SW2_BUTTON(i);
+        }
+    }
+    return mask;
+}
+
+static void DT_SW2CheckButtons(int line, SDL_Joystick *joystick, Uint32 mask)
+{
+    const Uint64 start = SDL_GetTicks();
+
+    while (DT_SW2Buttons(joystick) != mask && !DT_Expired(start, DT_WAIT_MS)) {
+        DT_Pump();
+    }
+    DT_Check(DT_SW2Buttons(joystick) == mask, line, "buttons 0x%05x, not 0x%05x", (unsigned)DT_SW2Buttons(joystick), (unsigned)mask);
+}
+
+/* The sensor reaches the expected values, or with wait false holds them now */
+static void DT_SW2CheckSensor(int line, SDL_Gamepad *gamepad, SDL_SensorType type, const float *expected, bool wait)
+{
+    float data[3] = { 0.0f, 0.0f, 0.0f };
+    bool reached;
+
+    if (wait) {
+        reached = DT_WaitSensor(gamepad, type, expected, data, DT_WAIT_MS);
+    } else {
+        reached = SDL_GetGamepadSensorData(gamepad, type, data, 3) && DT_Near(data[0], expected[0]) &&
+                  DT_Near(data[1], expected[1]) && DT_Near(data[2], expected[2]);
+    }
+    DT_Check(reached, line, "%s (%f, %f, %f), not (%f, %f, %f)", (type == SDL_SENSOR_ACCEL) ? "accelerometer" : "gyroscope",
+             data[0], data[1], data[2], expected[0], expected[1], expected[2]);
+}
+
+/* The calls of a console connect: before's steps, the console's commands,
+   the report rate and the side's input, the status handler and the player
+   LED of the joystick's addition. The session starts no sooner than the
+   fallback after the unified input's notifications, its commands take less
+   than DT_SW2_SESSION_LIMIT_MS, and nothing gets the input-mode write.
+   Returns the index after them, or -1. */
+static int DT_SW2CheckConsoleConnect(int line, const DT_SW2Step *before, int nbefore)
+{
+    static const DT_SW2Step after[] = {
+        DT_SW2_RATE,
+        DT_SW2_HANDLER(SW2_NATIVE_INPUT),
+        DT_SW2_NOTIFY(SW2_NATIVE_INPUT),
+        DT_SW2_STATUS,
+        DT_SW2_LED(SW2_CONSOLE_COMMAND, "01")
+    };
+    DT_SW2Step sequence[DT_COUNT(dt_sw2_console_sequence)];
+    int i, next, notify, start, rate;
+
+    for (i = 0; i < DT_COUNT(dt_sw2_console_sequence); ++i) {
+        sequence[i].kind = SW2_EVENT_WRITE;
+        sequence[i].characteristic = SW2_CONSOLE_COMMAND;
+        sequence[i].response = true;
+        sequence[i].hex = dt_sw2_console_sequence[i];
+    }
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(line, 0, before, nbefore);
+    next = DT_SW2CheckSteps(line, next, sequence, DT_COUNT(sequence));
+    next = DT_SW2CheckSteps(line, next, after, DT_COUNT(after));
+    notify = DT_SW2Find(0, SW2_EVENT_NOTIFY, SW2_UNIFIED_INPUT);
+    start = DT_SW2Find(0, SW2_EVENT_WRITE, SW2_SESSION_START);
+    if (notify >= 0 && start >= 0) {
+        DT_Check(dt_sw2_events[start].ms - dt_sw2_events[notify].ms >= DT_SW2_FALLBACK_MS - DT_SW2_WAIT_SLACK_MS, line,
+                 "the console session started %" SDL_PRIu64 " ms after the unified input's notifications",
+                 dt_sw2_events[start].ms - dt_sw2_events[notify].ms);
+    }
+    rate = DT_SW2Find(0, SW2_EVENT_DESCRIPTOR, SW2_NATIVE_INPUT);
+    if (start >= 0 && rate > start) {
+        DT_Check(dt_sw2_events[rate].ms - dt_sw2_events[start].ms < DT_SW2_SESSION_LIMIT_MS, line,
+                 "the console's commands took %" SDL_PRIu64 " ms, so replies went unmatched",
+                 dt_sw2_events[rate].ms - dt_sw2_events[start].ms);
+    }
+    DT_Check(DT_SW2FindWrite(dt_sw2_input_mode) < 0, line, "a Joy-Con 2 on the console path got the input-mode write");
+    DT_Check(DT_SW2LogCount("no report on the unified input within 1500 ms: starting the console session") == 1, line,
+             "%d log lines for the console fallback", DT_SW2LogCount("starting the console session"));
+    return next;
+}
+
+/* The unified path's input-mode write follows the first report, well
+   inside the console fallback */
+static void DT_SW2CheckNoWait(int line, int write)
+{
+    const int notify = DT_SW2Find(0, SW2_EVENT_NOTIFY, SW2_UNIFIED_INPUT);
+
+    if (DT_Check(notify >= 0 && write > notify, line, "no call after the unified input's notifications")) {
+        DT_Check(dt_sw2_events[write].ms - dt_sw2_events[notify].ms < DT_SW2_FALLBACK_MS / 2, line,
+                 "the unified path waited %" SDL_PRIu64 " ms after the unified input's notifications",
+                 dt_sw2_events[write].ms - dt_sw2_events[notify].ms);
+    }
+}
+
+/* Scenario (E): a genuine Joy-Con 2 (R) takes the unified path. The driver
+   reads the stick calibration over 649d4ac9, subscribes the unified input,
+   and at its first report writes the input mode and the magnetometer's
+   feature bit, with no console session. The capture's report gives the
+   stick through the factory block, and the motion and the magnetometer at
+   the offsets of hid_reports.md, turned for a Joy-Con held sideways. */
+static void ScenarioSwitch2Unified(void)
+{
+    static const DT_SW2Step connect[] = {
+        DT_SW2_HANDLER(SW2_RESPONSE),
+        DT_SW2_NOTIFY(SW2_RESPONSE),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 40 C0 1F 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 A8 30 01 00"),
+        DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
+        DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
+        DT_SW2_WRITE(SW2_COMMAND, false, "01 00 00 00 00 00 00 00 00 03 30"),
+        DT_SW2_WRITE(SW2_COMMAND, false, "0C 91 01 02 00 04 00 00 80 00 00 00"),
+        DT_SW2_WRITE(SW2_COMMAND, false, "0C 91 01 04 00 04 00 00 80 00 00 00"),
+        DT_SW2_STATUS,
+        DT_SW2_LED(SW2_COMMAND, "01")
+    };
+    static const DT_SW2Step open[] = {
+        DT_SW2_LED(SW2_COMMAND, "01")
+    };
+    /* Motion with the magnetometer kept on, then a raw effect */
+    static const DT_SW2Step later[] = {
+        DT_SW2_WRITE(SW2_COMMAND, true, "0C 91 01 02 00 04 00 00 84 00 00 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "0C 91 01 04 00 04 00 00 84 00 00 00"),
+        DT_SW2_LED(SW2_COMMAND, "03")
+    };
+    static const Uint8 effect[] = { 0x09, 0x07, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    /* The capture's (-737, 1209, 3711) and (109, -107, 123) through
+       BLE_ReadMotion, turned for a Joy-Con (R) held sideways */
+    const float accel[3] = { (float)(1209 * DT_SW2_ACCEL), (float)(3711 * DT_SW2_ACCEL), (float)(-737 * DT_SW2_ACCEL) };
+    const float gyro[3] = { (float)(-107 * DT_SW2_GYRO), (float)(123 * DT_SW2_GYRO), (float)(109 * DT_SW2_GYRO) };
+    SW2Script script;
+    Uint8 factory[9], report1[63], report2[63], outer[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+    int next;
+
+    DT_Begin("E", "a genuine Joy-Con 2 (R) on the unified input");
+    (void)DT_Hex(dt_sw2_oem_factory, factory, sizeof(factory));
+    (void)DT_Hex(dt_sw2_oem_report1, report1, sizeof(report1));
+    (void)DT_Hex(dt_sw2_oem_report2, report2, sizeof(report2));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x0E);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_GENUINE;
+    script.factory1 = factory;
+    script.auto_report = report1;
+    script.auto_report_length = (int)sizeof(report1);
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    DT_SetHint(SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER, "1");
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a genuine Joy-Con 2 (R)")) {
+        goto done;
+    }
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, 0, connect, DT_COUNT(connect));
+    DT_SW2CheckNoWait(__LINE__, DT_SW2FindWrite(dt_sw2_input_mode));
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, next, open, DT_COUNT(open));
+    DT_CHECK(SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL) && SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO),
+             "the unified path lacks the accelerometer or the gyroscope");
+    DT_CHECK(SDL_GetNumJoystickAxes(joystick) == SDL_GAMEPAD_AXIS_COUNT + 3, "%d axes with the magnetometer on",
+             SDL_GetNumJoystickAxes(joystick));
+
+    /* The stick far over first */
+    SDL_memcpy(outer, report1, sizeof(outer));
+    DT_SW2SetStick(outer, 13, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, outer, (int)sizeof(outer))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, SDL_MIN_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, SDL_MAX_SINT16);
+    }
+    /* The capture's stick, x 1986 and y 2075, through the factory block:
+       neutral (2043, 2071), max (1175, 1179), min (1243, 1204). A Joy-Con
+       (R) held sideways turns y into LEFTX and x into LEFTY. The
+       magnetometer is at 0x19, 0x1B and 0x1D, on the axes after the
+       gamepad's six. */
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report1, (int)sizeof(report1))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, 111);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, -1502);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_COUNT + 0, 102);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_COUNT + 1, 299);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_COUNT + 2, -26);
+    }
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report2, (int)sizeof(report2))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_COUNT + 0, 100);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_COUNT + 1, 301);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_COUNT + 2, -24);
+    }
+
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_GYRO);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report1, (int)sizeof(report1))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, accel, true);
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_GYRO, gyro, true);
+    }
+    DT_SW2SendEffect(__LINE__, gamepad, effect, (int)sizeof(effect));
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, next, later, DT_COUNT(later));
+    DT_CHECK(next < 0 || next == dt_sw2_nevents, "the driver made %d calls more", dt_sw2_nevents - next);
+    DT_CHECK(DT_SW2LogCount("console session") == 0 && DT_SW2LogCount("starting the console session") == 0,
+             "a genuine Joy-Con 2 logged the console session");
+    DT_CHECK(DT_SW2LogCount("first input report") == 1, "%d log lines for the first input report", DT_SW2LogCount("first input report"));
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (F): a genuine Joy-Con 2 (L) held upright keeps the axes of a
+   Joy-Con in a pair, as the Switch 1 driver leaves its vertical mode
+   unturned. Its stick reads as the left stick of a pair. */
+static void ScenarioSwitch2Vertical(void)
+{
+    static const DT_SW2Step connect[] = {
+        DT_SW2_HANDLER(SW2_RESPONSE),
+        DT_SW2_NOTIFY(SW2_RESPONSE),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 40 C0 1F 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 A8 30 01 00"),
+        DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
+        DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
+        DT_SW2_WRITE(SW2_COMMAND, false, "01 00 00 00 00 00 00 00 00 03 30"),
+        DT_SW2_STATUS,
+        DT_SW2_LED(SW2_COMMAND, "01")
+    };
+    static const DT_SW2Step later[] = {
+        DT_SW2_LED(SW2_COMMAND, "01"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "0C 91 01 02 00 04 00 00 04 00 00 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "0C 91 01 04 00 04 00 00 04 00 00 00")
+    };
+    /* The capture's motion through BLE_ReadMotion, not turned */
+    const float accel[3] = { (float)(-737 * DT_SW2_ACCEL), (float)(3711 * DT_SW2_ACCEL), (float)(-1209 * DT_SW2_ACCEL) };
+    const float gyro[3] = { (float)(109 * DT_SW2_GYRO), (float)(123 * DT_SW2_GYRO), (float)(107 * DT_SW2_GYRO) };
+    SW2Script script;
+    Uint8 factory[9], report[63], outer[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+    int next;
+
+    DT_Begin("F", "a genuine Joy-Con 2 (L) held upright");
+    (void)DT_Hex(dt_sw2_oem_factory, factory, sizeof(factory));
+    (void)DT_Hex(dt_sw2_oem_report1, report, sizeof(report));
+    /* The capture's stick bytes where a left Joy-Con 2 reports its stick */
+    SDL_memcpy(&report[10], &report[13], 3);
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x0F);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT;
+    script.kind = SW2_GENUINE;
+    script.factory1 = factory;
+    script.auto_report = report;
+    script.auto_report_length = (int)sizeof(report);
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    DT_SetHint(SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "1");
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a genuine Joy-Con 2 (L)")) {
+        goto done;
+    }
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, 0, connect, DT_COUNT(connect));
+    DT_SW2CheckNoWait(__LINE__, DT_SW2FindWrite(dt_sw2_input_mode));
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    DT_CHECK(SDL_GetNumJoystickAxes(joystick) == SDL_GAMEPAD_AXIS_COUNT, "%d axes", SDL_GetNumJoystickAxes(joystick));
+    /* The stick far over first, then x 1986 and y 2075 through the factory
+       block, y inverted */
+    SDL_memcpy(outer, report, sizeof(outer));
+    DT_SW2SetStick(outer, 10, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, outer, (int)sizeof(outer))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, SDL_MAX_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, SDL_MAX_SINT16);
+    }
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -1502);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, -112);
+    }
+
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_GYRO);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, accel, true);
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_GYRO, gyro, true);
+    }
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, next, later, DT_COUNT(later));
+    DT_CHECK(next < 0 || next == dt_sw2_nevents, "the driver made %d calls more", dt_sw2_nevents - next);
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (G): a Joy-Con 2 (R) clone that answers only the console channel
+   and replies on the side's extended response. Silent on the unified
+   input, it gets the console session: the session start, the console's
+   commands behind 17 zero bytes, the report rate, then the side's input.
+   It never gets the input-mode write. The stick calibration comes from the
+   factory block at 0x28 in the read of 0x13080. Its reports post the
+   buttons and the stick, and the accelerometer only from a motion block of
+   the right length with its low halves zero. Every command after the
+   session start, the LED and an effect among them, goes to the side's
+   command characteristic. */
+static void ScenarioSwitch2Console(void)
+{
+    static const DT_SW2Step open[] = {
+        DT_SW2_LED(SW2_CONSOLE_COMMAND, "01")
+    };
+    static const DT_SW2Step later[] = {
+        DT_SW2_LED(SW2_CONSOLE_COMMAND, "07"),
+        DT_SW2_LED(SW2_CONSOLE_COMMAND, "0F")
+    };
+    static const Uint8 effect[] = { 0x09, 0x07, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    /* flatRight's (258, -124, 4086) with y negated, turned for a Joy-Con
+       (R) held sideways, then the same with z at 2048 */
+    const float flat[3] = { (float)(124 * DT_SW2_ACCEL), (float)(4086 * DT_SW2_ACCEL), (float)(258 * DT_SW2_ACCEL) };
+    const float raised[3] = { (float)(124 * DT_SW2_ACCEL), (float)(2048 * DT_SW2_ACCEL), (float)(258 * DT_SW2_ACCEL) };
+    SW2Script script;
+    Uint8 factory[9], resting[63], flat_report[63], unified[63], report[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+    int next, events, after;
+
+    DT_Begin("G", "a Joy-Con 2 (R) clone on the console channel");
+    (void)DT_Hex(dt_sw2_oem_factory, factory, sizeof(factory));
+    SDL_zeroa(resting);
+    (void)DT_Hex(dt_sw2_resting_right, resting, sizeof(resting));
+    (void)DT_Hex(dt_sw2_flat_right, flat_report, sizeof(flat_report));
+    (void)DT_Hex(dt_sw2_oem_report1, unified, sizeof(unified));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x10);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_CLONE;
+    script.extended_replies = true;
+    script.factory1 = factory;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Joy-Con 2 (R) clone")) {
+        goto done;
+    }
+    next = DT_SW2CheckConsoleConnect(__LINE__, dt_sw2_clone_before, DT_COUNT(dt_sw2_clone_before));
+    DT_CHECK(DT_SW2LogCount("console session: start written, extended response subscribed") == 1 &&
+             DT_SW2LogCount("console session: right input subscribed") == 1,
+             "the console session's log lines are missing");
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, next, open, DT_COUNT(open));
+    DT_CHECK(SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL) && !SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO),
+             "the console path has a gyroscope or no accelerometer");
+
+    /* B, A, Home, C and SR, ConsolePacketParserTest's right buttons, with
+       the stick far over */
+    SDL_memcpy(report, resting, sizeof(report));
+    report[2] = 0x03;
+    report[3] = 0x51;
+    DT_SW2SetStick(report, 5, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckButtons(__LINE__, joystick,
+                           DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_SOUTH) | DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_EAST) |
+                               DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_GUIDE) | DT_SW2_BUTTON(12) |
+                               DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER));
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, SDL_MIN_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, SDL_MAX_SINT16);
+    }
+    DT_CHECK(DT_SW2WaitLog("first console report", DT_WAIT_MS), "no log line for the first console report");
+
+    /* restingRight's stick, x 2048 and y 2047, through the factory block */
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, resting, 16)) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -653);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 139);
+        DT_SW2CheckButtons(__LINE__, joystick, 0);
+    }
+
+    /* The session's feature mask already runs motion, so the accelerometer
+       turns on with no command */
+    events = DT_SW2Events();
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    after = DT_SW2Events();
+    DT_CHECK(after == events, "turning the accelerometer on made %d calls", after - events);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, flat_report, (int)sizeof(flat_report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, flat, true);
+        DT_SW2CheckButtons(__LINE__, joystick, 0);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -762);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 139);
+    }
+
+    /* A motion block whose length byte is short, then one with a low half
+       that is not zero, each with z at 2048: no sample. Each report's
+       stick shows it was decoded. */
+    SDL_memcpy(report, flat_report, sizeof(report));
+    report[0x0F] = 0x04;
+    report[0x2A] = 0x00;
+    report[0x2B] = 0x08;
+    DT_SW2SetStick(report, 5, 2048, 2047);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -653);
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, flat, false);
+    }
+    SDL_memcpy(report, flat_report, sizeof(report));
+    report[0x20] = 0x01;
+    report[0x2A] = 0x00;
+    report[0x2B] = 0x08;
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -762);
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, flat, false);
+    }
+    /* The same z in a sound block posts */
+    SDL_memcpy(report, flat_report, sizeof(report));
+    report[0x2A] = 0x00;
+    report[0x2B] = 0x08;
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, raised, true);
+    }
+
+    /* A report on the unified input after the console path was chosen is
+       logged and never decoded. Read as a console report, the capture's
+       stick bytes would pin LEFTX. */
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, unified, (int)sizeof(unified))) {
+        DT_CHECK(DT_SW2WaitLog("unified input reported after the console path was chosen", DT_WAIT_MS),
+                 "no log line for a report on the unified input");
+        DT_CHECK(SDL_GetJoystickAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX) == -762, "LEFTX moved to %d",
+                 SDL_GetJoystickAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX));
+    }
+
+    SDL_SetGamepadPlayerIndex(gamepad, 2);
+    DT_SW2SendEffect(__LINE__, gamepad, effect, (int)sizeof(effect));
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, next, later, DT_COUNT(later));
+    DT_CHECK(next < 0 || next == dt_sw2_nevents, "the driver made %d calls more", dt_sw2_nevents - next);
+    DT_CHECK(DT_SW2Count(SW2_EVENT_WRITE, SW2_COMMAND) == 2, "649d4ac9 got %d writes, not the two reads before the session",
+             DT_SW2Count(SW2_EVENT_WRITE, SW2_COMMAND));
+    DT_CHECK(DT_SW2LogCount("first vendor frame") == 0, "a vendor frame was logged with none sent");
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (H): a Joy-Con 2 (L) clone that replies on c765a961 with nothing
+   in flash. The console session runs on the left side's characteristics,
+   the stick maps linearly, and flatLeft's motion block, a byte earlier
+   than the right's, gives the accelerometer. */
+static void ScenarioSwitch2ConsoleLeft(void)
+{
+    /* flatLeft's (-103, 28, 4079) with y negated, turned for a Joy-Con (L)
+       held sideways */
+    const float flat[3] = { (float)(28 * DT_SW2_ACCEL), (float)(4079 * DT_SW2_ACCEL), (float)(103 * DT_SW2_ACCEL) };
+    SW2Script script;
+    Uint8 flat_report[63], report[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+
+    DT_Begin("H", "a Joy-Con 2 (L) clone that replies on c765a961");
+    (void)DT_Hex(dt_sw2_flat_left, flat_report, sizeof(flat_report));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x11);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT;
+    script.kind = SW2_CLONE;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Joy-Con 2 (L) clone")) {
+        goto done;
+    }
+    (void)DT_SW2CheckConsoleConnect(__LINE__, dt_sw2_clone_before, DT_COUNT(dt_sw2_clone_before));
+    DT_CHECK(DT_SW2LogCount("console session: left input subscribed") == 1, "no log line for the left input");
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    /* Down, L, ZL, Minus, the stick, Capture and SL, ConsolePacketParserTest's
+       left buttons, with the stick far over */
+    SDL_memcpy(report, flat_report, sizeof(report));
+    report[2] = 0xF1;
+    report[3] = 0x81;
+    DT_SW2SetStick(report, 5, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckButtons(__LINE__, joystick,
+                           DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_WEST) | DT_SW2_BUTTON(14) | DT_SW2_BUTTON(16) |
+                               DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_START) | DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_LEFT_STICK) |
+                               DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_GUIDE) | DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER));
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, 23167);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, -23233);
+    }
+    /* flatLeft's stick, x 2033 and y 2081, mapped linearly and inverted */
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, flat_report, (int)sizeof(flat_report))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -529);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 239);
+        DT_SW2CheckButtons(__LINE__, joystick, 0);
+    }
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, flat_report, (int)sizeof(flat_report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, flat, true);
+        DT_SW2CheckButtons(__LINE__, joystick, 0);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -529);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 239);
+    }
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (I): a Hyperion 3 Ultra right half. It answers 649d4ac9 but never
+   streams on the unified input, and before every reply it sends a vendor
+   frame on c765a961 and the decoys of testblegattswitch2.c, notifications
+   that differ from the reply in its command, its status, its subcommand,
+   or for a read its length or its address. Its console read of 0x1FC040
+   answers after SW2_SLOW_REPLY_MS, inside the console channel's reply
+   wait. The user block it holds replaces the factory one on both paths,
+   no decoy is taken for a reply, and the first vendor frame is logged
+   once. */
+static void ScenarioSwitch2Ultra(void)
+{
+    static const DT_SW2Step before[] = {
+        DT_SW2_HANDLER(SW2_RESPONSE),
+        DT_SW2_NOTIFY(SW2_RESPONSE),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 40 C0 1F 00"),
+        DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
+        DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
+        DT_SW2_WRITE(SW2_SESSION_START, true, "01 00"),
+        DT_SW2_HANDLER(SW2_EXTENDED_RESPONSE),
+        DT_SW2_NOTIFY(SW2_EXTENDED_RESPONSE)
+    };
+    const float flat[3] = { (float)(124 * DT_SW2_ACCEL), (float)(4086 * DT_SW2_ACCEL), (float)(258 * DT_SW2_ACCEL) };
+    SW2Script script;
+    Uint8 factory[9], user[11], resting[63], flat_report[63], report[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+
+    DT_Begin("I", "a Hyperion 3 Ultra with vendor frames and decoy replies");
+    (void)DT_Hex(dt_sw2_oem_factory, factory, sizeof(factory));
+    (void)DT_Hex(dt_sw2_user, user, sizeof(user));
+    SDL_zeroa(resting);
+    (void)DT_Hex(dt_sw2_resting_right, resting, sizeof(resting));
+    (void)DT_Hex(dt_sw2_flat_right, flat_report, sizeof(flat_report));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x12);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_CLONE_ULTRA;
+    script.extended_replies = true;
+    script.factory1 = factory;
+    script.user1 = user;
+    script.vendor_before_replies = true;
+    script.decoys_before_replies = true;
+    script.slow_console_read = 0x1FC040;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Hyperion 3 Ultra")) {
+        goto done;
+    }
+    (void)DT_SW2CheckConsoleConnect(__LINE__, before, DT_COUNT(before));
+    DT_CHECK(DT_SW2LogCount("first vendor frame") == 1, "%d log lines for the first vendor frame", DT_SW2LogCount("first vendor frame"));
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    /* restingRight's stick through the user block: neutral (2100, 1990),
+       max (1300, 1310), min (1200, 1210). A decoy taken for the read of
+       0x1FC040, or its slow reply missed, leaves the factory block, which
+       maps the stick to (-653, 139). */
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, resting, 16)) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, 1425);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, -1419);
+    }
+    SDL_memcpy(report, resting, sizeof(report));
+    DT_SW2SetStick(report, 5, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, SDL_MIN_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, SDL_MAX_SINT16);
+    }
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, flat_report, (int)sizeof(flat_report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, flat, true);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, 1325);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, -1419);
+    }
+    DT_CHECK(DT_SW2LogCount("first vendor frame") == 1, "%d log lines for the first vendor frame", DT_SW2LogCount("first vendor frame"));
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (J): a Switch 2 Pro Controller reads both sticks' factory
+   blocks, 0x130A8 and 0x130E8, after their user slots, 0x1FC040 and
+   0x1FC080: the first slot is erased, and the second holds a stick block
+   without the magic, which is no user calibration. It waits for no report
+   and posts both sensors, unturned. */
+static void ScenarioSwitch2Pro(void)
+{
+    static const DT_SW2Step connect[] = {
+        DT_SW2_HANDLER(SW2_RESPONSE),
+        DT_SW2_NOTIFY(SW2_RESPONSE),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 40 C0 1F 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 A8 30 01 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 80 C0 1F 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 E8 30 01 00"),
+        DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
+        DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
+        DT_SW2_STATUS,
+        DT_SW2_LED(SW2_COMMAND, "01")
+    };
+    static const DT_SW2Step later[] = {
+        DT_SW2_LED(SW2_COMMAND, "01"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "0C 91 01 02 00 04 00 00 04 00 00 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "0C 91 01 04 00 04 00 00 04 00 00 00")
+    };
+    const float accel[3] = { (float)(-737 * DT_SW2_ACCEL), (float)(3711 * DT_SW2_ACCEL), (float)(-1209 * DT_SW2_ACCEL) };
+    const float gyro[3] = { (float)(109 * DT_SW2_GYRO), (float)(123 * DT_SW2_GYRO), (float)(107 * DT_SW2_GYRO) };
+    SW2Script script;
+    Uint8 factory1[9], factory2[9], user2[11], report[63], outer[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+    int next;
+
+    DT_Begin("J", "a Switch 2 Pro Controller's two calibration slots");
+    (void)DT_Hex(dt_sw2_oem_factory, factory1, sizeof(factory1));
+    (void)DT_Hex(dt_sw2_factory2, factory2, sizeof(factory2));
+    (void)DT_Hex(dt_sw2_user_no_magic, user2, sizeof(user2));
+    (void)DT_Hex(dt_sw2_oem_report1, report, sizeof(report));
+    DT_SW2SetStick(report, 10, 2100, 2000);
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x13);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_PRO;
+    script.kind = SW2_GENUINE;
+    script.factory1 = factory1;
+    script.factory2 = factory2;
+    script.user2 = user2;
+    script.auto_report = report;
+    script.auto_report_length = (int)sizeof(report);
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Switch 2 Pro Controller")) {
+        goto done;
+    }
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, 0, connect, DT_COUNT(connect));
+    DT_SW2CheckNoWait(__LINE__, DT_SW2Find(0, SW2_EVENT_STATUS, -1));
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    DT_CHECK(SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL) && SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO),
+             "the Pro Controller lacks the accelerometer or the gyroscope");
+    /* Both sticks far over first */
+    SDL_memcpy(outer, report, sizeof(outer));
+    DT_SW2SetStick(outer, 10, 3500, 600);
+    DT_SW2SetStick(outer, 13, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, outer, (int)sizeof(outer))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, SDL_MAX_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, SDL_MAX_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTX, SDL_MAX_SINT16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTY, SDL_MAX_SINT16);
+    }
+    /* The left stick, (2100, 2000), through the first factory block, and the
+       right, (1986, 2075), through the second, y inverted */
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, 1589);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 1931);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTX, -398);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTY, -391);
+    }
+
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_GYRO);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, accel, true);
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_GYRO, gyro, true);
+    }
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, next, later, DT_COUNT(later));
+    DT_CHECK(next < 0 || next == dt_sw2_nevents, "the driver made %d calls more", dt_sw2_nevents - next);
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (K): a genuine Joy-Con 2 (R) with erased flash. The 0xFF blocks
+   hold no calibration, so the stick maps linearly instead of pinning, and
+   a lost link on the unified path is logged with how long it held. */
+static void ScenarioSwitch2Erased(void)
+{
+    SW2Script script;
+    Uint8 report[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+
+    DT_Begin("K", "a genuine Joy-Con 2 (R) with erased flash, then link loss");
+    (void)DT_Hex(dt_sw2_oem_report1, report, sizeof(report));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x14);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_GENUINE;
+    script.auto_report = report;
+    script.auto_report_length = (int)sizeof(report);
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a genuine Joy-Con 2 (R)")) {
+        goto done;
+    }
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    /* x 1986 and y 2075 at 16 per count from 2048 */
+    DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, 432);
+    DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, -992);
+
+    if (DT_CHECK(SW2_LoseLink(), "the driver added no status handler")) {
+        DT_CHECK(DT_WaitNoJoystick(DT_WAIT_MS), "the joystick stayed after its link was lost");
+        DT_CHECK(DT_SW2LogCount("after the joystick was added (unified path)") == 1, "no log line for the lost link");
+        DT_CHECK(SW2_References() == 0, "the driver held %d references after the link was lost", SW2_References());
+    }
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (L): a Joy-Con 2 clone whose side's input is missing has no
+   console channel. No joystick is added, every reference is released, and
+   the address backs off, so its next advertisement starts no connect. */
+static void ScenarioSwitch2NoInput(void)
+{
+    static const DT_SW2Step connect[] = {
+        DT_SW2_HANDLER(SW2_RESPONSE),
+        DT_SW2_NOTIFY(SW2_RESPONSE),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 40 C0 1F 00"),
+        DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 A8 30 01 00"),
+        DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
+        DT_SW2_NOTIFY(SW2_UNIFIED_INPUT)
+    };
+    SW2Script script;
+    SDL_JoystickID id;
+    int next, helpers, inits;
+
+    DT_Begin("L", "a Joy-Con 2 clone without the side's input");
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x15);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_CLONE;
+    script.extended_replies = true;
+    script.no_native_input = true;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    DT_CHECK(id == 0 && DT_Joysticks(NULL) == 0, "a joystick was added with no console channel");
+    (void)DT_SW2Events();
+    next = DT_SW2CheckSteps(__LINE__, 0, connect, DT_COUNT(connect));
+    DT_CHECK(next < 0 || next == dt_sw2_nevents, "the driver made %d calls more", dt_sw2_nevents - next);
+    DT_CHECK(DT_SW2LogCount("console channel missing: command=1 input=0") == 1, "no log line for the missing input");
+    DT_CHECK(SW2_References() == 0, "the failed connect held %d references", SW2_References());
+
+    helpers = SW2_HelperCalls();
+    SDL_LockMutex(fake.mutex);
+    inits = fake.thread_inits;
+    SDL_UnlockMutex(fake.mutex);
+    if (DT_CHECK(helpers > 0, "the first advertisement made no helper calls")) {
+        DT_CHECK(DT_SW2Advertise(script.address, script.product), "the Switch 2 driver's listener is gone");
+        DT_PumpFor(DT_QUIET_MS);
+        SDL_LockMutex(fake.mutex);
+        DT_CHECK(fake.thread_inits == inits, "an advertisement inside the backoff started a connect");
+        SDL_UnlockMutex(fake.mutex);
+        DT_CHECK(SW2_HelperCalls() == helpers, "an advertisement inside the backoff made %d helper calls", SW2_HelperCalls() - helpers);
+    }
+
+done:
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (M): a lost link on the console path. The erased flash maps
+   restingRight's stick linearly, and the loss is logged with its path. */
+static void ScenarioSwitch2ConsoleLoss(void)
+{
+    SW2Script script;
+    Uint8 resting[16], outer[16];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+
+    DT_Begin("M", "a lost link on the console path");
+    (void)DT_Hex(dt_sw2_resting_right, resting, sizeof(resting));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x16);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_CLONE;
+    script.extended_replies = true;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Joy-Con 2 (R) clone")) {
+        goto done;
+    }
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    /* The stick far over first, then x 2048 and y 2047 at 16 per count from
+       2048 */
+    SDL_memcpy(outer, resting, sizeof(outer));
+    DT_SW2SetStick(outer, 5, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, outer, (int)sizeof(outer))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -23168);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 23232);
+    }
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, resting, (int)sizeof(resting))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -16);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTY, 0);
+    }
+    if (DT_CHECK(SW2_LoseLink(), "the driver added no status handler")) {
+        DT_CHECK(DT_WaitNoJoystick(DT_WAIT_MS), "the joystick stayed after its link was lost");
+        DT_CHECK(DT_SW2LogCount("after the joystick was added (console path)") == 1, "no log line for the lost link");
+        DT_CHECK(SW2_References() == 0, "the driver held %d references after the link was lost", SW2_References());
+    }
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (N): a Joy-Con 2 (R) clone held upright, with nothing in flash.
+   Its console reports post through the upright layout, as a Joy-Con of a
+   pair: the face buttons, Home and C, the stick on the right stick, and the
+   accelerometer unturned. SR and SL have no place in that layout. */
+static void ScenarioSwitch2ConsoleUpright(void)
+{
+    /* flatRight's (258, -124, 4086) with y negated, unturned */
+    const float flat[3] = { (float)(258 * DT_SW2_ACCEL), (float)(4086 * DT_SW2_ACCEL), (float)(-124 * DT_SW2_ACCEL) };
+    SW2Script script;
+    Uint8 resting[63], flat_report[63], report[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+
+    DT_Begin("N", "a Joy-Con 2 (R) clone held upright");
+    SDL_zeroa(resting);
+    (void)DT_Hex(dt_sw2_resting_right, resting, sizeof(resting));
+    (void)DT_Hex(dt_sw2_flat_right, flat_report, sizeof(flat_report));
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x17);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_CLONE;
+    script.extended_replies = true;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    DT_SetHint(SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "1");
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Joy-Con 2 (R) clone")) {
+        goto done;
+    }
+    (void)DT_SW2CheckConsoleConnect(__LINE__, dt_sw2_clone_before, DT_COUNT(dt_sw2_clone_before));
+
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    /* B, A, Home, C and SR, with the stick far over. SR posts nothing
+       upright. */
+    SDL_memcpy(report, resting, sizeof(report));
+    report[2] = 0x03;
+    report[3] = 0x51;
+    DT_SW2SetStick(report, 5, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, report, (int)sizeof(report))) {
+        DT_SW2CheckButtons(__LINE__, joystick,
+                           DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_SOUTH) | DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_EAST) |
+                               DT_SW2_BUTTON(SDL_GAMEPAD_BUTTON_GUIDE) | DT_SW2_BUTTON(12));
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTX, 23232);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTY, 23167);
+    }
+    DT_SW2EnableSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL);
+    /* flatRight's stick, x 2048 and y 2043, at 16 per count from 2048, y
+       inverted */
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, flat_report, (int)sizeof(flat_report))) {
+        DT_SW2CheckSensor(__LINE__, gamepad, SDL_SENSOR_ACCEL, flat, true);
+        DT_SW2CheckButtons(__LINE__, joystick, 0);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTX, 0);
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_RIGHTY, 79);
+    }
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
     DT_End();
 }
 
@@ -5027,7 +6350,17 @@ static const struct
     { 'A', ScenarioPairThenLoss },
     { 'B', ScenarioQuitWhileFinishing },
     { 'C', ScenarioIgnoreLists },
-    { 'D', ScenarioSwitch2WatcherCheck }
+    { 'D', ScenarioSwitch2WatcherCheck },
+    { 'E', ScenarioSwitch2Unified },
+    { 'F', ScenarioSwitch2Vertical },
+    { 'G', ScenarioSwitch2Console },
+    { 'H', ScenarioSwitch2ConsoleLeft },
+    { 'I', ScenarioSwitch2Ultra },
+    { 'J', ScenarioSwitch2Pro },
+    { 'K', ScenarioSwitch2Erased },
+    { 'L', ScenarioSwitch2NoInput },
+    { 'M', ScenarioSwitch2ConsoleLoss },
+    { 'N', ScenarioSwitch2ConsoleUpright }
 };
 
 int main(int argc, char *argv[])
@@ -5041,6 +6374,7 @@ int main(int argc, char *argv[])
     SDL_SetMainReady();
     dt_main_thread = SDL_GetCurrentThreadID();
     Fake_Setup();
+    SW2_Setup();
     dt_log_lock = SDL_CreateMutex();
     if (!fake.mutex || !dt_log_lock) {
         printf("testblegattdriver: no mutex\n");
@@ -5065,6 +6399,7 @@ int main(int argc, char *argv[])
         }
     }
     Fake_Reset();
+    SW2_Cleanup();
     SDL_DestroyMutex(dt_log_lock);
     SDL_DestroyMutex(fake.mutex);
     printf("testblegattdriver: %d checks, %d failures\n", dt_checks, dt_failures);

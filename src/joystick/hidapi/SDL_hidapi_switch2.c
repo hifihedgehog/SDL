@@ -141,6 +141,15 @@ typedef struct
 
 static void ParseStickCalibration(Switch2_StickCalibration *stick_data, const Uint8 *data)
 {
+    // A block of all 0xFF holds no calibration, the Linux v13 rule
+    // (switch2_parse_stick_calibration). Parsed, it would give neutral = max =
+    // min = 4095 and pin the stick (hifihedgehog/SDL#38), so the stick keeps
+    // its zeros and MapJoystickAxis maps it linearly.
+    static const Uint8 blank[9] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+    if (SDL_memcmp(data, blank, sizeof(blank)) == 0) {
+        return;
+    }
     stick_data->x.neutral = data[0];
     stick_data->x.neutral |= (data[1] & 0x0F) << 8;
 
