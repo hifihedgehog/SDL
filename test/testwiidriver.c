@@ -45,6 +45,36 @@
    4. Disabling the accelerometer turns the camera off and returns to report
       0x32, after deactivating the Motion Plus where one was running.
 
+   For hifihedgehog/SDL#39 the remote also follows Dolphin's camera, which
+   refuses register writes with error 7 until report 0x13 has enabled it and
+   reports its state in bit 3 of a status report's flags
+   (EmuSubroutines.cpp:304-310, :348-356, Camera.cpp:41-49), and Dolphin's
+   Motion Plus, whose detect pin changes raise a status report
+   (MotionPlus.cpp:371-387, WiimoteEmu.cpp:431-447). The driver's clock can
+   skip ahead, and the remote can power off, lose acknowledgments or take
+   queued writes late, as the rumble thread delivers them.
+
+   5. The camera's enable reports reach the remote before its register
+      writes, even when queued writes arrive late.
+   6. A camera start that fails runs again after 1, 2 and 4 seconds, then
+      every 8, logging the register and the error, and a start that holds
+      ends the retries. An acknowledgment that never comes counts as a
+      failure.
+   7. A status report that shows the camera off while sensors are on starts
+      it again, except inside a Motion Plus settle window. A start that
+      landed is checked with a status request once that window passes.
+   8. A remote with no input for 3 seconds gets a status request. One that
+      takes it stays, and its status report restarts the data reports. One
+      that refuses it loses its joystick and keeps its device, which asks
+      again every 3 seconds, and the remote's first report brings a new
+      joystick from a fresh context. So does a path that refuses the
+      request at InitDevice. A read error ends the joystick and sets
+      reads_ended.
+   9. Across a Motion Plus attach and detach the remote streams the data
+      report the driver asked for, and its buttons post, also while the
+      driver still believes a Motion Plus active that sends raw extension
+      frames.
+
    The driver in this file calls the fake, not SDL's HID backends. Each name
    through which it reads, writes, queues a write or adds a joystick is
    defined below before the driver source is included. This object defines
@@ -71,6 +101,8 @@ static int Fake_SendRumbleAndUnlock(SDL_HIDAPI_Device *device, const Uint8 *data
 static bool Fake_JoystickConnected(SDL_HIDAPI_Device *device, SDL_JoystickID *pJoystickID);
 static void Fake_JoystickDisconnected(SDL_HIDAPI_Device *device, SDL_JoystickID joystickID);
 static SDL_Joystick *Fake_GetJoystickFromID(SDL_JoystickID instance_id);
+static Uint64 Fake_GetTicks(void);
+static void Fake_Delay(Uint32 ms);
 
 #undef SDL_hid_read_timeout
 #define SDL_hid_read_timeout Fake_hid_read_timeout
@@ -82,6 +114,10 @@ static SDL_Joystick *Fake_GetJoystickFromID(SDL_JoystickID instance_id);
 #define HIDAPI_JoystickDisconnected Fake_JoystickDisconnected
 #undef SDL_GetJoystickFromID
 #define SDL_GetJoystickFromID Fake_GetJoystickFromID
+#undef SDL_GetTicks
+#define SDL_GetTicks Fake_GetTicks
+#undef SDL_Delay
+#define SDL_Delay Fake_Delay
 
 #include "../src/joystick/hidapi/SDL_hidapi_wii.c"
 
@@ -92,6 +128,10 @@ static SDL_Joystick *Fake_GetJoystickFromID(SDL_JoystickID instance_id);
 #undef HIDAPI_JoystickConnected
 #undef HIDAPI_JoystickDisconnected
 #undef SDL_GetJoystickFromID
+#undef SDL_GetTicks
+#define SDL_GetTicks SDL_GetTicks_REAL
+#undef SDL_Delay
+#define SDL_Delay SDL_Delay_REAL
 
 #include <stdio.h>
 
@@ -112,7 +152,7 @@ static const char *scenario = "";
 
 /* The scripted remote */
 #define FAKE_MAX_REPORTS 64
-#define FAKE_MAX_WRITES  128
+#define FAKE_MAX_WRITES  512
 #define FAKE_REPORT_SIZE 22
 
 typedef enum FakeExtension
@@ -141,7 +181,8 @@ static const Uint8 fake_extension_ids[][6] = {
 
 typedef struct FakeOutput
 {
-    bool async; /* Queued through the rumble thread */
+    bool async;   /* Queued through the rumble thread */
+    bool refused; /* Sent while the remote was off */
     int length;
     Uint8 data[FAKE_REPORT_SIZE];
 } FakeOutput;
@@ -156,15 +197,73 @@ static struct
     bool camera_logic;      /* Output report 0x1A */
     Uint8 camera_mode;      /* Register 0xB00033 */
     Uint8 buttons[2];       /* The core buttons every report carries */
+    bool off;               /* Powered off: every write fails and nothing arrives */
+    bool defer_queued;      /* Queued writes reach the remote at the driver's next read */
+    int camera_nacks;       /* Camera register writes still to refuse with error 7 */
+    Uint32 nack_address;    /* The register camera_nacks refuses, 0 for any */
+    int lost_acks;          /* Write acknowledgments still to lose */
+    int lost_replies;       /* Read replies still to lose */
+    bool mute;              /* Takes every write and answers none */
+    int read_errors;        /* Reads still to fail */
+    int activation_nacks;   /* Motion Plus mode writes still to refuse with error 7 */
     Uint8 queue[FAKE_MAX_REPORTS][FAKE_REPORT_SIZE];
     int queue_length[FAKE_MAX_REPORTS];
     int queue_head;
     int queue_count;
     FakeOutput outputs[FAKE_MAX_WRITES];
     int noutputs;
+    int deferred[FAKE_MAX_WRITES]; /* Indexes into outputs of queued writes not yet delivered */
+    int ndeferred;
     int unexpected; /* Requests no Wii Remote answers this way, or a full log */
     int locks;      /* SDL_HIDAPI_LockRumble without the send that releases it */
 } fake;
+
+/* The driver's clock, which moves only when the driver waits or a test
+   skips ahead, so every delay is exact. It starts far from 0, which the
+   driver takes as "never". */
+static Uint64 fake_now = 1000000;
+
+static Uint64 Fake_GetTicks(void)
+{
+    return fake_now;
+}
+
+static void Fake_Delay(Uint32 ms)
+{
+    fake_now += ms;
+}
+
+static void Skip(Uint64 ms)
+{
+    fake_now += ms;
+}
+
+/* The driver's log lines, which SDL_LogDebug sends here */
+#define LOG_LINES 512
+static char log_lines[LOG_LINES][160];
+static int nlog;
+
+static void SDLCALL CaptureLog(void *userdata, int category, SDL_LogPriority priority, const char *message)
+{
+    (void)userdata;
+    (void)priority;
+    if (category == SDL_LOG_CATEGORY_INPUT && nlog < LOG_LINES) {
+        SDL_strlcpy(log_lines[nlog++], message, sizeof(log_lines[0]));
+    }
+}
+
+/* Whether a line logged since from contains text */
+static bool Logged(int from, const char *text)
+{
+    int i;
+
+    for (i = from; i < nlog; ++i) {
+        if (SDL_strstr(log_lines[i], text)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static SDL_hid_device *FakeHandle(void)
 {
@@ -181,6 +280,13 @@ static void Fake_Queue(const Uint8 *data, int length)
 {
     int slot;
 
+    if (fake.mute) {
+        return;
+    }
+    if (data[0] == 0x21 && fake.lost_replies > 0) {
+        --fake.lost_replies;
+        return;
+    }
     if (fake.queue_count == FAKE_MAX_REPORTS || length > FAKE_REPORT_SIZE) {
         Fake_Unexpected("report beyond the queue");
         return;
@@ -197,7 +303,9 @@ static bool Fake_MotionPlusActive(void)
 }
 
 /* 20 BB BB LF 00 00 VV. A status report stops the data reports until the
-   host selects one again (Linux hid-wiimote-core.c:1420-1421). */
+   host selects one again (Linux hid-wiimote-core.c:1420-1421). Bit 3 of the
+   flags is the camera, which report 0x13 alone sets (Dolphin
+   EmuSubroutines.cpp:354). */
 static void Fake_QueueStatus(void)
 {
     Uint8 report[7];
@@ -206,7 +314,7 @@ static void Fake_QueueStatus(void)
     report[1] = fake.buttons[0];
     report[2] = fake.buttons[1];
     report[3] = (Uint8)(((fake.extension != FAKE_EXT_NONE || Fake_MotionPlusActive()) ? 0x02 : 0x00) |
-                        ((fake.camera && fake.camera_logic) ? 0x08 : 0x00) | 0x10);
+                        (fake.camera ? 0x08 : 0x00) | 0x10);
     report[4] = 0x00;
     report[5] = 0x00;
     report[6] = 0xC8;
@@ -214,11 +322,15 @@ static void Fake_QueueStatus(void)
     fake.report_mode = 0;
 }
 
-/* 22 BB BB 16 EE */
+/* 22 BB BB 16 EE, unless the test loses it */
 static void Fake_QueueAck(Uint8 error)
 {
     Uint8 report[5];
 
+    if (fake.lost_acks > 0) {
+        --fake.lost_acks;
+        return;
+    }
     report[0] = 0x22;
     report[1] = fake.buttons[0];
     report[2] = fake.buttons[1];
@@ -350,11 +462,15 @@ static void Fake_Write(const Uint8 *data, int length)
         break;
     case 0xA600FE:
         /* Activates an inactive Motion Plus in a pass-through mode
-           (hid-wiimote-core.c:493-510) */
-        if (fake.motion_plus && !Fake_MotionPlusActive() && size == 1 && Fake_IsPassthroughMode(data[6])) {
+           (hid-wiimote-core.c:493-510), unless the test refuses it */
+        if (fake.motion_plus && !Fake_MotionPlusActive() && size == 1 && Fake_IsPassthroughMode(data[6]) &&
+            fake.activation_nacks == 0) {
             fake.motion_plus_mode = data[6];
             pulse = true;
         } else {
+            if (fake.activation_nacks > 0) {
+                --fake.activation_nacks;
+            }
             error = 7;
         }
         break;
@@ -370,9 +486,19 @@ static void Fake_Write(const Uint8 *data, int length)
     case 0xB00000:
     case 0xB0001A:
     case 0xB00030:
-        break;
     case 0xB00033:
-        fake.camera_mode = data[6];
+        /* The camera answers on its bus only once report 0x13 has enabled
+           it, and a write it does not take is error 7 (Dolphin
+           EmuSubroutines.cpp:304-310, :348-356, Camera.cpp:41-49). The test
+           can also have a camera that is on refuse writes. */
+        if (!fake.camera) {
+            error = 7;
+        } else if (fake.camera_nacks > 0 && (fake.nack_address == 0 || fake.nack_address == address)) {
+            --fake.camera_nacks;
+            error = 7;
+        } else if (address == 0xB00033) {
+            fake.camera_mode = data[6];
+        }
         break;
     default:
         Fake_Unexpected("write address");
@@ -385,18 +511,9 @@ static void Fake_Write(const Uint8 *data, int length)
     }
 }
 
-/* Every output report, the way a Wii Remote takes it */
-static void Fake_Output(const Uint8 *data, int length, bool async)
+/* Every output report the remote receives, the way a Wii Remote takes it */
+static void Fake_Deliver(const Uint8 *data, int length)
 {
-    if (fake.noutputs == FAKE_MAX_WRITES || length < 2 || length > FAKE_REPORT_SIZE) {
-        Fake_Unexpected("output report");
-        return;
-    }
-    fake.outputs[fake.noutputs].async = async;
-    fake.outputs[fake.noutputs].length = length;
-    SDL_memcpy(fake.outputs[fake.noutputs].data, data, (size_t)length);
-    ++fake.noutputs;
-
     switch (data[0]) {
     case 0x10: /* Rumble */
     case 0x11: /* LEDs */
@@ -428,6 +545,46 @@ static void Fake_Output(const Uint8 *data, int length, bool async)
     }
 }
 
+/* Every output report the driver sends, logged in the order it sent them. A
+   remote that is off takes none. A queued write waits for the driver's next
+   read while the test defers them, as when the rumble thread runs behind. */
+static void Fake_Output(const Uint8 *data, int length, bool async)
+{
+    FakeOutput *output;
+
+    if (fake.noutputs == FAKE_MAX_WRITES || length < 2 || length > FAKE_REPORT_SIZE) {
+        Fake_Unexpected("output report");
+        return;
+    }
+    output = &fake.outputs[fake.noutputs];
+    output->async = async;
+    output->refused = fake.off;
+    output->length = length;
+    SDL_memcpy(output->data, data, (size_t)length);
+    ++fake.noutputs;
+
+    if (fake.off) {
+        return;
+    }
+    if (async && fake.defer_queued) {
+        fake.deferred[fake.ndeferred++] = fake.noutputs - 1;
+        return;
+    }
+    Fake_Deliver(data, length);
+}
+
+static void Fake_DeliverDeferred(void)
+{
+    int i;
+
+    for (i = 0; i < fake.ndeferred; ++i) {
+        const FakeOutput *output = &fake.outputs[fake.deferred[i]];
+
+        Fake_Deliver(output->data, output->length);
+    }
+    fake.ndeferred = 0;
+}
+
 static int Fake_hid_read_timeout(SDL_hid_device *dev, unsigned char *data, size_t length, int milliseconds)
 {
     int size;
@@ -435,6 +592,12 @@ static int Fake_hid_read_timeout(SDL_hid_device *dev, unsigned char *data, size_
     (void)milliseconds;
     if (dev != FakeHandle()) {
         Fake_Unexpected("read handle");
+        return -1;
+    }
+    /* The rumble thread caught up while the driver waited to read */
+    Fake_DeliverDeferred();
+    if (fake.read_errors > 0) {
+        --fake.read_errors;
         return -1;
     }
     if (fake.queue_count == 0) {
@@ -456,8 +619,10 @@ static int Fake_hid_write(SDL_hid_device *dev, const unsigned char *data, size_t
         Fake_Unexpected("write handle");
         return -1;
     }
+    /* A remote that is off fails the write, as Windows does
+       (Dolphin IOWin.cpp:428-438) */
     Fake_Output(data, (int)length, false);
-    return (int)length;
+    return fake.off ? -1 : (int)length;
 }
 
 static bool Fake_LockRumble(void)
@@ -547,12 +712,17 @@ static void ResetFake(FakeExtension extension, bool motion_plus)
     fake.motion_plus = motion_plus;
 }
 
+/* Whether the next StartDevice finds the remote powered off */
+static bool start_off;
+
 /* As the HIDAPI layer sets a device up: InitDevice under the joystick lock */
 static bool StartDevice(FakeExtension extension, bool motion_plus, Uint16 product_id)
 {
     bool result;
 
     ResetFake(extension, motion_plus);
+    fake.off = start_off;
+    nlog = 0;
     SDL_zero(device);
     device.dev = FakeHandle();
     device.name = SDL_strdup("Nintendo Wii Remote");
@@ -741,10 +911,48 @@ static Uint8 LastModeRequest(int from)
     return mode;
 }
 
+static SDL_DriverWii_Context *Ctx(void)
+{
+    return (SDL_DriverWii_Context *)device.context;
+}
+
+/* The index of the first output of a report since from, or -1 */
+static int FindReport(int from, Uint8 report)
+{
+    int i;
+
+    for (i = from; i < fake.noutputs; ++i) {
+        if (fake.outputs[i].data[0] == report) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int CountReport(int from, Uint8 report)
+{
+    int i, count = 0;
+
+    for (i = from; i < fake.noutputs; ++i) {
+        if (fake.outputs[i].data[0] == report) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* Whether the output of a report at index went out on the caller's thread,
+   ahead of the output at before */
+static bool SentBefore(int index, int before)
+{
+    return index >= 0 && index < before && !fake.outputs[index].async;
+}
+
 /* The writes of one camera enable, as WiimoteLib's EnableIR sends them
    (Wiimote.cs:1137-1183) with maximum sensitivity (:1013, :1175-1176), then
-   the data report. All but the two output reports wait for the remote's
-   acknowledge. */
+   the data report. The two output reports go out on the caller's thread, as
+   WiimoteLib writes them (:1214-1220), and the five register writes wait for
+   the remote's acknowledge. */
 typedef struct ExpectedOutput
 {
     bool async;
@@ -771,12 +979,10 @@ static int CameraSequence(ExpectedOutput *out, Uint8 camera_mode, Uint8 report)
     int n = 0, i;
 
     SDL_zerop(&out[n]);
-    out[n].async = true;
     out[n].length = 2;
     out[n].data[0] = 0x13;
     out[n++].data[1] = 0x04;
     SDL_zerop(&out[n]);
-    out[n].async = true;
     out[n].length = 2;
     out[n].data[0] = 0x1A;
     out[n++].data[1] = 0x04;
@@ -910,15 +1116,30 @@ static void ClassicPassthrough(Uint8 ext[6], int lx, int ly, int rx, int ry, Uin
 }
 
 /* Dolphin MotionPlus.h DataFormat: yaw, roll and pitch bits 0-7, then each
-   high 6 bits above two flags, and byte 5 bit 1 marks M+ data */
-static void MotionPlusFrame(Uint8 ext[6], int yaw, int roll, int pitch, bool yaw_slow, bool roll_slow, bool pitch_slow)
+   high 6 bits above two flags. Byte 4 bit 0 is the pass-through extension's
+   connected flag, byte 5 bit 0 is always clear (MotionPlus.cpp:645-646) and
+   byte 5 bit 1 marks M+ data. */
+static void MotionPlusFrame(Uint8 ext[6], int yaw, int roll, int pitch, bool yaw_slow, bool roll_slow, bool pitch_slow, bool child)
 {
     ext[0] = (Uint8)yaw;
     ext[1] = (Uint8)roll;
     ext[2] = (Uint8)pitch;
     ext[3] = (Uint8)((((yaw >> 8) & 0x3F) << 2) | (yaw_slow ? 0x02 : 0x00) | (pitch_slow ? 0x01 : 0x00));
-    ext[4] = (Uint8)((((roll >> 8) & 0x3F) << 2) | (roll_slow ? 0x02 : 0x00) | 0x01);
+    ext[4] = (Uint8)((((roll >> 8) & 0x3F) << 2) | (roll_slow ? 0x02 : 0x00) | (child ? 0x01 : 0x00));
     ext[5] = (Uint8)((((pitch >> 8) & 0x3F) << 2) | 0x02);
+}
+
+/* Dolphin Nunchuk.h DataFormat: the stick, the accelerometer's high bits,
+   then Z and C in bits 0 and 1 of byte 5, each set while released
+   (Nunchuk.h:44-45, :96-102) */
+static void Nunchuk(Uint8 ext[6], int x, int y, bool c, bool z)
+{
+    ext[0] = (Uint8)x;
+    ext[1] = (Uint8)y;
+    ext[2] = 0x80;
+    ext[3] = 0x80;
+    ext[4] = 0x99;
+    ext[5] = (Uint8)((c ? 0x00 : 0x02) | (z ? 0x00 : 0x01));
 }
 
 /* 37 BB BB AA AA AA II*10 EE*6, the remote at rest face up: X and Y at
@@ -946,6 +1167,42 @@ static int Report32(Uint8 report[FAKE_REPORT_SIZE], const Uint8 ext[6])
     report[9] = 0;
     report[10] = 0;
     return 11;
+}
+
+/* 30 BB BB, and 33 BB BB AA AA AA II*12 with no IR dot, the remote at rest
+   face up */
+static int Report30(Uint8 report[FAKE_REPORT_SIZE])
+{
+    report[0] = 0x30;
+    report[1] = fake.buttons[0];
+    report[2] = fake.buttons[1];
+    return 3;
+}
+
+static int Report33(Uint8 report[FAKE_REPORT_SIZE])
+{
+    report[0] = 0x33;
+    report[1] = fake.buttons[0];
+    report[2] = fake.buttons[1];
+    report[3] = 0x80;
+    report[4] = 0x80;
+    report[5] = 0x99;
+    SDL_memset(&report[6], 0xFF, 12);
+    return 18;
+}
+
+/* 35 BB BB AA AA AA EE*16, the six extension bytes and ten more 0xFF */
+static int Report35(Uint8 report[FAKE_REPORT_SIZE], const Uint8 ext[6])
+{
+    report[0] = 0x35;
+    report[1] = fake.buttons[0];
+    report[2] = fake.buttons[1];
+    report[3] = 0x80;
+    report[4] = 0x80;
+    report[5] = 0x99;
+    SDL_memcpy(&report[6], ext, 6);
+    SDL_memset(&report[12], 0xFF, 10);
+    return 22;
 }
 
 /* The remote sends a data report in the mode it streams */
@@ -1175,7 +1432,7 @@ static void TestClassicMotionPlus(void)
     /* 3: a gyro frame, then Classic frames, alternating as a Motion Plus
        sends them (Dolphin MotionPlus.cpp:571-573) */
     BasicIR(ir, 100, 200, 300, 400);
-    MotionPlusFrame(ext, 8192 + 4096, 8192, 8192 - 4096, true, false, false);
+    MotionPlusFrame(ext, 8192 + 4096, 8192, 8192 - 4096, true, false, false, true);
     Feed(report, Report37(report, ir, ext));
     gyro = SensorData(SDL_SENSOR_GYRO);
     /* The driver's axes: -pitch, yaw, roll. Slow yaw: 4096 * 440 / 8192 =
@@ -1243,6 +1500,606 @@ static void TestNoCamera(void)
     }
 }
 
+/* The remote's A in the bare and Nunchuk configurations, where the gamepad
+   layer carries the remote's buttons */
+static bool RemoteA(void)
+{
+    return joystick && joystick->nbuttons > SDL_GAMEPAD_BUTTON_EAST && joystick->buttons[SDL_GAMEPAD_BUTTON_EAST];
+}
+
+static bool StartAndOpen(FakeExtension extension, bool motion_plus, Uint16 product_id)
+{
+    if (!StartDevice(extension, motion_plus, product_id) || !OpenRecord()) {
+        CHECK(false, "the device did not start and open");
+        CloseRecord();
+        StopDevice();
+        return false;
+    }
+    Settle();
+    return true;
+}
+
+/* 5: the bare remote's enable while queued writes reach the remote only at
+   the driver's next read, as when the rumble thread runs behind */
+static void TestCameraOrder(void)
+{
+    int mark, first;
+
+    scenario = "camera order";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    fake.defer_queued = true;
+    mark = fake.noutputs;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    first = FindReport(mark, 0x16);
+    /* Positive control: the start wrote all five registers */
+    CHECK(first >= 0 && CountReport(mark, 0x16) == 5, "%d register writes, not 5", CountReport(mark, 0x16));
+    CHECK(SentBefore(FindReport(mark, 0x13), first) && SentBefore(FindReport(mark, 0x1A), first),
+          "the enable reports were queued, or followed a register write");
+    CHECK(Ctx()->m_bIRActive && fake.camera_mode == 0x03, "the start failed while queued writes arrived late: active %d, mode %02x",
+          Ctx()->m_bIRActive, fake.camera_mode);
+    fake.defer_queued = false;
+    Settle();
+    CHECK(fake.report_mode == 0x33, "the remote streams %02x, not 0x33", fake.report_mode);
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+}
+
+/* 6: starts the camera refuses run again at growing delays until one holds,
+   and an acknowledgment that never comes fails a start */
+static void TestCameraRetry(void)
+{
+    static const Uint32 delays[] = { 1000, 2000, 4000, 8000, 8000 };
+    Uint8 report[FAKE_REPORT_SIZE], ext[6];
+    Uint64 before;
+    int mark, logmark, i;
+
+    /* The empty extension port */
+    SDL_memset(ext, 0xFF, sizeof(ext));
+
+    scenario = "camera retry";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    /* The camera refuses its mode register in five starts */
+    fake.nack_address = 0xB00033;
+    fake.camera_nacks = 5;
+    logmark = nlog;
+    mark = fake.noutputs;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    CHECK(CountReport(mark, 0x16) == 5 && !Ctx()->m_bIRActive, "a refused start counted as started");
+    CHECK(Logged(logmark, "IR camera register 0xb00033 not written: Write memory failed: 7"), "no log line names the register and the error");
+    CHECK(LastModeRequest(mark) == 0x35, "report %02x selected after a failed start, not 0x35", LastModeRequest(mark));
+    Settle();
+    /* The remote streams report 0x35 throughout, so no input timeout comes
+       between the starts */
+    for (i = 0; i < (int)SDL_arraysize(delays); ++i) {
+        const int starts = CountReport(0, 0x13);
+
+        CHECK(Ctx()->m_ulNextIRStart == Fake_GetTicks() + delays[i], "start %d is due in %d ms, not %u", i + 2,
+              (int)(Ctx()->m_ulNextIRStart - Fake_GetTicks()), (unsigned int)delays[i]);
+        Skip(delays[i] - 1);
+        Feed(report, Report35(report, ext));
+        CHECK(CountReport(0, 0x13) == starts, "start %d ran early", i + 2);
+        Skip(1);
+        Feed(report, Report35(report, ext));
+        CHECK(CountReport(0, 0x13) == starts + 1, "start %d did not run when due", i + 2);
+        Settle();
+    }
+    /* The sixth start held, its status request found the camera on, and no
+       start follows */
+    CHECK(Ctx()->m_bIRActive && Ctx()->m_ulNextIRStart == 0 && fake.report_mode == 0x33,
+          "the sixth start did not hold: active %d, report %02x", Ctx()->m_bIRActive, fake.report_mode);
+    CHECK(CountReport(mark, 0x15) == 1 && Ctx()->m_nIRStartFailures == 0, "%d status requests, %d failures counted",
+          CountReport(mark, 0x15), Ctx()->m_nIRStartFailures);
+    mark = fake.noutputs;
+    Skip(30000);
+    Update();
+    CHECK(CountReport(mark, 0x13) == 0, "a start ran after one held");
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "camera acknowledgment lost";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    fake.lost_acks = 1;
+    logmark = nlog;
+    before = Fake_GetTicks();
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    CHECK(!Ctx()->m_bIRActive && Logged(logmark, "IR camera register 0xb00030 not written: Read timed out"),
+          "a lost acknowledgment did not fail the start with a log line");
+    /* Positive control: the driver waited out its 250 ms */
+    CHECK(Fake_GetTicks() - before >= 250, "the acknowledgment wait took %d ms", (int)(Fake_GetTicks() - before));
+    CHECK(Ctx()->m_ulNextIRStart == Fake_GetTicks() + 1000, "the next start is due in %d ms", (int)(Ctx()->m_ulNextIRStart - Fake_GetTicks()));
+    Settle();
+    Skip(1000);
+    Update();
+    CHECK(Ctx()->m_bIRActive, "the second start did not hold");
+    Settle();
+    CHECK(fake.report_mode == 0x33, "the remote streams %02x, not 0x33", fake.report_mode);
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "camera retry after a sensor change";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    fake.nack_address = 0xB00033;
+    fake.camera_nacks = 3;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    Settle();
+    Skip(1000);
+    Feed(report, Report35(report, ext));
+    CHECK(!Ctx()->m_bIRActive && Ctx()->m_ulNextIRStart == Fake_GetTicks() + 2000, "the second start is not due in 2 s");
+    Settle();
+    /* Turning the sensors off and on starts the delays over */
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, false) && SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true),
+          "the sensors did not change");
+    CHECK(!Ctx()->m_bIRActive && Ctx()->m_ulNextIRStart == Fake_GetTicks() + 1000, "after a sensor change the next start is due in %d ms, not 1000",
+          (int)(Ctx()->m_ulNextIRStart - Fake_GetTicks()));
+    Settle();
+    Skip(1000);
+    Feed(report, Report35(report, ext));
+    CHECK(Ctx()->m_bIRActive, "the start after the sensor change did not hold");
+    Settle();
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "camera retry inside a Motion Plus settle window";
+    if (!StartAndOpen(FAKE_EXT_NONE, true, USB_PRODUCT_NINTENDO_WII_REMOTE2)) {
+        return;
+    }
+    fake.nack_address = 0xB00033;
+    fake.camera_nacks = 1;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    CHECK(fake.motion_plus_mode == 0x04 && !Ctx()->m_bIRActive, "the Motion Plus did not start, or the camera did");
+    Settle();
+    /* The start is due after 1 s, and the Motion Plus write settles for 2 */
+    mark = fake.noutputs;
+    MotionPlusFrame(ext, 8192, 8192, 8192, false, false, false, false);
+    Skip(1000);
+    Feed(report, Report35(report, ext));
+    CHECK(CountReport(mark, 0x13) == 0, "a start ran inside the Motion Plus settle window");
+    Skip(WII_MOTIONPLUS_SETTLE_TIME_MS - 1000);
+    Feed(report, Report35(report, ext));
+    CHECK(CountReport(mark, 0x13) == 1 && Ctx()->m_bIRActive, "the start did not run once the window passed");
+    Settle();
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "camera retry with an identify in flight";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    SDL_memset(ext, 0xFF, sizeof(ext));
+    fake.nack_address = 0xB00033;
+    fake.camera_nacks = 1;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    Settle();
+    /* The Motion Plus check goes out just before the start is due, and its
+       reply is lost, so the identify stays in flight */
+    Skip(999);
+    Ctx()->m_ulNextMotionPlusCheck = Fake_GetTicks();
+    fake.lost_replies = 1;
+    Feed(report, Report35(report, ext));
+    CHECK(Ctx()->m_eCommState != k_eWiiCommunicationState_None, "positive control: no identify in flight");
+    mark = fake.noutputs;
+    Skip(1);
+    Feed(report, Report35(report, ext));
+    CHECK(CountReport(mark, 0x13) == 0, "a start ran with an identify in flight");
+    /* The next check gets its reply, and the start follows */
+    Skip(MOTION_PLUS_UPDATE_TIME_MS);
+    Feed(report, Report35(report, ext));
+    Settle();
+    CHECK(Ctx()->m_eCommState == k_eWiiCommunicationState_None && CountReport(mark, 0x13) == 1 && Ctx()->m_bIRActive,
+          "the start did not follow the identify: state %d, %d starts", (int)Ctx()->m_eCommState, CountReport(mark, 0x13));
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+}
+
+/* 7: a status report that shows the camera off */
+static void TestCameraStatus(void)
+{
+    int mark, logmark, index;
+
+    scenario = "camera status bit";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    mark = fake.noutputs;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    CHECK(Ctx()->m_bIRActive && CountReport(mark, 0x15) == 0, "the start did not hold, or its check went out with it");
+    Update();
+    index = FindReport(mark, 0x15);
+    CHECK(index >= 0 && fake.outputs[index].async, "no queued status request checked the start");
+    Settle();
+    CHECK(Ctx()->m_bIRActive && Ctx()->m_ulNextIRStart == 0 && fake.report_mode == 0x33, "the camera's status report stopped it");
+
+    /* The camera turns off, as when the remote resets, and a status report
+       says so */
+    fake.camera = false;
+    fake.camera_logic = false;
+    logmark = nlog;
+    mark = fake.noutputs;
+    Fake_QueueStatus();
+    Update();
+    CHECK(!Ctx()->m_bIRActive && LastModeRequest(mark) == 0x35, "a camera found off kept report %02x", LastModeRequest(mark));
+    CHECK(Logged(logmark, "Status shows the IR camera off"), "no log line for the camera found off");
+    CHECK(Ctx()->m_ulNextIRStart == Fake_GetTicks() + 1000, "the next start is due in %d ms", (int)(Ctx()->m_ulNextIRStart - Fake_GetTicks()));
+    Settle();
+    Skip(1000);
+    Update();
+    CHECK(fake.camera && Ctx()->m_bIRActive && LastModeRequest(mark) == 0x33, "the camera did not start again");
+    Settle();
+    CHECK(fake.report_mode == 0x33, "the remote streams %02x, not 0x33", fake.report_mode);
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "camera status bit with a Motion Plus";
+    if (!StartAndOpen(FAKE_EXT_NONE, true, USB_PRODUCT_NINTENDO_WII_REMOTE2)) {
+        return;
+    }
+    mark = fake.noutputs;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    CHECK(fake.motion_plus_mode == 0x04 && Ctx()->m_bIRActive, "the Motion Plus or the camera did not start");
+    Settle();
+    CHECK(CountReport(mark, 0x15) == 0, "the start was checked inside the Motion Plus settle window");
+    /* A status report from before the camera start, as a Motion Plus pulse
+       can be, arrives inside the window */
+    fake.camera = false;
+    Fake_QueueStatus();
+    fake.camera = true;
+    Update();
+    CHECK(Ctx()->m_bIRActive, "a status report inside the settle window stopped the camera");
+    Settle();
+    Skip(WII_MOTIONPLUS_SETTLE_TIME_MS);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 1, "%d status requests checked the start after the window, not 1", CountReport(mark, 0x15));
+    Settle();
+    CHECK(Ctx()->m_bIRActive && Ctx()->m_nIRStartFailures == 0 && fake.report_mode == 0x37,
+          "the camera after the window: active %d, report %02x", Ctx()->m_bIRActive, fake.report_mode);
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+}
+
+/* 8: a remote with no input for 3 seconds */
+static void TestSilentRemote(void)
+{
+    Uint8 report[FAKE_REPORT_SIZE];
+    int mark, logmark, index;
+    bool started;
+
+    scenario = "quiet remote";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    mark = fake.noutputs;
+    Skip(INPUT_WAIT_TIMEOUT_MS - 1);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 0, "a status request went out before the timeout");
+    Skip(1);
+    Update();
+    index = FindReport(mark, 0x15);
+    CHECK(index >= 0 && !fake.outputs[index].async, "no status request on the caller's thread after 3 s without input");
+    CHECK(disconnections == 0 && device.num_joysticks == 1 && !device.reads_ended, "a quiet remote lost its joystick");
+    mark = fake.noutputs;
+    Settle();
+    CHECK(LastModeRequest(mark) == 0x30 && fake.report_mode == 0x30, "the status report did not restart the data reports");
+    fake.buttons[REMOTE_A_BYTE] = REMOTE_A_BIT;
+    Feed(report, Report30(report));
+    CHECK(RemoteA(), "the remote's A did not post after the restart");
+    fake.buttons[REMOTE_A_BYTE] = 0;
+    Feed(report, Report30(report));
+
+    /* A write still queued holds the request back */
+    SDL_SetAtomicInt(&device.rumble_pending, 1);
+    mark = fake.noutputs;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 0 && disconnections == 0, "the status request went out with a queued write pending");
+    SDL_SetAtomicInt(&device.rumble_pending, 0);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 1 && disconnections == 0, "no status request once the queued write finished");
+    Settle();
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "remote powered off";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    Settle();
+    fake.off = true;
+    logmark = nlog;
+    mark = fake.noutputs;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    index = FindReport(mark, 0x15);
+    CHECK(index >= 0 && fake.outputs[index].refused && !fake.outputs[index].async, "no status request went to the remote that is off");
+    CHECK(disconnections == 1 && device.num_joysticks == 0, "the remote that is off: %d disconnections, %d joysticks",
+          disconnections, device.num_joysticks);
+    /* The device keeps its path and handle, so HIDAPI still counts it as present */
+    CHECK(!device.reads_ended && device.dev == FakeHandle(), "the remote that is off released its device");
+    CHECK(Logged(logmark, "No input for 3000 ms, and the status request failed: Couldn't write output report 0x15"),
+          "no log line for the failed status request");
+    /* Without a joystick the device asks again every 3 s */
+    mark = fake.noutputs;
+    Skip(INPUT_WAIT_TIMEOUT_MS - 1);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 0, "the device asked again before 3 s");
+    Skip(1);
+    Update();
+    index = FindReport(mark, 0x15);
+    CHECK(index >= 0 && fake.outputs[index].refused && connections == 1, "the device did not ask again after 3 s");
+    /* The remote comes back, reset by its power cycle. It takes the next
+       request, and its status report brings a new joystick with its sensors
+       off. */
+    fake.off = false;
+    fake.camera = false;
+    fake.camera_logic = false;
+    fake.camera_mode = 0;
+    fake.report_mode = 0;
+    logmark = nlog;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    Update();
+    CHECK(connections == 2 && device.num_joysticks == 1 && !Ctx()->m_bReportSensors && !Ctx()->m_bIRActive,
+          "the remote that came back: %d connections, %d joysticks, sensors %d, camera %d", connections, device.num_joysticks,
+          Ctx()->m_bReportSensors, Ctx()->m_bIRActive);
+    CHECK(Logged(logmark, "The Wii Remote at fake answers again"), "no log line for the remote that came back");
+    CloseRecord();
+    if (!OpenRecord()) {
+        CHECK(false, "the new joystick did not open");
+        CloseRecord();
+        StopDevice();
+        return;
+    }
+    Settle();
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true) && Ctx()->m_bIRActive, "the camera did not start on the new joystick");
+    Settle();
+    CHECK(fake.camera && fake.report_mode == 0x33, "the new joystick's remote streams %02x", fake.report_mode);
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "remote that takes writes and answers none";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    fake.mute = true;
+    mark = fake.noutputs;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 1 && disconnections == 0, "the first status request: %d sent, %d disconnections",
+          CountReport(mark, 0x15), disconnections);
+    Update();
+    Update();
+    CHECK(CountReport(mark, 0x15) == 1, "the status request went out again within the timeout: %d sent", CountReport(mark, 0x15));
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    CHECK(CountReport(mark, 0x15) == 2 && disconnections == 0, "the next timeout: %d sent, %d disconnections",
+          CountReport(mark, 0x15), disconnections);
+    fake.mute = false;
+    CloseRecord();
+    StopDevice();
+
+    scenario = "read error";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    fake.read_errors = 1;
+    Update();
+    CHECK(disconnections == 1 && device.num_joysticks == 0 && device.reads_ended, "a read error kept the joystick, or left reads_ended clear");
+    CloseRecord();
+    StopDevice();
+
+    scenario = "read error with a camera check due";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true) && Ctx()->m_bIRActive && Ctx()->m_ulIRCheck,
+          "positive control: no camera check due");
+    mark = fake.noutputs;
+    fake.read_errors = 1;
+    Update();
+    CHECK(CountReport(mark, 0x15) == 0 && disconnections == 1 && device.reads_ended, "the camera check went out on a read error");
+    CloseRecord();
+    StopDevice();
+
+    scenario = "read error with a camera start due";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        return;
+    }
+    fake.nack_address = 0xB00033;
+    fake.camera_nacks = 1;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true) && !Ctx()->m_bIRActive, "positive control: the start held");
+    Settle();
+    Skip(1000);
+    mark = fake.noutputs;
+    fake.read_errors = 1;
+    Update();
+    CHECK(CountReport(mark, 0x13) == 0 && disconnections == 1 && device.reads_ended, "a camera start ran on a read error");
+    CloseRecord();
+    StopDevice();
+
+    scenario = "no remote at InitDevice";
+    start_off = true;
+    started = StartDevice(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE);
+    start_off = false;
+    CHECK(started && connections == 0 && device.num_joysticks == 0 && !device.reads_ended,
+          "a path with no remote: started %d, %d connections, reads_ended %d", started, connections, device.reads_ended);
+    CHECK(fake.noutputs == 1 && fake.outputs[0].data[0] == 0x15 && fake.outputs[0].refused && !fake.outputs[0].async,
+          "InitDevice sent %d writes, not one status request", fake.noutputs);
+    CHECK(Logged(0, "No Wii Remote answers at fake: Couldn't write output report 0x15"), "no log line for the path with no remote");
+    /* A remote that takes the request but sends nothing gets no joystick */
+    fake.off = false;
+    fake.mute = true;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    Update();
+    CHECK(connections == 0 && CountReport(0, 0x15) == 2, "a remote that sends nothing: %d connections, %d requests",
+          connections, CountReport(0, 0x15));
+    /* Its first report brings the joystick */
+    fake.mute = false;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    Update();
+    CHECK(connections == 1 && device.num_joysticks == 1 && DriverType() == k_eWiiExtensionControllerType_None,
+          "the remote's first report: %d connections, type %d", connections, DriverType());
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    StopDevice();
+
+    scenario = "read error without a joystick";
+    start_off = true;
+    started = StartDevice(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE);
+    start_off = false;
+    CHECK(started && device.num_joysticks == 0 && !device.reads_ended, "positive control: the path with no remote");
+    fake.read_errors = 1;
+    Update();
+    CHECK(device.reads_ended && connections == 0, "a read error without a joystick left reads_ended clear");
+    StopDevice();
+}
+
+/* 9: the data report the driver selects and the one the remote streams,
+   across a Motion Plus attach and detach with sensors on */
+static void TestMotionPlusTrace(void)
+{
+    Uint8 report[FAKE_REPORT_SIZE], ir[10], ext[6];
+    int mark;
+
+    /* No IR dot */
+    SDL_memset(ir, 0xFF, sizeof(ir));
+
+    scenario = "Motion Plus attach";
+    if (!StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE2)) {
+        return;
+    }
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    Settle();
+    CHECK(fake.report_mode == 0x33 && LastModeRequest(0) == 0x33, "the bare remote streams %02x", fake.report_mode);
+    fake.buttons[REMOTE_A_BYTE] = REMOTE_A_BIT;
+    Feed(report, Report33(report));
+    CHECK(RemoteA(), "the remote's A did not post before the attach");
+
+    /* A Motion Plus with nothing behind it plugs in. Inactive, it passes the
+       empty port's detect pin through, so no status report comes (Dolphin
+       MotionPlus.cpp:375-377), and the remote keeps streaming 0x33. */
+    fake.motion_plus = true;
+    fake.buttons[REMOTE_A_BYTE] = 0;
+    Feed(report, Report33(report));
+    CHECK(!RemoteA(), "the remote's A stuck after the attach");
+    /* The periodic check finds it, and the driver adds the joystick again */
+    Skip(MOTION_PLUS_UPDATE_TIME_MS);
+    Settle();
+    CHECK(disconnections == 1 && connections == 2 && Ctx()->m_bMotionPlusPresent,
+          "the Motion Plus was not found: %d disconnections, %d connections, present %d", disconnections, connections, Ctx()->m_bMotionPlusPresent);
+    /* The app opens the new joystick only after 4 s. A remote that answers
+       the status request keeps it meanwhile. */
+    Skip(4000);
+    Update();
+    Settle();
+    CHECK(disconnections == 1 && device.num_joysticks == 1, "the joystick added again was dropped before the app opened it");
+    CloseRecord();
+    if (!OpenRecord()) {
+        CHECK(false, "the joystick added again did not open");
+        CloseRecord();
+        StopDevice();
+        return;
+    }
+    Settle();
+    CHECK(fake.motion_plus_mode == 0x04 && fake.report_mode == 0x37 && LastModeRequest(0) == 0x37 && CountSensor(SDL_SENSOR_GYRO) == 1,
+          "after the reopen: Motion Plus mode %02x, report %02x, last request %02x, %d gyros", fake.motion_plus_mode, fake.report_mode,
+          LastModeRequest(0), CountSensor(SDL_SENSOR_GYRO));
+    fake.buttons[REMOTE_A_BYTE] = REMOTE_A_BIT;
+    MotionPlusFrame(ext, 8192, 8192, 8192, false, false, false, false);
+    Feed(report, Report37(report, ir, ext));
+    CHECK(RemoteA() && disconnections == 1, "the remote's A did not post behind the Motion Plus");
+
+    scenario = "Motion Plus detach";
+    /* The active Motion Plus comes out: the detect pin drops, which stops the
+       data reports and sends a status report (Dolphin WiimoteEmu.cpp:431-447) */
+    fake.motion_plus = false;
+    fake.motion_plus_mode = 0;
+    mark = fake.noutputs;
+    Fake_QueueStatus();
+    Update();
+    CHECK(LastModeRequest(mark) == 0x37 && fake.report_mode == 0x37, "the status report left report %02x", fake.report_mode);
+    /* The empty port reads 0xFF in the extension bytes */
+    fake.buttons[REMOTE_A_BYTE] = 0;
+    SDL_memset(ext, 0xFF, sizeof(ext));
+    Feed(report, Report37(report, ir, ext));
+    CHECK(!RemoteA(), "the remote's A stuck after the detach");
+    fake.buttons[REMOTE_A_BYTE] = REMOTE_A_BIT;
+    Feed(report, Report37(report, ir, ext));
+    CHECK(RemoteA(), "the remote's A did not post with the port empty");
+    /* The check after the settle window finds the Motion Plus gone */
+    Skip(WII_MOTIONPLUS_SETTLE_TIME_MS);
+    Settle();
+    CHECK(disconnections == 2 && connections == 3 && !Ctx()->m_bMotionPlusPresent,
+          "the detach: %d disconnections, %d connections, present %d", disconnections, connections, Ctx()->m_bMotionPlusPresent);
+    CloseRecord();
+    if (!OpenRecord()) {
+        CHECK(false, "the joystick added again did not open");
+        CloseRecord();
+        StopDevice();
+        return;
+    }
+    Settle();
+    CHECK(fake.report_mode == 0x33 && CountSensor(SDL_SENSOR_GYRO) == 0, "after the detach the remote streams %02x with %d gyros",
+          fake.report_mode, CountSensor(SDL_SENSOR_GYRO));
+    fake.buttons[REMOTE_A_BYTE] = 0;
+    Feed(report, Report33(report));
+    fake.buttons[REMOTE_A_BYTE] = REMOTE_A_BIT;
+    Feed(report, Report33(report));
+    CHECK(RemoteA(), "the remote's A did not post after the detach");
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+
+    scenario = "Motion Plus that refuses its activation";
+    if (!StartAndOpen(FAKE_EXT_NUNCHUK, true, USB_PRODUCT_NINTENDO_WII_REMOTE2)) {
+        return;
+    }
+    fake.activation_nacks = 1;
+    CHECK(SDL_SetJoystickSensorEnabled(joystick, SDL_SENSOR_ACCEL, true), "the accelerometer did not enable");
+    /* Positive control: the driver took the refused activation as running */
+    CHECK(fake.motion_plus_mode == 0 && Ctx()->m_ucMotionPlusMode == 0x05, "the activation was not refused: remote %02x, driver %02x",
+          fake.motion_plus_mode, Ctx()->m_ucMotionPlusMode);
+    Settle();
+    CHECK(fake.report_mode == 0x37, "the remote streams %02x, not 0x37", fake.report_mode);
+    /* The inactive Motion Plus passes the Nunchuk's own frames through, Z
+       and C released, which sets byte 5 bit 0 */
+    fake.buttons[REMOTE_A_BYTE] = REMOTE_A_BIT;
+    Nunchuk(ext, 128, 128, false, false);
+    Feed(report, Report37(report, ir, ext));
+    CHECK(RemoteA(), "the remote's A did not post while the driver took the Nunchuk's frames for Motion Plus frames");
+    fake.buttons[REMOTE_A_BYTE] = 0;
+    Feed(report, Report37(report, ir, ext));
+    CHECK(!RemoteA(), "the remote's A stuck");
+    /* After the settle window the camera start's status request goes out,
+       its report arms the Motion Plus check, and the check activates the
+       Motion Plus */
+    Skip(WII_MOTIONPLUS_SETTLE_TIME_MS);
+    Settle();
+    CHECK(fake.motion_plus_mode == 0x05 && Ctx()->m_ucMotionPlusMode == 0x05,
+          "the refused activation was not repaired: remote %02x, driver %02x", fake.motion_plus_mode, Ctx()->m_ucMotionPlusMode);
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+    StopDevice();
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1253,18 +2110,20 @@ int main(int argc, char *argv[])
         printf("SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
-    /* The driver stamps its last status request with SDL_GetTicks and takes
-       0 as none sent, so it would ask again on every update within SDL's
-       first millisecond. No application reaches a joystick that early. */
-    while (SDL_GetTicks() == 0) {
-        SDL_Delay(1);
-    }
+    /* The driver's debug lines, which name each failed camera write */
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_INPUT, SDL_LOG_PRIORITY_DEBUG);
+    SDL_SetLogOutputFunction(CaptureLog, NULL);
 
     TestRegistration();
     TestClassicCamera();
     TestBareRemoteCamera();
     TestClassicMotionPlus();
     TestNoCamera();
+    TestCameraOrder();
+    TestCameraRetry();
+    TestCameraStatus();
+    TestSilentRemote();
+    TestMotionPlusTrace();
 
     SDL_Quit();
 

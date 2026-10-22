@@ -72,3 +72,21 @@ reports then alternate with the extension's, the Nunchuk's accelerometer
 values lose their lowest bit, and the Classic Controller's left stick loses
 its lowest bit. The Wii U Pro Controller, the Balance Board, the extensions
 above and an extension SDL does not recognize power no camera.
+
+While a sensor stays on, a camera start the remote does not complete runs
+again after 1, 2 and 4 seconds, then every 8, and so does one whose status
+report shows the camera off. Each camera write the remote refuses or leaves
+unacknowledged is logged in `SDL_LOG_CATEGORY_INPUT` at debug priority, with
+the register and the error.
+
+## A remote that goes quiet
+
+A remote that sends nothing for 3 seconds gets a status request. A remote
+that takes it keeps its joystick. One that refuses it loses the joystick
+until it answers again. Windows refuses the write for a remote that powered
+off, and the Mayflash DolphinBar for an empty slot. A path that refuses the
+request when SDL first opens it gets no joystick either. SDL keeps such a
+path, so no other backend lists the remote, and asks again every 3 seconds.
+The remote's first report after that brings a new joystick, which starts
+with its sensors off. A read error releases the path, and SDL opens it again
+at the next device change.

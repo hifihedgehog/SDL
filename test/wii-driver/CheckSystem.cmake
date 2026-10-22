@@ -1,9 +1,10 @@
-# Runs before testwiidriver links. It reads the external symbols the test's
-# object file calls and fails when any of them could reach a HID device: one
-# of SDL's HID functions, the HIDAPI rumble thread, the HIDAPI layer's
-# joystick list, SDL's joystick lookup the fake replaces, or a Win32 function
-# that opens or reads a device or loads a library. The scripted remote must be
-# the only device the driver under test can reach.
+# Runs before testwiidriver and testhidapireopen link. It reads the external
+# symbols the test's object file calls and fails when any of them could reach
+# a HID device: one of SDL's HID functions, the HIDAPI rumble thread, the
+# HIDAPI layer's joystick list, SDL's joystick lookup the fake replaces, or a
+# Win32 function that opens or reads a device or loads a library. The scripted
+# remote, or the scripted device list, must be the only device the code under
+# test can reach.
 #   cmake -DDUMPBIN=<dumpbin.exe> -DOBJECT=<object file> -DREPORT=<file> -P CheckSystem.cmake
 foreach(variable DUMPBIN OBJECT REPORT)
     if(NOT DEFINED ${variable})
@@ -43,11 +44,11 @@ foreach(name IN LISTS names)
 endforeach()
 
 list(JOIN names "\n" text)
-file(WRITE "${REPORT}" "External symbols the driver test calls:\n${text}\n")
+file(WRITE "${REPORT}" "External symbols the test calls:\n${text}\n")
 if(forbidden)
     list(JOIN forbidden ", " text)
-    message(FATAL_ERROR "The driver test would reach a device through: ${text}. "
-                        "Define each name the driver calls it through in testwiidriver.c.")
+    message(FATAL_ERROR "The test would reach a device through: ${text}. "
+                        "Define each name the code under test calls it through in the test's source.")
 endif()
 list(LENGTH names count)
 message(STATUS "CheckSystem: ${count} external symbols, none reaches a HID device")
