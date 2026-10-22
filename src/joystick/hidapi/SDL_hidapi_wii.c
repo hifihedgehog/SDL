@@ -45,6 +45,9 @@
    (WiimoteController.cpp:1476-1480). */
 #define WII_MOTIONPLUS_SETTLE_TIME_MS 2000
 #define STATUS_UPDATE_TIME_MS      (15 * 60 * 1000)
+/* A camera start that failed, or whose status report showed the camera off,
+   runs again after 1, 2 and 4 seconds, then every 8 (hifihedgehog/SDL#39) */
+static const Uint32 k_rgunIRStartDelaysMS[] = { 1000, 2000, 4000, 8000 };
 
 #define WII_EXTENSION_NONE            0x2E2E
 #define WII_EXTENSION_UNINITIALIZED   0xFFFF
@@ -226,6 +229,9 @@ typedef struct
     Uint64 m_ulMotionPlusSettleDeadline; // ticks until which M+ identify results are unreliable after a mode write
     bool m_bReportSensors;
     bool m_bIRActive;                          // IR camera enabled (bare Wii Remote, sensors on)
+    Uint64 m_ulNextIRStart;                    // ticks of the next camera start after one that failed or did not hold, 0 for none
+    Uint64 m_ulIRCheck;                        // ticks of the status request that checks a camera start, 0 for none
+    int m_nIRStartFailures;                    // camera starts that failed or did not hold since the camera last held
     bool m_bBalanceBoardCalibrationValid;
     Uint8 m_rgucBalanceBoardCalibration[24];   // Kg0/Kg17/Kg34 x 4 corners x int16, big-endian
     Uint8 m_rgucReadBuffer[k_unWiiPacketDataLength];
@@ -299,7 +305,11 @@ static bool WriteOutput(SDL_DriverWii_Context *ctx, const Uint8 *data, int size,
     }
 #endif
     if (sync) {
-        return SDL_hid_write(ctx->device->dev, data, size) >= 0;
+        // The error names the report for the log lines that report a failed write
+        if (SDL_hid_write(ctx->device->dev, data, size) < 0) {
+            return SDL_SetError("Couldn't write output report 0x%.2x", data[0]);
+        }
+        return true;
     } else {
         // Use the rumble thread for general asynchronous writes
         if (!SDL_HIDAPI_LockRumble()) {
@@ -307,6 +317,14 @@ static bool WriteOutput(SDL_DriverWii_Context *ctx, const Uint8 *data, int size,
         }
         return SDL_HIDAPI_SendRumbleAndUnlock(ctx->device, data, size) >= 0;
     }
+}
+
+static bool RequestStatus(SDL_DriverWii_Context *ctx, bool sync)
+{
+    Uint8 data[SDL_WII_EXT_STATUS_REQUEST_SIZE];
+
+    SDL_WiiExt_BuildStatusRequest(data, ctx->m_bRumbleActive);
+    return WriteOutput(ctx, data, sizeof(data), sync);
 }
 
 static bool ReadInputSync(SDL_DriverWii_Context *ctx, EWiiInputReportIDs expectedID, bool (*isMine)(const Uint8 *))
@@ -468,6 +486,45 @@ static bool SendExtensionReset(SDL_DriverWii_Context *ctx, bool sync)
     return result;
 }
 
+/* The next start of a camera whose start failed or did not hold, at a growing
+   delay (hifihedgehog/SDL#39). Dolphin's RunTasks repeats its camera steps on
+   every pass until each lands (WiimoteController.cpp:434-438, :946-1018). The
+   delay keeps a camera that never answers from holding the joystick lock in
+   acknowledgment waits. */
+static void ScheduleIRStart(SDL_DriverWii_Context *ctx)
+{
+    const int last = (int)SDL_arraysize(k_rgunIRStartDelaysMS) - 1;
+
+    ctx->m_ulNextIRStart = SDL_GetTicks() + k_rgunIRStartDelaysMS[SDL_min(ctx->m_nIRStartFailures, last)];
+    if (ctx->m_nIRStartFailures < last) {
+        ++ctx->m_nIRStartFailures;
+    }
+}
+
+// A camera enable report on this thread, logged when the write fails
+static bool WriteIRReport(SDL_DriverWii_Context *ctx, EWiiOutputReportIDs report)
+{
+    Uint8 data[2];
+
+    data[0] = (Uint8)report;
+    data[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
+    if (!WriteOutput(ctx, data, sizeof(data), true)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera report 0x%.2x not sent: %s", (unsigned int)report, SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
+// A camera register write, logged with the register and the error when it fails
+static bool WriteIRRegister(SDL_DriverWii_Context *ctx, Uint32 address, const Uint8 *data, int size)
+{
+    if (!WriteRegister(ctx, address, data, size, true)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera register 0x%.6x not written: %s", (unsigned int)address, SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
 /* Enable the IR camera, transcribed from WiimoteLib-Trihy EnableIR (Wiimote.cs,
    registers at :57-60). The sequence powers the camera (reports 0x13/0x1a), writes
    max-sensitivity blocks, and selects the data mode. A bare remote uses Extended
@@ -480,26 +537,30 @@ static void EnableIR(SDL_DriverWii_Context *ctx)
 {
     static const Uint8 sensitivity1[9] = { 0x02, 0x00, 0x00, 0x71, 0x01, 0x00, 0x90, 0x00, 0x41 };
     static const Uint8 sensitivity2[2] = { 0x40, 0x00 };
-    Uint8 data[2];
     Uint8 value;
     bool ok = true;
 
-    // 1. IR camera enable (report 0x13), 2. IR logic enable (report 0x1a)
-    data[0] = k_eWiiOutputReportIDs_IRCameraEnable;
-    data[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
-    WriteOutput(ctx, data, sizeof(data), false);
-
-    data[0] = k_eWiiOutputReportIDs_IRCameraEnable2;
-    data[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
-    WriteOutput(ctx, data, sizeof(data), false);
+    /* 1. IR camera enable (report 0x13), 2. IR logic enable (report 0x1a).
+       Both go out on this thread ahead of the register writes, as every
+       reference sends them: WiimoteLib-Trihy on the caller's thread
+       (Wiimote.cs:1137-1151), Unity-Wiimote through one write queue
+       (Wiimote.cs:481-488, WiimoteManager.cs:141-178), and Dolphin after each
+       one's acknowledgment (WiimoteController.cpp:946-977). Queued on the
+       rumble thread, which waits 10 ms after each write, they could reach the
+       remote after the first register write, and the camera does not answer on
+       its bus until report 0x13 has enabled it (Dolphin
+       EmuSubroutines.cpp:348-356), so that write fails with error 7
+       (EmuSubroutines.cpp:304-310, Camera.cpp:41-49). */
+    ok = WriteIRReport(ctx, k_eWiiOutputReportIDs_IRCameraEnable) && ok;
+    ok = WriteIRReport(ctx, k_eWiiOutputReportIDs_IRCameraEnable2) && ok;
 
     // 3. control register <- 0x08
     value = 0x08;
-    ok = WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true) && ok;
+    ok = WriteIRRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value)) && ok;
 
     // 4. sensitivity blocks
-    ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), true) && ok;
-    ok = WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), true) && ok;
+    ok = WriteIRRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1)) && ok;
+    ok = WriteIRRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2)) && ok;
 
     // 5. data mode: Extended only for a bare remote without Motion Plus (report
     // 0x33, 12 IR bytes). With an extension OR an active Motion Plus the report
@@ -508,15 +569,24 @@ static void EnableIR(SDL_DriverWii_Context *ctx)
     // all that fits"). 6. control <- 0x08
     value = (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
              !ctx->m_bMotionPlusPresent) ? WII_IR_MODE_EXTENDED : WII_IR_MODE_BASIC;
-    ok = WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), true) && ok;
+    ok = WriteIRRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value)) && ok;
     value = 0x08;
-    ok = WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), true) && ok;
+    ok = WriteIRRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value)) && ok;
 
     /* Only claim IR is active if every configuration write landed. If a sync write
        timed out, the camera is half-configured, so leaving m_bIRActive false keeps
-       GetButtonPacketType from selecting report 0x33 against it; the next sensor
-       toggle (or reopen) retries the full sequence. */
+       GetButtonPacketType from selecting report 0x33 against it, and UpdateDevice
+       runs the full sequence again after a delay. A start that landed is checked
+       with a status request, whose reply shows whether the camera is on
+       (HandleStatus). The request waits out a Motion Plus mode write, whose
+       pulsed status reports can predate the camera start. */
     ctx->m_bIRActive = ok;
+    if (ok) {
+        ctx->m_ulNextIRStart = 0;
+        ctx->m_ulIRCheck = SDL_max(SDL_GetTicks(), ctx->m_ulMotionPlusSettleDeadline);
+    } else {
+        ScheduleIRStart(ctx);
+    }
 }
 
 static void DisableIR(SDL_DriverWii_Context *ctx)
@@ -532,6 +602,8 @@ static void DisableIR(SDL_DriverWii_Context *ctx)
     WriteOutput(ctx, data, sizeof(data), false);
 
     ctx->m_bIRActive = false;
+    ctx->m_ulNextIRStart = 0;
+    ctx->m_ulIRCheck = 0;
 }
 
 /* Read the 24-byte Balance Board calibration (Kg0/Kg17/Kg34 x 4 corners x int16
@@ -1065,6 +1137,27 @@ static void UpdateDeviceIdentity(SDL_HIDAPI_Device *device)
     device->guid.data[15] = ctx->m_eExtensionControllerType;
 }
 
+/* Identifies the remote and adds its joystick, from a fresh context. A
+   remote that answers again after it refused a write has connected again,
+   which starts its camera, Motion Plus and data report over, and the
+   joystick that had its sensors enabled is gone (hifihedgehog/SDL#39). */
+static bool ConnectRemote(SDL_HIDAPI_Device *device)
+{
+    SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
+
+    SDL_zerop(ctx);
+    ctx->device = device;
+    // The no-input grace period starts now, as at InitDevice
+    ctx->m_ulLastInput = SDL_GetTicks();
+
+    if (device->vendor_id == USB_VENDOR_NINTENDO) {
+        ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
+
+        UpdateDeviceIdentity(device);
+    }
+    return HIDAPI_JoystickConnected(device, NULL);
+}
+
 static bool HIDAPI_DriverWii_InitDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverWii_Context *ctx;
@@ -1086,12 +1179,16 @@ static bool HIDAPI_DriverWii_InitDevice(SDL_HIDAPI_Device *device)
      * to be opened, regardless of app uptime. */
     ctx->m_ulLastInput = SDL_GetTicks();
 
-    if (device->vendor_id == USB_VENDOR_NINTENDO) {
-        ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
-
-        UpdateDeviceIdentity(device);
+    /* Windows keeps listing a Wii Remote that powered off, and the Mayflash
+       DolphinBar lists its empty slots. Only a write tells either from a
+       remote, since it fails (Dolphin IOWin.cpp:428-449, :724-727). A path
+       that refuses a status request gets no joystick until its remote
+       answers (UpdateWithoutJoystick, hifihedgehog/SDL#39). */
+    if (!RequestStatus(ctx, true)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: No Wii Remote answers at %s: %s", device->path, SDL_GetError());
+        return true;
     }
-    return HIDAPI_JoystickConnected(device, NULL);
+    return ConnectRemote(device);
 }
 
 static void HIDAPI_DriverWii_SetDevicePlayerIndex(SDL_HIDAPI_Device *device, SDL_JoystickID instance_id, int player_index)
@@ -1356,8 +1453,10 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
            passthrough frame rides 0x37's extension span beside the IR bytes, the
            arrangement Dolphin's real-Wiimote backend runs and WM+ sensor-bar games
            used (hifihedgehog/SDL#11). This runs after the Motion Plus activation
-           above so EnableIR sees the current M+ state. */
+           above so EnableIR sees the current M+ state. Either change starts the
+           camera's retry delays over. */
         if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType)) {
+            ctx->m_nIRStartFailures = 0;
             if (enabled) {
                 EnableIR(ctx);
             } else {
@@ -1844,13 +1943,20 @@ static void HandleButtonData(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick,
         return;
     }
 
+    /* Motion Plus frames always have byte 5 bit 0 clear (Dolphin
+       MotionPlus.h:109, MotionPlus.cpp:645-646). A frame with it set is
+       invalid, as during a hotplug, or is the extension's own frame from a
+       Motion Plus that did not take its activation write, as a Nunchuk's with
+       Z released (Nunchuk.h:44-45). Its extension bytes are dropped, and the
+       remote's buttons and accelerometer, which the report carries outside
+       them, still post (hifihedgehog/SDL#39). */
+    if (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE &&
+        data->ucNExtensionBytes > 5 && (data->rgucExtension[5] & 0x01)) {
+        data->ucNExtensionBytes = 0;
+    }
+
     if (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE &&
         data->ucNExtensionBytes > 5) {
-        if (data->rgucExtension[5] & 0x01) {
-            // The data is invalid, possibly during a hotplug
-            return;
-        }
-
         /* Record the live passthrough-connected flag: it gates the stored
            child-ID identify when the extension type is re-read behind an
            ACTIVE Motion Plus (the stored registers are stale without it). */
@@ -1946,6 +2052,26 @@ static void HandleStatus(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
     if (ctx->m_eExtensionControllerType != k_eWiiExtensionControllerType_WiiUPro) {
         // Wii U has separate battery level tracking
         UpdatePowerLevelWii(joystick, ctx->m_rgucReadBuffer[6]);
+    }
+
+    /* Bit 3 of the flags byte is the camera, which report 0x13 turns on
+       (Dolphin WiimoteReport.h:198-202, EmuSubroutines.cpp:348-356). A camera
+       found off while sensors are on starts again, as Dolphin resets its camera
+       state on the same bit (WiimoteController.cpp:1698-1699). Inside a Motion
+       Plus settle window the report can be one of its pulses from before the
+       camera start, so it does not count (hifihedgehog/SDL#39). This comes
+       before the data report request below, which must not select IR for a
+       camera that is off. */
+    if (ctx->m_bReportSensors && ctx->m_bIRActive &&
+        WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
+        SDL_GetTicks() >= ctx->m_ulMotionPlusSettleDeadline) {
+        if (ctx->m_rgucReadBuffer[3] & 0x08) {
+            ctx->m_nIRStartFailures = 0;
+        } else {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Status shows the IR camera off, starting it again");
+            ctx->m_bIRActive = false;
+            ScheduleIRStart(ctx);
+        }
     }
 
     // The report data format has been reset, need to update it
@@ -2252,17 +2378,56 @@ static void HandleInput(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
     }
 }
 
+/* A device without a joystick, whose remote refused a status request at
+   InitDevice or after 3 s without input. The device keeps its path and
+   handle, so no other joystick backend lists the remote as its own: they ask
+   HIDAPI_IsDevicePresent, which counts a device that has a driver
+   (SDL_JoystickHandledByAnotherDriver). It gets a status request every 3 s,
+   as Dolphin's scanner writes to every listed interface (IOWin.cpp:703-741,
+   WiimoteReal.cpp:672-674), and the remote's first input, such as the status
+   report a remote that came back sends, brings its joystick back. The
+   request goes through the rumble thread, since only the answer counts, so a
+   write that waits out the HID layer's timeout does not hold the update. A
+   read error means the handle broke: the core releases the device and opens
+   its path again at the next device change (hifihedgehog/SDL#39). */
+static bool UpdateWithoutJoystick(SDL_HIDAPI_Device *device)
+{
+    SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
+    Uint64 now = SDL_GetTicks();
+    bool answered = false;
+    int size;
+
+    while ((size = ReadInput(ctx)) > 0) {
+        answered = true;
+    }
+    if (size < 0) {
+        device->reads_ended = true;
+        return false;
+    }
+    if (answered) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: The Wii Remote at %s answers again", device->path);
+        return ConnectRemote(device);
+    }
+    if (now >= (ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS) &&
+        SDL_GetAtomicInt(&device->rumble_pending) == 0) {
+        RequestStatus(ctx, false);
+        ctx->m_ulLastInput = now;
+    }
+    return true;
+}
+
 static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
     SDL_Joystick *joystick = NULL;
+    bool refused = false;
     int size;
     Uint64 now;
 
     if (device->num_joysticks > 0) {
         joystick = SDL_GetJoystickFromID(device->joysticks[0]);
     } else {
-        return false;
+        return UpdateWithoutJoystick(device);
     }
 
     now = SDL_GetTicks();
@@ -2280,14 +2445,50 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
     {
         SDL_COMPILE_TIME_ASSERT(ENABLE_CONTINUOUS_REPORTING, ENABLE_CONTINUOUS_REPORTING);
     }
-    if (now >= (ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS)) {
-        // Bluetooth may have disconnected, try reopening the controller
-        size = -1;
+    if (size >= 0 && now >= (ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS) &&
+        SDL_GetAtomicInt(&device->rumble_pending) == 0) {
+        /* Bluetooth may have disconnected. A Wii Remote that powered off reads
+           nothing on Windows, where only a write fails (Dolphin
+           IOWin.cpp:428-449), so ask for its status. A remote that takes the
+           request is quiet, not gone, and stays, and once the joystick is open
+           the status report it sends restarts its data reports (HandleStatus).
+           One that refuses it loses its joystick until it answers again
+           (UpdateWithoutJoystick). A write still queued on the rumble thread
+           goes first, as ReadInput waits for it too (hifihedgehog/SDL#39). */
+        if (!RequestStatus(ctx, true)) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: No input for %d ms, and the status request failed: %s", INPUT_WAIT_TIMEOUT_MS, SDL_GetError());
+            refused = true;
+            size = -1;
+        }
+        ctx->m_ulLastInput = now;
     }
 
     if (joystick) {
         // These checks aren't needed on the Wii U Pro Controller
         if (ctx->m_eExtensionControllerType != k_eWiiExtensionControllerType_WiiUPro) {
+
+            /* A camera start that failed, or whose status report showed the
+               camera off, runs again once its delay passes (hifihedgehog/SDL#39).
+               It waits for a Motion Plus mode write to settle, and for an
+               identify in flight, whose reply the start's acknowledgment waits
+               would drop. */
+            if (size >= 0 && ctx->m_ulNextIRStart && now >= ctx->m_ulNextIRStart &&
+                now >= ctx->m_ulMotionPlusSettleDeadline &&
+                ctx->m_eCommState == k_eWiiCommunicationState_None) {
+                ctx->m_ulNextIRStart = 0;
+                if (ctx->m_bReportSensors && !ctx->m_bIRActive &&
+                    WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType)) {
+                    EnableIR(ctx);
+                    ResetButtonPacketType(ctx);
+                }
+            }
+
+            // The status request that checks a camera start (EnableIR)
+            if (size >= 0 && ctx->m_ulIRCheck && now >= ctx->m_ulIRCheck) {
+                ctx->m_ulIRCheck = 0;
+                RequestStatus(ctx, false);
+                ctx->m_ulLastStatus = now;
+            }
 
             // Check to see if the Motion Plus extension status has changed
             if (ctx->m_ulNextMotionPlusCheck && now >= ctx->m_ulNextMotionPlusCheck) {
@@ -2312,8 +2513,15 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
     }
 
     if (size < 0) {
-        // Read error, device is disconnected
+        /* Read error, or a remote that refused a write: device is disconnected.
+           A remote that refused the write keeps the device and its handle
+           (UpdateWithoutJoystick). A read error means the handle broke: the
+           core releases the device and opens its path again at the next
+           device change (hifihedgehog/SDL#39). */
         HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+        if (!refused) {
+            device->reads_ended = true;
+        }
     } else if (ctx->m_bDisconnected) {
         // An extension was hot-plugged (Nunchuk/Classic attach or detach, or a
         // Motion Plus state change). The device stays physically present, so the

@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.22)
 project(SDLWiiDriverTests LANGUAGES C CXX)
 
 # An offline test of SDL_HIDAPI_DriverWii, the HIDAPI Wii driver, for
-# hifihedgehog/SDL#36. The real driver runs against a scripted Wii Remote
-# inside a real static SDL, whose joystick core, sensor API, hints and Wii
-# extension module it uses. No HID device opens and the HIDAPI layer never
-# starts.
+# hifihedgehog/SDL#36 and #39. The real driver runs against a scripted Wii
+# Remote inside a real static SDL, whose joystick core, sensor API, hints and
+# Wii extension module it uses. A second test runs the HIDAPI joystick core
+# against a scripted device list (#39). No HID device opens and SDL's HID
+# layer never starts.
 if(NOT WIN32 OR NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The driver test requires native MSVC for 64-bit Windows.")
 endif()
@@ -125,6 +126,44 @@ add_custom_command(TARGET testwiidriver PRE_LINK
         -P "${CMAKE_CURRENT_LIST_DIR}/CheckSystem.cmake"
     VERBATIM)
 
+# hifihedgehog/SDL#39: the HIDAPI joystick core,
+# src/joystick/hidapi/SDL_hidapijoystick.c, against a scripted device list
+# and a scripted driver in the Wii driver's place, which tests when the core
+# opens a released path again. testhidapireopen.c includes the core the way
+# testwiidriver.c includes the driver, and its object defines the core's
+# symbols, so the static SDL's copy of the core is never linked.
+add_library(testhidapireopen_main OBJECT "${WII_TESTS}/testhidapireopen.c")
+target_compile_definitions(testhidapireopen_main PRIVATE USING_GENERATED_CONFIG_H SDL_STATIC_LIB)
+target_include_directories(testhidapireopen_main PRIVATE
+    "${WII_SDL_ROOT}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/sdl/include-config-$<LOWER_CASE:$<CONFIG>>/build_config"
+    "${CMAKE_CURRENT_BINARY_DIR}/sdl/include-revision")
+target_link_libraries(testhidapireopen_main PRIVATE SDL3::Headers)
+target_compile_options(testhidapireopen_main PRIVATE /wd4100)
+
+add_executable(testhidapireopen $<TARGET_OBJECTS:testhidapireopen_main>)
+target_link_libraries(testhidapireopen PRIVATE SDL3-static)
+
+foreach(target testhidapireopen_main testhidapireopen)
+    set_target_properties(${target} PROPERTIES
+        C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    target_compile_options(${target} PRIVATE /W4 /WX /utf-8)
+    if(SDL_WII_DRIVER_TEST_ASAN)
+        target_compile_options(${target} PRIVATE /fsanitize=address /Zi)
+    endif()
+endforeach()
+# The map shows which object supplies SDL_HIDAPI_JoystickDriver
+target_link_options(testhidapireopen PRIVATE /INCREMENTAL:NO "/MAP:${CMAKE_CURRENT_BINARY_DIR}/testhidapireopen.map")
+if(SDL_WII_DRIVER_TEST_ASAN)
+    target_link_options(testhidapireopen PRIVATE /DEBUG)
+endif()
+add_custom_command(TARGET testhidapireopen PRE_LINK
+    COMMAND "${CMAKE_COMMAND}" "-DDUMPBIN=${WII_DUMPBIN}"
+        "-DOBJECT=$<TARGET_OBJECTS:testhidapireopen_main>"
+        "-DREPORT=${CMAKE_CURRENT_BINARY_DIR}/testhidapireopen-externals.txt"
+        -P "${CMAKE_CURRENT_LIST_DIR}/CheckSystem.cmake"
+    VERBATIM)
+
 # The test never starts SDL's joystick subsystem. Every joystick driver is
 # off all the same, so none could add a device were one started. The Wii
 # driver's own hints, which it reads, are cleared.
@@ -158,3 +197,13 @@ set_tests_properties(wii-driver.sensors PROPERTIES
     ENVIRONMENT "${WII_DRIVER_OFFLINE_ENVIRONMENT}"
     ENVIRONMENT_MODIFICATION "${WII_DRIVER_CLEARED_ENVIRONMENT}")
 set_property(TEST wii-driver.sensors PROPERTY LABELS wii offline)
+
+# The HIDAPI drivers are off, so the scripted driver, which takes no hint, is
+# the only one the core can choose.
+add_test(NAME wii-driver.reopen COMMAND testhidapireopen)
+set_tests_properties(wii-driver.reopen PROPERTIES
+    TIMEOUT 120
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    ENVIRONMENT "${WII_DRIVER_OFFLINE_ENVIRONMENT}"
+    ENVIRONMENT_MODIFICATION "${WII_DRIVER_CLEARED_ENVIRONMENT}")
+set_property(TEST wii-driver.reopen PROPERTY LABELS wii offline)
