@@ -73,11 +73,17 @@ values lose their lowest bit, and the Classic Controller's left stick loses
 its lowest bit. The Wii U Pro Controller, the Balance Board, the extensions
 above and an extension SDL does not recognize power no camera.
 
+No sensor call and no joystick update waits on the remote for the camera or
+the Motion Plus. The camera's writes go one at a time, each once the remote
+has acknowledged the one before it, and the remote's input keeps arriving
+meanwhile. A camera write the remote has not acknowledged 250 ms after it
+was sent goes again, up to four sends in all.
+
 While a sensor stays on, a camera start the remote does not complete runs
 again after 1, 2 and 4 seconds, then every 8, and so does one whose status
 report shows the camera off. Each camera write the remote refuses or leaves
 unacknowledged is logged in `SDL_LOG_CATEGORY_INPUT` at debug priority, with
-the register and the error.
+the register or report and the error.
 
 ## A remote that goes quiet
 

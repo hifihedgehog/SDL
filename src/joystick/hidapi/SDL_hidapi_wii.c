@@ -48,6 +48,11 @@
 /* A camera start that failed, or whose status report showed the camera off,
    runs again after 1, 2 and 4 seconds, then every 8 (hifihedgehog/SDL#39) */
 static const Uint32 k_rgunIRStartDelaysMS[] = { 1000, 2000, 4000, 8000 };
+/* A camera write the remote has not acknowledged 250 ms after the rumble
+   thread's queue drained, the wait ReadInputSync gives a write it sent, goes
+   again, four sends in all, before the start fails (hifihedgehog/SDL#40) */
+#define WII_WRITE_PATIENCE_MS 250
+#define WII_WRITE_MAX_SENDS   4
 
 #define WII_EXTENSION_NONE            0x2E2E
 #define WII_EXTENSION_UNINITIALIZED   0xFFFF
@@ -133,6 +138,29 @@ typedef enum
     k_eWiiCommunicationState_CheckMotionPlusStage1, // Sent standard extension identify request
     k_eWiiCommunicationState_CheckMotionPlusStage2, // Sent Motion Plus extension identify request
 } EWiiCommunicationState;
+
+/* The writes the update loop waits on (hifihedgehog/SDL#40): Motion Plus
+   writes, then the camera start in WiimoteLib's order, each camera write
+   after the one before it is acknowledged */
+typedef enum
+{
+    k_eWiiWriteStep_None,
+    k_eWiiWriteStep_MotionPlus,         // the Motion Plus mode, or its deactivation
+    k_eWiiWriteStep_CameraEnable,       // output report 0x13
+    k_eWiiWriteStep_CameraEnable2,      // output report 0x1a
+    k_eWiiWriteStep_CameraControl,      // 0x08 to the control register
+    k_eWiiWriteStep_CameraSensitivity1, // the first sensitivity block
+    k_eWiiWriteStep_CameraSensitivity2, // the second sensitivity block
+    k_eWiiWriteStep_CameraMode,         // Basic or Extended mode
+    k_eWiiWriteStep_CameraControl2,     // 0x08 to the control register again
+} EWiiWriteStep;
+
+typedef enum
+{
+    k_eWiiMotionPlusWrite_None,
+    k_eWiiMotionPlusWrite_Activate,
+    k_eWiiMotionPlusWrite_Deactivate,
+} EWiiMotionPlusWrite;
 
 typedef enum
 {
@@ -232,6 +260,12 @@ typedef struct
     Uint64 m_ulNextIRStart;                    // ticks of the next camera start after one that failed or did not hold, 0 for none
     Uint64 m_ulIRCheck;                        // ticks of the status request that checks a camera start, 0 for none
     int m_nIRStartFailures;                    // camera starts that failed or did not hold since the camera last held
+    EWiiWriteStep m_eWriteStep;                // the write waiting for its acknowledgment, or none
+    Uint64 m_ulWriteSent;                      // ticks it was last sent
+    int m_nWriteSends;                         // times the camera write was sent, or the Motion Plus writes still to acknowledge
+    bool m_bIRStartPending;                    // a camera start waiting for its turn
+    EWiiMotionPlusWrite m_eMotionPlusWrite;    // a Motion Plus write waiting for its turn
+    Uint8 m_ucMotionPlusWriteMode;             // the mode that activation writes
     bool m_bBalanceBoardCalibrationValid;
     Uint8 m_rgucBalanceBoardCalibration[24];   // Kg0/Kg17/Kg34 x 4 corners x int16, big-endian
     Uint8 m_rgucReadBuffer[k_unWiiPacketDataLength];
@@ -489,8 +523,7 @@ static bool SendExtensionReset(SDL_DriverWii_Context *ctx, bool sync)
 /* The next start of a camera whose start failed or did not hold, at a growing
    delay (hifihedgehog/SDL#39). Dolphin's RunTasks repeats its camera steps on
    every pass until each lands (WiimoteController.cpp:434-438, :946-1018). The
-   delay keeps a camera that never answers from holding the joystick lock in
-   acknowledgment waits. */
+   delay spaces out the starts of a camera that never answers. */
 static void ScheduleIRStart(SDL_DriverWii_Context *ctx)
 {
     const int last = (int)SDL_arraysize(k_rgunIRStartDelaysMS) - 1;
@@ -501,109 +534,106 @@ static void ScheduleIRStart(SDL_DriverWii_Context *ctx)
     }
 }
 
-// A camera enable report on this thread, logged when the write fails
-static bool WriteIRReport(SDL_DriverWii_Context *ctx, EWiiOutputReportIDs report)
+// The output report a step's acknowledgment names
+static Uint8 GetWriteStepReport(EWiiWriteStep step)
 {
-    Uint8 data[2];
-
-    data[0] = (Uint8)report;
-    data[1] = (Uint8)(0x04 | (Uint8)ctx->m_bRumbleActive);
-    if (!WriteOutput(ctx, data, sizeof(data), true)) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera report 0x%.2x not sent: %s", (unsigned int)report, SDL_GetError());
-        return false;
+    switch (step) {
+    case k_eWiiWriteStep_None:
+        return 0;
+    case k_eWiiWriteStep_CameraEnable:
+        return k_eWiiOutputReportIDs_IRCameraEnable;
+    case k_eWiiWriteStep_CameraEnable2:
+        return k_eWiiOutputReportIDs_IRCameraEnable2;
+    default:
+        return k_eWiiOutputReportIDs_WriteMemory;
     }
-    return true;
 }
 
-// A camera register write, logged with the register and the error when it fails
-static bool WriteIRRegister(SDL_DriverWii_Context *ctx, Uint32 address, const Uint8 *data, int size)
+static bool IsCameraStep(EWiiWriteStep step)
 {
-    if (!WriteRegister(ctx, address, data, size, true)) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera register 0x%.6x not written: %s", (unsigned int)address, SDL_GetError());
-        return false;
-    }
-    return true;
+    return step >= k_eWiiWriteStep_CameraEnable;
 }
 
-/* Enable the IR camera, transcribed from WiimoteLib-Trihy EnableIR (Wiimote.cs,
-   registers at :57-60). The sequence powers the camera (reports 0x13/0x1a), writes
-   max-sensitivity blocks, and selects the data mode. A bare remote uses Extended
-   mode (report 0x33); a remote with an extension uses Basic mode (report 0x37,
-   which carries IR and the extension together, WiimoteLib IRExtensionAccel +
-   EnableIR(Basic), Wiimote.cs:386-390/1034). Output-report byte1 must echo the
-   rumble bit, which the driver also drives. The matching report mode is selected
-   afterward via ResetButtonPacketType once m_bIRActive is set. */
-static void EnableIR(SDL_DriverWii_Context *ctx)
+// The camera register a step writes, for the log, or 0 for an output report
+static Uint32 GetWriteStepRegister(EWiiWriteStep step)
+{
+    switch (step) {
+    case k_eWiiWriteStep_CameraControl:
+    case k_eWiiWriteStep_CameraControl2:
+        return WII_IR_REGISTER_CONTROL;
+    case k_eWiiWriteStep_CameraSensitivity1:
+        return WII_IR_REGISTER_SENSITIVITY1;
+    case k_eWiiWriteStep_CameraSensitivity2:
+        return WII_IR_REGISTER_SENSITIVITY2;
+    case k_eWiiWriteStep_CameraMode:
+        return WII_IR_REGISTER_MODE;
+    default:
+        return 0;
+    }
+}
+
+/* Sends the camera step the machine waits on, again on each resend. The
+   steps are WiimoteLib-Trihy's EnableIR (Wiimote.cs:1137-1183, registers at
+   :57-60): power the camera (reports 0x13 and 0x1a), write the
+   maximum-sensitivity blocks, select the data mode. A bare remote uses
+   Extended mode (report 0x33). A remote with an extension uses Basic mode
+   (report 0x37, which carries IR and the extension together, WiimoteLib
+   IRExtensionAccel + EnableIR(Basic), Wiimote.cs:386-390/1034). Byte 1 of
+   reports 0x13 and 0x1a carries the rumble bit, which the driver also drives,
+   and asks for an acknowledgment, bit 1, as Dolphin's and Linux's do
+   (WiimoteController.cpp:950-962, WiimoteReport.h:46-53,
+   hid-wiimote-modules.c:640-661). The camera answers on its bus only once
+   0x13 has enabled it (Dolphin EmuSubroutines.cpp:348-356), so each step goes
+   after the one before it is acknowledged, as Linux waits for each
+   (hid-wiimote-modules.c:640-706). All go through the rumble thread, so none
+   waits here. */
+static void SendCameraStep(SDL_DriverWii_Context *ctx, Uint64 now)
 {
     static const Uint8 sensitivity1[9] = { 0x02, 0x00, 0x00, 0x71, 0x01, 0x00, 0x90, 0x00, 0x41 };
     static const Uint8 sensitivity2[2] = { 0x40, 0x00 };
+    Uint8 data[2];
     Uint8 value;
-    bool ok = true;
 
-    /* 1. IR camera enable (report 0x13), 2. IR logic enable (report 0x1a).
-       Both go out on this thread ahead of the register writes, as every
-       reference sends them: WiimoteLib-Trihy on the caller's thread
-       (Wiimote.cs:1137-1151), Unity-Wiimote through one write queue
-       (Wiimote.cs:481-488, WiimoteManager.cs:141-178), and Dolphin after each
-       one's acknowledgment (WiimoteController.cpp:946-977). Queued on the
-       rumble thread, which waits 10 ms after each write, they could reach the
-       remote after the first register write, and the camera does not answer on
-       its bus until report 0x13 has enabled it (Dolphin
-       EmuSubroutines.cpp:348-356), so that write fails with error 7
-       (EmuSubroutines.cpp:304-310, Camera.cpp:41-49). */
-    ok = WriteIRReport(ctx, k_eWiiOutputReportIDs_IRCameraEnable) && ok;
-    ok = WriteIRReport(ctx, k_eWiiOutputReportIDs_IRCameraEnable2) && ok;
-
-    // 3. control register <- 0x08
-    value = 0x08;
-    ok = WriteIRRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value)) && ok;
-
-    // 4. sensitivity blocks
-    ok = WriteIRRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1)) && ok;
-    ok = WriteIRRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2)) && ok;
-
-    // 5. data mode: Extended only for a bare remote without Motion Plus (report
-    // 0x33, 12 IR bytes). With an extension OR an active Motion Plus the report
-    // must be 0x37, whose span carries 10-byte Basic IR (Dolphin's real-Wiimote
-    // backend uses Basic for the same reason, WiimoteController.cpp:991: "it's
-    // all that fits"). 6. control <- 0x08
-    value = (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
-             !ctx->m_bMotionPlusPresent) ? WII_IR_MODE_EXTENDED : WII_IR_MODE_BASIC;
-    ok = WriteIRRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value)) && ok;
-    value = 0x08;
-    ok = WriteIRRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value)) && ok;
-
-    /* Only claim IR is active if every configuration write landed. If a sync write
-       timed out, the camera is half-configured, so leaving m_bIRActive false keeps
-       GetButtonPacketType from selecting report 0x33 against it, and UpdateDevice
-       runs the full sequence again after a delay. A start that landed is checked
-       with a status request, whose reply shows whether the camera is on
-       (HandleStatus). The request waits out a Motion Plus mode write, whose
-       pulsed status reports can predate the camera start. */
-    ctx->m_bIRActive = ok;
-    if (ok) {
-        ctx->m_ulNextIRStart = 0;
-        ctx->m_ulIRCheck = SDL_max(SDL_GetTicks(), ctx->m_ulMotionPlusSettleDeadline);
-    } else {
-        ScheduleIRStart(ctx);
+    ++ctx->m_nWriteSends;
+    ctx->m_ulWriteSent = now;
+    switch (ctx->m_eWriteStep) {
+    case k_eWiiWriteStep_CameraEnable:
+    case k_eWiiWriteStep_CameraEnable2:
+        data[0] = GetWriteStepReport(ctx->m_eWriteStep);
+        data[1] = (Uint8)(0x04 | 0x02 | (Uint8)ctx->m_bRumbleActive);
+        WriteOutput(ctx, data, sizeof(data), false);
+        break;
+    case k_eWiiWriteStep_CameraControl:
+    case k_eWiiWriteStep_CameraControl2:
+        value = 0x08;
+        WriteRegister(ctx, WII_IR_REGISTER_CONTROL, &value, sizeof(value), false);
+        break;
+    case k_eWiiWriteStep_CameraSensitivity1:
+        WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY1, sensitivity1, sizeof(sensitivity1), false);
+        break;
+    case k_eWiiWriteStep_CameraSensitivity2:
+        WriteRegister(ctx, WII_IR_REGISTER_SENSITIVITY2, sensitivity2, sizeof(sensitivity2), false);
+        break;
+    case k_eWiiWriteStep_CameraMode:
+        /* Extended only for a bare remote without Motion Plus (report 0x33,
+           12 IR bytes). With an extension OR an active Motion Plus the report
+           must be 0x37, whose span carries 10-byte Basic IR (Dolphin's
+           real-Wiimote backend uses Basic for the same reason,
+           WiimoteController.cpp:991: "it's all that fits"). */
+        value = (ctx->m_eExtensionControllerType == k_eWiiExtensionControllerType_None &&
+                 !ctx->m_bMotionPlusPresent) ? WII_IR_MODE_EXTENDED : WII_IR_MODE_BASIC;
+        WriteRegister(ctx, WII_IR_REGISTER_MODE, &value, sizeof(value), false);
+        break;
+    default:
+        break;
     }
 }
 
-static void DisableIR(SDL_DriverWii_Context *ctx)
+static void StartCameraStep(SDL_DriverWii_Context *ctx, EWiiWriteStep step, Uint64 now)
 {
-    Uint8 data[2];
-
-    data[0] = k_eWiiOutputReportIDs_IRCameraEnable;
-    data[1] = (Uint8)(0x00 | (Uint8)ctx->m_bRumbleActive);
-    WriteOutput(ctx, data, sizeof(data), false);
-
-    data[0] = k_eWiiOutputReportIDs_IRCameraEnable2;
-    data[1] = (Uint8)(0x00 | (Uint8)ctx->m_bRumbleActive);
-    WriteOutput(ctx, data, sizeof(data), false);
-
-    ctx->m_bIRActive = false;
-    ctx->m_ulNextIRStart = 0;
-    ctx->m_ulIRCheck = 0;
+    ctx->m_eWriteStep = step;
+    ctx->m_nWriteSends = 0;
+    SendCameraStep(ctx, now);
 }
 
 /* Read the 24-byte Balance Board calibration (Kg0/Kg17/Kg34 x 4 corners x int16
@@ -710,31 +740,108 @@ static void CheckMotionPlusConnection(SDL_DriverWii_Context *ctx)
     ctx->m_eCommState = k_eWiiCommunicationState_CheckMotionPlusStage1;
 }
 
+/* Writes the Motion Plus mode, or its deactivation, and records the result.
+   Returns false when there was nothing to write. The identify path writes
+   synchronously, since it reads the port right after, and waits for the
+   deactivation's status report. Every other write goes through PumpWrites
+   and waits for nothing (hifihedgehog/SDL#40). */
+static bool WriteMotionPlus(SDL_DriverWii_Context *ctx, EWiiMotionPlusWrite write, Uint8 mode, bool sync)
+{
+    if (write == k_eWiiMotionPlusWrite_Activate) {
+#ifdef SDL_PLATFORM_LINUX
+        /* Linux drivers maintain a lot of state around the Motion Plus
+         * extension, so don't mess with it here.
+         */
+        (void)mode;
+        return false;
+#else
+        Uint32 address;
+
+        /* Already running in the desired mode: rewriting it would only restart
+           the M+'s ~20 ms reset for nothing. Dolphin changes the mode only when
+           current differs from desired (WiimoteController.cpp:533-535). */
+        if (ctx->m_ucMotionPlusMode == mode) {
+            return false;
+        }
+
+        /* An ACTIVE M+ answers only at the active address and ignores writes to
+           the inactive one, so a live mode switch must target 0xA4xxxx. Dolphin
+           picks the address by activation state (WiimoteController.cpp:1056-1060). */
+        address = (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE) ? 0xA400FE : 0xA600FE;
+        WriteRegister(ctx, address, &mode, sizeof(mode), sync);
+        ctx->m_ucMotionPlusMode = mode;
+#endif // LINUX
+    } else {
+        Uint8 data = 0x55;
+
+        WriteRegister(ctx, 0xA400F0, &data, sizeof(data), sync);
+        if (sync) {
+            // Wait for the deactivation status message
+            ReadInputSync(ctx, k_eWiiInputReportIDs_Status, NULL);
+        }
+        ctx->m_ucMotionPlusMode = WII_MOTIONPLUS_MODE_NONE;
+    }
+
+    /* Every mode write starts the M+'s ~20 ms reset, so stamp the settle
+       window during which identify results are unreliable. */
+    ctx->m_ulMotionPlusSettleDeadline = SDL_GetTicks() + WII_MOTIONPLUS_SETTLE_TIME_MS;
+    return true;
+}
+
+/* Sends the writes waiting their turn (hifihedgehog/SDL#40). A Motion Plus
+   write goes unless a camera write waits for its acknowledgment, since both
+   are acknowledged as report 0x16. It can go beside other Motion Plus
+   writes, whose acknowledgments come back in the order the remote took the
+   writes. It goes before a camera start, in the order the sensor toggle has
+   always sent them, so the camera's status check waits out the settle
+   window the write opens (HandleWriteAck). A camera start goes when nothing
+   waits, as Dolphin's RunTasks starts nothing while a report handler waits
+   (WiimoteController.cpp:340-343, IsPerformingTask at :1685-1688). */
+static void PumpWrites(SDL_DriverWii_Context *ctx)
+{
+    const Uint64 now = SDL_GetTicks();
+
+    if (ctx->m_eMotionPlusWrite != k_eWiiMotionPlusWrite_None && !IsCameraStep(ctx->m_eWriteStep)) {
+        const EWiiMotionPlusWrite write = ctx->m_eMotionPlusWrite;
+
+        ctx->m_eMotionPlusWrite = k_eWiiMotionPlusWrite_None;
+        if (WriteMotionPlus(ctx, write, ctx->m_ucMotionPlusWriteMode, false)) {
+            if (ctx->m_eWriteStep == k_eWiiWriteStep_None) {
+                ctx->m_eWriteStep = k_eWiiWriteStep_MotionPlus;
+                ctx->m_nWriteSends = 0;
+            }
+            ++ctx->m_nWriteSends;
+            ctx->m_ulWriteSent = now;
+        }
+    }
+    if (ctx->m_eWriteStep == k_eWiiWriteStep_None && ctx->m_bIRStartPending) {
+        ctx->m_bIRStartPending = false;
+        StartCameraStep(ctx, k_eWiiWriteStep_CameraEnable, now);
+    }
+}
+
+// Drops every write the machine holds, as when the joystick closes
+static void ResetWrites(SDL_DriverWii_Context *ctx)
+{
+    ctx->m_eWriteStep = k_eWiiWriteStep_None;
+    ctx->m_bIRStartPending = false;
+    ctx->m_eMotionPlusWrite = k_eWiiMotionPlusWrite_None;
+}
+
+/* The mode write waits its turn behind a camera write the remote has not
+   acknowledged yet, and a later request replaces one still waiting
+   (hifihedgehog/SDL#40). */
 static void ActivateMotionPlusWithMode(SDL_DriverWii_Context *ctx, Uint8 mode)
 {
 #ifdef SDL_PLATFORM_LINUX
-    /* Linux drivers maintain a lot of state around the Motion Plus
-     * extension, so don't mess with it here.
-     */
+    // WriteMotionPlus leaves the Motion Plus to the kernel driver here
+    (void)ctx;
+    (void)mode;
 #else
-    /* Already running in the desired mode: rewriting it would only restart
-       the M+'s ~20 ms reset for nothing. Dolphin changes the mode only when
-       current differs from desired (WiimoteController.cpp:533-535). */
-    if (ctx->m_ucMotionPlusMode == mode) {
-        return;
-    }
-
-    /* An ACTIVE M+ answers only at the active address and ignores writes to
-       the inactive one, so a live mode switch must target 0xA4xxxx; Dolphin
-       picks the address by activation state (WiimoteController.cpp:1056-1060).
-       Every mode write starts the M+'s ~20 ms reset, so stamp the settle
-       window during which identify results are unreliable. */
-    Uint32 address = (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE) ? 0xA400FE : 0xA600FE;
-    WriteRegister(ctx, address, &mode, sizeof(mode), true);
-
-    ctx->m_ucMotionPlusMode = mode;
-    ctx->m_ulMotionPlusSettleDeadline = SDL_GetTicks() + WII_MOTIONPLUS_SETTLE_TIME_MS;
-#endif // LINUX
+    ctx->m_eMotionPlusWrite = k_eWiiMotionPlusWrite_Activate;
+    ctx->m_ucMotionPlusWriteMode = mode;
+    PumpWrites(ctx);
+#endif
 }
 
 static void ActivateMotionPlus(SDL_DriverWii_Context *ctx)
@@ -757,16 +864,53 @@ static void ActivateMotionPlus(SDL_DriverWii_Context *ctx)
     ActivateMotionPlusWithMode(ctx, mode);
 }
 
+/* The deactivation waits its turn the same way, and DisableIR, which the
+   sensor toggle calls next, stops a camera start, so the write is on its way
+   when the toggle returns, as when it waited for its status report. That
+   report now reaches HandleStatus, which asks for the data report again. */
 static void DeactivateMotionPlus(SDL_DriverWii_Context *ctx)
 {
-    Uint8 data = 0x55;
-    WriteRegister(ctx, 0xA400F0, &data, sizeof(data), true);
+    ctx->m_eMotionPlusWrite = k_eWiiMotionPlusWrite_Deactivate;
+    PumpWrites(ctx);
+}
 
-    // Wait for the deactivation status message
-    ReadInputSync(ctx, k_eWiiInputReportIDs_Status, NULL);
+/* Arms the camera start (hifihedgehog/SDL#40). The update loop sends its
+   writes one at a time, each after the one before it is acknowledged, the way
+   Dolphin queues each camera step behind the last one's acknowledgment
+   (WiimoteController.cpp:946-1018) and the Joy-Con camera's machine in
+   SDL_hidapi_switch.c takes a step per acknowledgment. Nothing here waits on
+   the remote, and reports keep reaching the joystick meanwhile. m_bIRActive
+   is set when the last write is acknowledged. */
+static void EnableIR(SDL_DriverWii_Context *ctx)
+{
+    ctx->m_ulNextIRStart = 0;
+    ctx->m_bIRStartPending = true;
+    PumpWrites(ctx);
+}
 
-    ctx->m_ucMotionPlusMode = WII_MOTIONPLUS_MODE_NONE;
-    ctx->m_ulMotionPlusSettleDeadline = SDL_GetTicks() + WII_MOTIONPLUS_SETTLE_TIME_MS;
+/* Stops a start under way, turns the camera off, and lets a Motion Plus
+   write waiting behind the start go */
+static void DisableIR(SDL_DriverWii_Context *ctx)
+{
+    Uint8 data[2];
+
+    ctx->m_bIRStartPending = false;
+    if (IsCameraStep(ctx->m_eWriteStep)) {
+        ctx->m_eWriteStep = k_eWiiWriteStep_None;
+    }
+
+    data[0] = k_eWiiOutputReportIDs_IRCameraEnable;
+    data[1] = (Uint8)(0x00 | (Uint8)ctx->m_bRumbleActive);
+    WriteOutput(ctx, data, sizeof(data), false);
+
+    data[0] = k_eWiiOutputReportIDs_IRCameraEnable2;
+    data[1] = (Uint8)(0x00 | (Uint8)ctx->m_bRumbleActive);
+    WriteOutput(ctx, data, sizeof(data), false);
+
+    ctx->m_bIRActive = false;
+    ctx->m_ulNextIRStart = 0;
+    ctx->m_ulIRCheck = 0;
+    PumpWrites(ctx);
 }
 
 static void UpdatePowerLevelWii(SDL_Joystick *joystick, Uint8 batteryLevelByte)
@@ -894,6 +1038,103 @@ static bool RequestButtonPacketType(SDL_DriverWii_Context *ctx, EWiiInputReportI
 static void ResetButtonPacketType(SDL_DriverWii_Context *ctx)
 {
     RequestButtonPacketType(ctx, GetButtonPacketType(ctx));
+}
+
+/* A camera step the remote refused, error nonzero, or left unacknowledged
+   after its last send ends the start: logged with the register or report and
+   the error, then retried on the schedule (hifihedgehog/SDL#39). */
+static void FailIRStart(SDL_DriverWii_Context *ctx, Uint8 error)
+{
+    const Uint32 address = GetWriteStepRegister(ctx->m_eWriteStep);
+    const unsigned int report = GetWriteStepReport(ctx->m_eWriteStep);
+
+    if (address && error) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera register 0x%.6x not written: Write memory failed: %u", (unsigned int)address, (unsigned int)error);
+    } else if (address) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera register 0x%.6x not written: no acknowledgment after %d sends", (unsigned int)address, ctx->m_nWriteSends);
+    } else if (error) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera report 0x%.2x refused: error %u", report, (unsigned int)error);
+    } else {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: IR camera report 0x%.2x not acknowledged after %d sends", report, ctx->m_nWriteSends);
+    }
+    ctx->m_eWriteStep = k_eWiiWriteStep_None;
+    ScheduleIRStart(ctx);
+    PumpWrites(ctx);
+}
+
+/* An acknowledgment, report 0x22, that names the report of the write the
+   machine waits on moves it on (hifihedgehog/SDL#40), as Dolphin's handler
+   takes only the acknowledgment for its own report (MakeAckHandler,
+   WiimoteController.cpp:1672-1683) and Linux's only the one for its pending
+   request, after posting the buttons it carries (handler_return,
+   hid-wiimote-core.c:1479-1492). Any other report is left to the caller.
+   Once the last camera write lands, the camera is configured: the IR report
+   is selected, and the camera is checked with a status request that waits out
+   a Motion Plus mode write, whose pulsed status reports can predate the start
+   (HandleStatus). A Motion Plus write that waited behind the start goes
+   first, so the check waits out its window too. */
+static bool HandleWriteAck(SDL_DriverWii_Context *ctx)
+{
+    const EWiiWriteStep step = ctx->m_eWriteStep;
+    Uint8 error;
+
+    if (step == k_eWiiWriteStep_None || ctx->m_nReadSize < 5 ||
+        ctx->m_rgucReadBuffer[3] != GetWriteStepReport(step)) {
+        return false;
+    }
+    error = ctx->m_rgucReadBuffer[4];
+    if (step == k_eWiiWriteStep_MotionPlus) {
+        /* The mode stays recorded either way, as when the write waited, and
+           the Motion Plus check verifies it. The step ends with the
+           acknowledgment of its last write. */
+        if (error) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Motion Plus write refused: error %u", (unsigned int)error);
+        }
+        if (--ctx->m_nWriteSends <= 0) {
+            ctx->m_eWriteStep = k_eWiiWriteStep_None;
+            PumpWrites(ctx);
+        }
+    } else if (error) {
+        FailIRStart(ctx, error);
+    } else if (step == k_eWiiWriteStep_CameraControl2) {
+        ctx->m_eWriteStep = k_eWiiWriteStep_None;
+        ctx->m_bIRActive = true;
+        ctx->m_ulNextIRStart = 0;
+        ResetButtonPacketType(ctx);
+        PumpWrites(ctx);
+        ctx->m_ulIRCheck = SDL_max(SDL_GetTicks(), ctx->m_ulMotionPlusSettleDeadline);
+    } else {
+        StartCameraStep(ctx, (EWiiWriteStep)(step + 1), SDL_GetTicks());
+    }
+    return true;
+}
+
+/* A write still without its acknowledgment after the patience: a camera step
+   goes again, up to the send limit, and then the start fails. A Motion Plus
+   write is sent once, as it was when it waited, since the Motion Plus check
+   verifies it. The patience starts once the rumble thread has sent every
+   queued write, since ReadInput reads nothing before that. */
+static void UpdateWrites(SDL_DriverWii_Context *ctx, Uint64 now)
+{
+    if (ctx->m_eWriteStep == k_eWiiWriteStep_None) {
+        return;
+    }
+    if (SDL_GetAtomicInt(&ctx->device->rumble_pending) > 0) {
+        ctx->m_ulWriteSent = now;
+        return;
+    }
+    if (now < ctx->m_ulWriteSent + WII_WRITE_PATIENCE_MS) {
+        return;
+    }
+    if (ctx->m_eWriteStep == k_eWiiWriteStep_MotionPlus) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Motion Plus write not acknowledged");
+        ctx->m_eWriteStep = k_eWiiWriteStep_None;
+        PumpWrites(ctx);
+    } else if (ctx->m_nWriteSends < WII_WRITE_MAX_SENDS) {
+        SendCameraStep(ctx, now);
+    } else {
+        FailIRStart(ctx, 0);
+    }
 }
 
 static void InitStickCalibrationData(SDL_DriverWii_Context *ctx)
@@ -1079,7 +1320,7 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                    window passes, re-init the now-visible port, and identify
                    with retries while it settles. Error 7 here means
                    "settling", not "removed", for at least 50 ms. */
-                DeactivateMotionPlus(ctx);
+                WriteMotionPlus(ctx, k_eWiiMotionPlusWrite_Deactivate, 0, true);
                 SendExtensionReset(ctx, true);
                 {
                     const Uint64 retry_deadline = SDL_GetTicks() + 50;
@@ -1101,7 +1342,7 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
                 /* Restore the Motion Plus to the mode it was running, unless
                    the child is one that never rides in passthrough */
                 if (SDL_WiiExt_AllowsMotionPlus(eExtensionControllerType)) {
-                    ActivateMotionPlusWithMode(ctx, motion_plus_mode);
+                    WriteMotionPlus(ctx, k_eWiiMotionPlusWrite_Activate, motion_plus_mode, true);
                 }
                 ctx->m_bMotionPlusPresent = true;
                 break;
@@ -1263,12 +1504,13 @@ static bool HIDAPI_DriverWii_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     }
 
     /* If sensors were left enabled across an extension hot-plug that cleared
-       m_bIRActive, re-power the IR camera and reselect the IR report so the pointer
-       resumes without the app re-toggling sensors. Motion Plus does not gate this:
-       IR and the M+ interleave share report 0x37 (hifihedgehog/SDL#11). Placed
-       after the M+ presence state is established (probed on a normal open,
-       preserved by the settle gate on a gated reopen) so EnableIR picks the
-       right camera mode. */
+       m_bIRActive, re-power the IR camera so the pointer resumes without the app
+       re-toggling sensors. EnableIR arms the start, and the IR report follows
+       once the remote acknowledges its last write (hifihedgehog/SDL#40). Motion
+       Plus does not gate this: IR and the M+ interleave share report 0x37
+       (hifihedgehog/SDL#11). Placed after the M+ presence state is established
+       (probed on a normal open, preserved by the settle gate on a gated reopen)
+       so the start picks the right camera mode. */
     if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType) &&
         ctx->m_bReportSensors && !ctx->m_bIRActive) {
         EnableIR(ctx);
@@ -1452,9 +1694,10 @@ static bool HIDAPI_DriverWii_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device
            is unchanged. Motion Plus coexists rather than gating IR off: its
            passthrough frame rides 0x37's extension span beside the IR bytes, the
            arrangement Dolphin's real-Wiimote backend runs and WM+ sensor-bar games
-           used (hifihedgehog/SDL#11). This runs after the Motion Plus activation
-           above so EnableIR sees the current M+ state. Either change starts the
-           camera's retry delays over. */
+           used (hifihedgehog/SDL#11). The Motion Plus write above goes before the
+           camera's writes, so the start sees the current M+ state, and neither
+           waits on the remote here (hifihedgehog/SDL#40). Either change starts
+           the camera's retry delays over. */
         if (WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType)) {
             ctx->m_nIRStartFailures = 0;
             if (enabled) {
@@ -2097,8 +2340,12 @@ static void HandleStatus(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
             ctx->m_ulNextMotionPlusCheck = SDL_max(now, ctx->m_ulMotionPlusSettleDeadline);
         }
 
-    } else if (hadExtension != hasExtension) {
-        // Reinitialize to get new state
+    } else if (hadExtension != hasExtension && ctx->m_eWriteStep != k_eWiiWriteStep_MotionPlus) {
+        /* Reinitialize to get new state. Not while a Motion Plus write waits
+           for its acknowledgment: a status report the remote sent before it
+           took a deactivation still counts the active Motion Plus as an
+           extension, and the deactivation's own status report follows the
+           acknowledgment (hifihedgehog/SDL#40). */
         ctx->m_bDisconnected = true;
     }
 }
@@ -2111,6 +2358,11 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
     SDL_zero(data);
     GetBaseButtons(&data, ctx->m_rgucReadBuffer + 1);
     HandleButtonData(ctx, joystick, &data);
+
+    // The acknowledgment a queued write waits on (hifihedgehog/SDL#40)
+    if (type == k_eWiiInputReportIDs_Acknowledge && HandleWriteAck(ctx)) {
+        return;
+    }
 
     switch (ctx->m_eCommState) {
     case k_eWiiCommunicationState_None:
@@ -2171,15 +2423,18 @@ static void HandleResponse(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
                            rather than a parked dead gyro
                            (hifihedgehog/SDL#13 R1). */
                         ActivateMotionPlus(ctx);
-                        if (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE) {
+                        if (ctx->m_ucMotionPlusMode != WII_MOTIONPLUS_MODE_NONE ||
+                            ctx->m_eMotionPlusWrite == k_eWiiMotionPlusWrite_Activate) {
                             /* The mode stamp is the evidence the write went
-                               out: verify it at the settle deadline, floored
-                               to the future. Where the activation is a
-                               deliberate no-op (Linux leaves M+ state to the
-                               kernel driver) the mode stays NONE, this arm is
-                               skipped, and the re-arm below restores the 8 s
-                               periodic watch instead of a tight retry
-                               cycle. */
+                               out, and an activation waiting behind a camera
+                               write goes once that write is acknowledged
+                               (hifihedgehog/SDL#40): verify it at the settle
+                               deadline, floored to the future. Where the
+                               activation is a deliberate no-op (Linux leaves
+                               M+ state to the kernel driver) the mode stays
+                               NONE, nothing waits, this arm is skipped, and
+                               the re-arm below restores the 8 s periodic
+                               watch instead of a tight retry cycle. */
                             ctx->m_ulNextMotionPlusCheck = SDL_max(SDL_GetTicks() + 500, ctx->m_ulMotionPlusSettleDeadline);
                         }
                     }
@@ -2467,19 +2722,22 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
         // These checks aren't needed on the Wii U Pro Controller
         if (ctx->m_eExtensionControllerType != k_eWiiExtensionControllerType_WiiUPro) {
 
+            // A queued write still without its acknowledgment (hifihedgehog/SDL#40)
+            if (size >= 0) {
+                UpdateWrites(ctx, now);
+            }
+
             /* A camera start that failed, or whose status report showed the
-               camera off, runs again once its delay passes (hifihedgehog/SDL#39).
-               It waits for a Motion Plus mode write to settle, and for an
-               identify in flight, whose reply the start's acknowledgment waits
-               would drop. */
+               camera off, is armed again once its delay passes
+               (hifihedgehog/SDL#39). It waits for a Motion Plus mode write to
+               settle. An identify in flight no longer holds it back, since the
+               start drops no report (hifihedgehog/SDL#40). */
             if (size >= 0 && ctx->m_ulNextIRStart && now >= ctx->m_ulNextIRStart &&
-                now >= ctx->m_ulMotionPlusSettleDeadline &&
-                ctx->m_eCommState == k_eWiiCommunicationState_None) {
+                now >= ctx->m_ulMotionPlusSettleDeadline) {
                 ctx->m_ulNextIRStart = 0;
                 if (ctx->m_bReportSensors && !ctx->m_bIRActive &&
                     WiiRemoteHasIRCamera(ctx->m_eExtensionControllerType)) {
                     EnableIR(ctx);
-                    ResetButtonPacketType(ctx);
                 }
             }
 
@@ -2554,6 +2812,12 @@ static void HIDAPI_DriverWii_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joysti
     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_HIDAPI_WII_PLAYER_LED,
                         SDL_PlayerLEDHintChanged, ctx);
 
+    /* A closed joystick reads no acknowledgment, so the queued writes stop,
+       and OpenJoystick arms them again (hifihedgehog/SDL#40). The core
+       closes an open joystick before the extension identify that follows a
+       hot-plug (HIDAPI_JoystickDisconnected), so no acknowledgment that
+       identify's synchronous reads take moves a write on. */
+    ResetWrites(ctx);
     ctx->joystick = NULL;
 }
 
