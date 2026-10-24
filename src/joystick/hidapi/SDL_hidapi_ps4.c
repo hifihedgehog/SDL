@@ -44,6 +44,9 @@
 
 #define BLUETOOTH_DISCONNECT_TIMEOUT_MS 500
 
+// The longest Bluetooth input report, state report 0x19 (hifihedgehog/SDL#41)
+#define BLUETOOTH_STATE_REPORT_MAX_LENGTH 547
+
 enum
 {
     SDL_GAMEPAD_BUTTON_PS4_TOUCHPAD = 11
@@ -1222,6 +1225,17 @@ static void HIDAPI_DriverPS4_HandleStatePacket(SDL_Joystick *joystick, SDL_hid_d
     SDL_memcpy(&ctx->last_state, packet, sizeof(ctx->last_state));
 }
 
+/* The length of each Bluetooth state report, 0x11 to 0x19, from the report
+   ID through the CRC, as the controller's report descriptor declares them
+   (Linux v4.0 hid-sony.c:528-573, dualshock4_bt_rdesc, and
+   hid-playstation.c:340 for 0x11) and hbashton/DS4Windows reads them
+   (DualShock4BluetoothAudioProtocol.cs:74-89). A report above 0x11 carries
+   headset microphone audio after the controller state, and its CRC in its
+   last four bytes (hifihedgehog/SDL#41). */
+static const int k_rgnBluetoothStateReportLengths[] = { 78, 142, 206, 270, 334, 398, 462, 526, BLUETOOTH_STATE_REPORT_MAX_LENGTH };
+SDL_COMPILE_TIME_ASSERT(bluetooth_state_report_lengths,
+                        (int)SDL_arraysize(k_rgnBluetoothStateReportLengths) == k_EPS4ReportIdBluetoothState9 - k_EPS4ReportIdBluetoothState1 + 1);
+
 static bool VerifyCRC(Uint8 *data, int size)
 {
     Uint8 ubHdr = 0xA1; // hidp header is part of the CRC calculation
@@ -1279,9 +1293,14 @@ static bool HIDAPI_DriverPS4_IsPacketValid(SDL_DriverPS4_Context *ctx, Uint8 *da
     case k_EPS4ReportIdBluetoothState7:
     case k_EPS4ReportIdBluetoothState8:
     case k_EPS4ReportIdBluetoothState9:
-        // Bluetooth state packets have two additional bytes at the beginning, the first notes if HID data is present
-        if (size >= 78 && (data[1] & 0x80)) {
-            if (VerifyCRC(data, 78)) {
+    {
+        /* Bluetooth state packets have two additional bytes at the beginning, the first notes if HID data is present.
+           The CRC is in the last four bytes of the report's own length. Windows reads every report at the longest
+           one's length, so a report can arrive longer than its own (hifihedgehog/SDL#41). */
+        const int length = k_rgnBluetoothStateReportLengths[data[0] - k_EPS4ReportIdBluetoothState1];
+
+        if (size >= length && (data[1] & 0x80)) {
+            if (VerifyCRC(data, length)) {
                 ++ctx->valid_crc_packets;
             } else {
                 if (ctx->valid_crc_packets > 0) {
@@ -1294,7 +1313,7 @@ static bool HIDAPI_DriverPS4_IsPacketValid(SDL_DriverPS4_Context *ctx, Uint8 *da
             }
             return true;
         }
-        break;
+    } break;
     default:
         break;
     }
@@ -1305,7 +1324,8 @@ static bool HIDAPI_DriverPS4_UpdateDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverPS4_Context *ctx = (SDL_DriverPS4_Context *)device->context;
     SDL_Joystick *joystick = NULL;
-    Uint8 data[USB_PACKET_LENGTH * 2];
+    // A whole Bluetooth state report, since a read copies no more than the buffer holds (hifihedgehog/SDL#41)
+    Uint8 data[BLUETOOTH_STATE_REPORT_MAX_LENGTH];
     int size;
     int packet_count = 0;
     Uint64 now = SDL_GetTicks();
