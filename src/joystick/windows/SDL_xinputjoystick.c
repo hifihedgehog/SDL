@@ -26,6 +26,7 @@
 #ifdef SDL_JOYSTICK_XINPUT
 
 #include "../../core/windows/SDL_xinput.h"
+#include "../../core/windows/SDL_hid.h"
 #include "SDL_xinput_paddle_c.h"
 #include "SDL_xinputjoystick_hwdata.h"
 #include "../../core/windows/SDL_gameinput.h"
@@ -49,6 +50,7 @@ typedef struct JoyStick_DeviceData
 // local variables
 static bool s_bXInputEnabled = false;
 static Uint64 s_nLastDetect;
+static Uint64 s_nLastDeviceNotification; // PadForge fork: see XINPUT_JoystickDetect
 static JoyStick_DeviceData *SYS_Joystick; // array to hold joystick ID values
 
 static void XINPUT_JoystickDetect(void);
@@ -330,6 +332,7 @@ static bool XINPUT_JoystickInit(void)
     s_bXInputEnabled = enabled;
 
     if (enabled) {
+        WIN_InitDeviceNotification();
         XINPUT_JoystickDetect();
     }
 
@@ -359,10 +362,18 @@ static void XINPUT_JoystickDetect(void)
     // We'll check every 3 seconds to avoid hammering open slots
     const Uint32 XINPUT_DETECT_INTERVAL_MS = 3000;
     Uint64 now = SDL_GetTicks();
-    if (s_nLastDetect && now < (s_nLastDetect + XINPUT_DETECT_INTERVAL_MS)) {
+    /* PadForge fork: a HID device arrival or removal also starts a check, as
+       it did before the Windows driver was split. An XInput controller has a
+       HID interface with IG_ in its path (see SDL_IsXInputDevice in
+       SDL_dinputjoystick.c), so it is found when it arrives rather than at
+       the next 3 second check. */
+    const Uint64 notification = WIN_GetLastDeviceNotification();
+    if (s_nLastDetect && now < (s_nLastDetect + XINPUT_DETECT_INTERVAL_MS) &&
+        notification == s_nLastDeviceNotification) {
         return;
     }
     s_nLastDetect = now;
+    s_nLastDeviceNotification = notification;
 
     pCurList = SYS_Joystick;
     SYS_Joystick = NULL;
@@ -662,6 +673,7 @@ static void XINPUT_JoystickQuit(void)
     SYS_Joystick = NULL;
 
     s_nLastDetect = 0;
+    s_nLastDeviceNotification = 0;
 
     if (s_bXInputEnabled) {
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
@@ -669,6 +681,7 @@ static void XINPUT_JoystickQuit(void)
 #endif
         s_bXInputEnabled = false;
         WIN_UnloadXInputDLL();
+        WIN_QuitDeviceNotification();
     }
 }
 

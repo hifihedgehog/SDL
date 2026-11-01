@@ -98,10 +98,8 @@ extern bool TestICade_HostFeed(void *device_handle, Uint16 make_code, Uint16 fla
    joystick, whatever the environment holds */
 static const char *const dt_other_drivers[][2] = {
     { "SDL_JOYSTICK_HIDAPI", "0" },
-    { "SDL_JOYSTICK_RAWINPUT", "0" },
     { "SDL_JOYSTICK_DIRECTINPUT", "0" },
     { "SDL_XINPUT_ENABLED", "0" },
-    { "SDL_JOYSTICK_WGI", "0" },
     { "SDL_JOYSTICK_GAMEINPUT", "0" },
     { "SDL_JOYSTICK_GAMEINPUT_RAW", "0" },
     { "SDL_JOYSTICK_BLE", "0" },

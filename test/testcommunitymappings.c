@@ -545,10 +545,8 @@ int main(int argc, char *argv[])
     /* The mapping database loads without any backend. Keep real devices out,
        with every backend the generator turns off. */
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
-    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_DIRECTINPUT, "0");
     SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "0");
-    SDL_SetHint(SDL_HINT_JOYSTICK_WGI, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_GAMEINPUT, "0");
     SDL_SetHint("SDL_JOYSTICK_BLE_SWITCH2", "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_BLE, "0");

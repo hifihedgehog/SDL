@@ -64,10 +64,8 @@ enable_testing()
 # inputs.
 set(PADDLE_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_HIDAPI=0"
-    "SDL_JOYSTICK_RAWINPUT=0"
     "SDL_JOYSTICK_DIRECTINPUT=0"
     "SDL_XINPUT_ENABLED=0"
-    "SDL_JOYSTICK_WGI=0"
     "SDL_JOYSTICK_GAMEINPUT=0"
     "SDL_JOYSTICK_GAMEINPUT_RAW=0"
     "SDL_JOYSTICK_BLE=0"
@@ -185,7 +183,7 @@ set_tests_properties(xinput-paddles.mapping-empty PROPERTIES
 # Two instrument paths of hifihedgehog/SDL#33 Part 3 live in files these tests
 # share. The Guitar Hero Live mapping test includes the real SDL_gamepad.c, as
 # the mapping test does. The Rock Band 3 Pro test runs the archive's
-# SDL_XINPUT_JoystickUpdate against fake XInput function pointers.
+# XInput driver update against fake XInput function pointers.
 paddle_test(ghlmapping "${PADDLE_TESTS}/testghlmapping.c")
 paddle_test(rb3proxinput "${PADDLE_TESTS}/testrb3proxinput.c")
 foreach(target testxinputpaddleghlmapping testxinputpaddlerb3proxinput)

@@ -104,10 +104,8 @@ static const char *const dt_family_hints[SDL_BLE_FAMILY_COUNT] = {
    joystick, whatever the environment holds */
 static const char *const dt_other_drivers[][2] = {
     { "SDL_JOYSTICK_HIDAPI", "0" },
-    { "SDL_JOYSTICK_RAWINPUT", "0" },
     { "SDL_JOYSTICK_DIRECTINPUT", "0" },
     { "SDL_XINPUT_ENABLED", "0" },
-    { "SDL_JOYSTICK_WGI", "0" },
     { "SDL_JOYSTICK_GAMEINPUT", "0" },
     { "SDL_JOYSTICK_GAMEINPUT_RAW", "0" },
     { "SDL_JOYSTICK_BLE_SWITCH2", "0" },

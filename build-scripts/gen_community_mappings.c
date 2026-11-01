@@ -429,10 +429,8 @@ static void *LoadFile(const char *path, size_t *length)
 /* Every joystick backend, SDL's and the fork's, stays off */
 static const char *const offline_hints[] = {
     SDL_HINT_JOYSTICK_HIDAPI,
-    SDL_HINT_JOYSTICK_RAWINPUT,
     SDL_HINT_JOYSTICK_DIRECTINPUT,
     SDL_HINT_XINPUT_ENABLED,
-    SDL_HINT_JOYSTICK_WGI,
     SDL_HINT_JOYSTICK_GAMEINPUT,
     SDL_HINT_JOYSTICK_BLE,
     SDL_HINT_JOYSTICK_BLE_SWITCH2,

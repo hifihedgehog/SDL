@@ -11,7 +11,7 @@
 */
 
 /* The Rock Band 3 Pro keyboard on the XInput backend, hifihedgehog/SDL#33
-   Part 3, through the real SDL_XINPUT_JoystickUpdate of a static SDL.
+   Part 3, through the real XInput driver update of a static SDL.
    test/xinput-paddles builds it beside the paddle tests, which share
    SDL_xinputjoystick.c.
 
@@ -34,8 +34,8 @@
 #include "SDL_internal.h"
 #include "joystick/SDL_sysjoystick.h"
 #include "joystick/SDL_joystick_c.h"
-#include "joystick/windows/SDL_windowsjoystick_c.h"
-#include "joystick/windows/SDL_xinputjoystick_c.h"
+#include "core/windows/SDL_xinput.h"
+#include "joystick/windows/SDL_xinputjoystick_hwdata.h"
 #include "joystick/SDL_rb3pro_proto.h"
 
 #include <stdio.h>
@@ -71,8 +71,8 @@ static DWORD WINAPI FakeGetStateExtended(DWORD user, SDL_XINPUT_STATE_EXTENDED_V
     return ERROR_SUCCESS;
 }
 
-/* One SDL_XINPUT_JoystickUpdate with the Windows backend's joystick data in
-   place of the virtual joystick's */
+/* One XInput driver update with the XInput backend's joystick data in place
+   of the virtual joystick's */
 static void Update(SDL_Joystick *joystick, struct joystick_hwdata *hwdata)
 {
     struct joystick_hwdata *virtual_hwdata;
@@ -80,7 +80,7 @@ static void Update(SDL_Joystick *joystick, struct joystick_hwdata *hwdata)
     SDL_LockJoysticks();
     virtual_hwdata = joystick->hwdata;
     joystick->hwdata = hwdata;
-    SDL_XINPUT_JoystickUpdate(joystick);
+    SDL_XINPUT_JoystickDriver.Update(joystick);
     joystick->hwdata = virtual_hwdata;
     SDL_UnlockJoysticks();
 }
@@ -118,8 +118,8 @@ static bool PedalConnected(SDL_Joystick *joystick)
 int main(void)
 {
     const char *disabled[] = {
-        SDL_HINT_JOYSTICK_HIDAPI, SDL_HINT_JOYSTICK_RAWINPUT, SDL_HINT_JOYSTICK_DIRECTINPUT,
-        SDL_HINT_XINPUT_ENABLED, SDL_HINT_JOYSTICK_WGI, SDL_HINT_JOYSTICK_GAMEINPUT,
+        SDL_HINT_JOYSTICK_HIDAPI, SDL_HINT_JOYSTICK_DIRECTINPUT,
+        SDL_HINT_XINPUT_ENABLED, SDL_HINT_JOYSTICK_GAMEINPUT,
         SDL_HINT_JOYSTICK_GAMEINPUT_RAW, SDL_HINT_JOYSTICK_BLE, SDL_HINT_JOYSTICK_BLE_SWITCH2,
         SDL_HINT_JOYSTICK_SERIAL_AUTO, SDL_HINT_JOYSTICK_RFCOMM,
         SDL_HINT_JOYSTICK_THREAD, "SDL_JOYSTICK_WINMM", "SDL_JOYSTICK_ROG_CHAKRAM",
@@ -166,7 +166,7 @@ int main(void)
     joystick = SDL_OpenJoystick(id);
     REQUIRE(joystick != NULL);
 
-    /* The data SDL_XINPUT_JoystickOpen leaves for a keyboard on user 0 */
+    /* The data the XInput driver's open leaves for a keyboard on user 0 */
     SDL_zero(hwdata);
     hwdata.bXInputDevice = true;
     hwdata.userid = 0;
