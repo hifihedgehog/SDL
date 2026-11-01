@@ -311,7 +311,7 @@ static bool StartDevice(void)
 
 static void StopDevice(void)
 {
-    if (device.driver) {
+    if (device.driver && device.driver->FreeDevice) {
         device.driver->FreeDevice(&device);
     }
     SDL_free(device.context);

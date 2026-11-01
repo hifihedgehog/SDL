@@ -823,7 +823,7 @@ static bool StartDevice(FakeExtension extension, bool motion_plus, Uint16 produc
 
 static void StopDevice(void)
 {
-    if (device.driver) {
+    if (device.driver && device.driver->FreeDevice) {
         device.driver->FreeDevice(&device);
     }
     SDL_free(device.context);

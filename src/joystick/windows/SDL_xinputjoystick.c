@@ -26,6 +26,7 @@
 #ifdef SDL_JOYSTICK_XINPUT
 
 #include "../../core/windows/SDL_xinput.h"
+#include "../../core/windows/SDL_hid.h"
 #include "SDL_xinput_paddle_c.h"
 #include "SDL_xinputjoystick_hwdata.h"
 #include "../../core/windows/SDL_gameinput.h"
@@ -537,6 +538,7 @@ static void XINPUT_JoystickQuit(void)
 #endif
         s_bXInputEnabled = false;
         WIN_UnloadXInputDLL();
+        WIN_QuitDeviceNotification();
     }
 }
 
