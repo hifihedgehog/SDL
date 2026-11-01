@@ -125,6 +125,7 @@ typedef struct
     SDL_HIDAPI_Device *device;
     Uint16 vendor_id;
     Uint16 product_id;
+    Uint16 firmware_version;
     SDL_XboxOneInitState init_state;
     Uint64 start_time;
     Uint8 sequence;
@@ -509,6 +510,7 @@ static bool HIDAPI_DriverXboxOne_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joy
     }
     joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     joystick->nhats = 1;
+    joystick->firmware_version = ctx->firmware_version;
 
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE_HOME_LED,
                         SDL_HomeLEDHintChanged, ctx);
@@ -1750,6 +1752,18 @@ static bool HIDAPI_GIP_DispatchPacket(SDL_Joystick *joystick, SDL_DriverXboxOne_
 #ifdef DEBUG_JOYSTICK
             SDL_Log("Controller announce after %llu ms", (SDL_GetTicks() - ctx->start_time));
 #endif
+            if (size >= 16) {
+                /* The firmware major version in the high byte and the minor
+                   in the low one, as xone keeps the announce packet's version
+                   (bus/protocol.c, gip_handle_pkt_announce) */
+                const Uint16 major = (Uint16)(data[12] | (data[13] << 8));
+                const Uint16 minor = (Uint16)(data[14] | (data[15] << 8));
+
+                ctx->firmware_version = (Uint16)((major << 8) | minor);
+                if (joystick) {
+                    joystick->firmware_version = ctx->firmware_version;
+                }
+            }
             SetInitState(ctx, XBOX_ONE_INIT_STATE_ANNOUNCED);
             break;
         case GIP_CMD_STATUS:
