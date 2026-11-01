@@ -61,6 +61,12 @@ extern Uint64 fake_now;       /* The clock SDL_GetTicks reads, in ms */
    the rumble thread. */
 extern void Firmware_Respond(const Uint8 *data, int size, bool async);
 
+/* A test whose controller answers feature reports sets this. data[0] holds
+   the report ID asked for, and the return is the length read or -1. Left
+   NULL, a feature request counts as unexpected. */
+extern int (*fake_feature_report)(unsigned char *data, size_t length);
+extern int fake_feature_requests; /* Every feature request, answered or not */
+
 extern SDL_hid_device *Fake_Handle(void);
 extern void Fake_Reset(void);
 extern void Fake_Queue(const Uint8 *report, int length);

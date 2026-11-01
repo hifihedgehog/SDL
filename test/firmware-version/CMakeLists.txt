@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 project(SDLFirmwareVersionTests LANGUAGES C CXX)
 
-# Offline tests of the firmware version four HIDAPI drivers report, for
-# hifihedgehog/SDL#42: GIP, Xbox One, Switch and Flydigi. Each real driver
+# Offline tests of the firmware version five HIDAPI drivers report: GIP, Xbox
+# One, Switch and Flydigi for hifihedgehog/SDL#42, and the PS5 driver's read
+# after a Bluetooth DualSense leaves simple mode for #43. Each real driver
 # runs against a scripted controller inside a real static SDL, whose joystick
 # core and hints it uses. No HID device opens and SDL's HID layer never
 # starts.
@@ -65,7 +66,7 @@ enable_testing()
 get_filename_component(FIRMWARE_LINKER_DIR "${CMAKE_LINKER}" DIRECTORY)
 find_program(FIRMWARE_DUMPBIN dumpbin HINTS "${FIRMWARE_LINKER_DIR}" NO_CACHE REQUIRED)
 
-# The scripted controller, shared by the four tests. It calls SDL only to
+# The scripted controller, shared by the tests. It calls SDL only to
 # lock the joystick list, mark the joystick record valid and free memory.
 add_library(testfirmwarefake OBJECT "${FIRMWARE_TESTS}/testfirmwarefake.c")
 
@@ -83,7 +84,7 @@ add_library(testfirmwarefake OBJECT "${FIRMWARE_TESTS}/testfirmwarefake.c")
 # - Before the link, CheckSystem.cmake reads the test object's and the fake's
 #   symbol tables and fails the build when either still imports a function
 #   that reaches a HID device.
-set(FIRMWARE_TEST_NAMES gip xboxone switch flydigi)
+set(FIRMWARE_TEST_NAMES gip xboxone switch flydigi ps5)
 foreach(name IN LISTS FIRMWARE_TEST_NAMES)
     add_library(test${name}firmware_main OBJECT "${FIRMWARE_TESTS}/test${name}firmware.c")
     add_executable(test${name}firmware $<TARGET_OBJECTS:test${name}firmware_main> $<TARGET_OBJECTS:testfirmwarefake>)
@@ -117,7 +118,7 @@ foreach(target IN LISTS FIRMWARE_OBJECTS)
         target_compile_options(${target} PRIVATE /fsanitize=address /Zi)
     endif()
 endforeach()
-foreach(target IN ITEMS testfirmwarefake testgipfirmware_main testxboxonefirmware_main testswitchfirmware_main testflydigifirmware_main)
+foreach(target IN ITEMS testfirmwarefake testgipfirmware_main testxboxonefirmware_main testswitchfirmware_main testflydigifirmware_main testps5firmware_main)
     target_compile_definitions(${target} PRIVATE USING_GENERATED_CONFIG_H SDL_STATIC_LIB)
     target_include_directories(${target} PRIVATE
         "${FIRMWARE_SDL_ROOT}/src"
@@ -134,7 +135,7 @@ endforeach()
 
 # The tests never start SDL's joystick subsystem. Every joystick driver is
 # off all the same, so none could add a device were one started. The hints
-# the four drivers read are cleared, and the GIP test sets its own.
+# the five drivers read are cleared, and the GIP and PS5 tests set their own.
 set(FIRMWARE_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_HIDAPI=0"
     "SDL_JOYSTICK_DIRECTINPUT=0"
@@ -162,6 +163,8 @@ set(FIRMWARE_CLEARED_ENVIRONMENT
     "SDL_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED=unset:"
     "SDL_JOYSTICK_HIDAPI_JOYCON_RINGCON=unset:"
     "SDL_JOYSTICK_HIDAPI_FLYDIGI=unset:"
+    "SDL_JOYSTICK_HIDAPI_PS5=unset:"
+    "SDL_JOYSTICK_HIDAPI_PS5_PLAYER_LED=unset:"
     "SDL_JOYSTICK_ENHANCED_REPORTS=unset:")
 
 foreach(name IN LISTS FIRMWARE_TEST_NAMES)

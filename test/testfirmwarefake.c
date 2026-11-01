@@ -26,6 +26,8 @@ SDL_Joystick *fake_joystick;
 int fake_writes;
 int fake_unexpected;
 Uint64 fake_now;
+int (*fake_feature_report)(unsigned char *data, size_t length);
+int fake_feature_requests;
 
 #define FAKE_MAX_CALLBACKS 16
 
@@ -54,6 +56,7 @@ void Fake_Reset(void)
     SDL_zero(fake);
     fake_writes = 0;
     fake_unexpected = 0;
+    fake_feature_requests = 0;
 }
 
 void Fake_Unexpected(const char *what)
@@ -122,9 +125,14 @@ int Fake_hid_write(SDL_hid_device *dev, const unsigned char *data, size_t length
 
 int Fake_hid_get_feature_report(SDL_hid_device *dev, unsigned char *data, size_t length)
 {
-    (void)dev;
-    (void)data;
-    (void)length;
+    if (dev != Fake_Handle()) {
+        Fake_Unexpected("feature report handle");
+        return -1;
+    }
+    ++fake_feature_requests;
+    if (fake_feature_report) {
+        return fake_feature_report(data, length);
+    }
     Fake_Unexpected("feature report");
     return -1;
 }
@@ -317,6 +325,8 @@ bool Fake_OpenRecord(void)
 
 void Fake_CloseRecord(void)
 {
+    int i;
+
     if (!fake_joystick) {
         return;
     }
@@ -335,6 +345,11 @@ void Fake_CloseRecord(void)
     SDL_free(fake_joystick->axes);
     SDL_free(fake_joystick->hats);
     SDL_free(fake_joystick->buttons);
+    /* As SDL_CloseJoystick frees the touchpads a driver adds */
+    for (i = 0; i < fake_joystick->ntouchpads; ++i) {
+        SDL_free(fake_joystick->touchpads[i].fingers);
+    }
+    SDL_free(fake_joystick->touchpads);
     SDL_free(fake_joystick->sensors);
     SDL_free(fake_joystick->serial);
     SDL_free(fake_joystick);
