@@ -1125,6 +1125,31 @@ static bool GIP_FragmentFailed(GIP_Attachment *attachment, const GIP_Header *hea
         (Uint16) (attachment->total_length - attachment->fragment_offset));
 }
 
+/*
+ * The firmware version a joystick reports: the major version in the high
+ * byte and the minor in the low one, as xone sets its input device's version
+ * from the announce packet (bus/protocol.c, gip_handle_pkt_announce).
+ */
+static Uint16 GIP_GetFirmwareVersion(const GIP_Attachment *attachment)
+{
+    return (Uint16)((attachment->firmware_major_version << 8) | attachment->firmware_minor_version);
+}
+
+// An open joystick takes the attachment's firmware version when a message changes it
+static void GIP_UpdateFirmwareVersion(GIP_Attachment *attachment)
+{
+    SDL_Joystick *joystick = NULL;
+
+    SDL_AssertJoysticksLocked();
+
+    if (attachment->joystick) {
+        joystick = SDL_GetJoystickFromID(attachment->joystick);
+    }
+    if (joystick) {
+        joystick->firmware_version = GIP_GetFirmwareVersion(attachment);
+    }
+}
+
 static bool GIP_EnableEliteButtons(GIP_Attachment *attachment) {
     if (attachment->device->device->vendor_id == USB_VENDOR_MICROSOFT) {
         if (attachment->device->device->product_id == USB_PRODUCT_XBOX_ONE_ELITE_SERIES_1) {
@@ -1405,6 +1430,7 @@ static bool GIP_HandleCommandHelloDevice(
     } else {
         attachment->firmware_major_version = message.firmware_major_version;
         attachment->firmware_minor_version = message.firmware_minor_version;
+        GIP_UpdateFirmwareVersion(attachment);
 
         if (attachment->attachment_index == 0) {
             attachment->device->hello_deadline = 0;
@@ -1775,6 +1801,7 @@ static bool GIP_HandleCommandFirmware(
 
         attachment->firmware_major_version = major;
         attachment->firmware_minor_version = minor;
+        GIP_UpdateFirmwareVersion(attachment);
 
         if (attachment->device->device->vendor_id == USB_VENDOR_MICROSOFT &&
             attachment->device->device->product_id == USB_PRODUCT_XBOX_ONE_ELITE_SERIES_2)
@@ -2971,6 +2998,7 @@ static bool HIDAPI_DriverGIP_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystic
     }
 
     joystick->nhats = 1;
+    joystick->firmware_version = GIP_GetFirmwareVersion(attachment);
 
     return true;
 }

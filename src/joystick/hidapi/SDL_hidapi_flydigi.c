@@ -667,6 +667,7 @@ static bool HIDAPI_DriverFlydigi_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joy
     }
     joystick->naxes = SDL_GAMEPAD_AXIS_COUNT;
     joystick->nhats = 1;
+    joystick->firmware_version = ctx->firmware_version;
 
     if (ctx->wireless) {
         joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;

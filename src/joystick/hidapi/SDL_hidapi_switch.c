@@ -337,6 +337,7 @@ typedef struct
     Uint8 m_nInitialInputMode;
     Uint8 m_nCurrentInputMode;
     Uint8 m_rgucMACAddress[6];
+    Uint16 m_usFirmwareVersion; // Major in the high byte, minor in the low, 0 when unknown
     Uint8 m_nCommandNumber;
     HIDAPI_Switch_EnhancedReportHint m_eEnhancedReportHint;
     bool m_bEnhancedMode;
@@ -733,6 +734,9 @@ static bool BReadDeviceInfo(SDL_DriverSwitch_Context *ctx)
 
     if (ctx->device->is_bluetooth) {
         if (WriteSubcommand(ctx, k_eSwitchSubcommandIDs_RequestDeviceInfo, NULL, 0, &reply)) {
+            // Bytes 0-1: Firmware version, major then minor
+            ctx->m_usFirmwareVersion = (Uint16)((reply->deviceInfo.rgucFirmwareVersion[0] << 8) | reply->deviceInfo.rgucFirmwareVersion[1]);
+
             // Byte 2: Controller ID (1=LJC, 2=RJC, 3=Pro)
             ctx->m_eControllerType = CalculateControllerType(ctx, (ESwitchDeviceInfoControllerType)reply->deviceInfo.ucDeviceType);
 
@@ -3073,6 +3077,15 @@ static bool HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     joystick->naxes = SDL_RingCon_AxisCount(ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConRight,
                                             joystick->naxes, SDL_GAMEPAD_AXIS_COUNT);
     joystick->nhats = 1;
+
+    /* The driver asks for the device info reply, which carries the
+       version, over Bluetooth only. A combined pair opens its left half,
+       then its right one (HIDAPI_DriverCombined_OpenJoystick), so the pair
+       reports the right Joy-Con's version, or the left's when the right has
+       none. */
+    if (ctx->m_usFirmwareVersion) {
+        joystick->firmware_version = ctx->m_usFirmwareVersion;
+    }
 
     if (IsRingConSupported(ctx)) {
         SDL_PropertiesID props = SDL_GetJoystickProperties(joystick);
