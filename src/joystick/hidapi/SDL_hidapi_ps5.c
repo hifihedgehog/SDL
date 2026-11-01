@@ -246,6 +246,9 @@ typedef struct
     bool hardware_calibration;
     IMUCalibrationData calibration[6];
     Uint16 firmware_version;
+    // A firmware read that waits for the next update (hifihedgehog/SDL#43)
+    bool firmware_read_pending;
+    int firmware_read_attempts;
     Uint64 last_packet;
     int player_index;
     bool player_lights;
@@ -890,6 +893,18 @@ static void HIDAPI_DriverPS5_SetEnhancedMode(SDL_DriverPS5_Context *ctx)
 
         // Update the light effects
         HIDAPI_DriverPS5_UpdateEffects(ctx, (k_EDS5EffectLED | k_EDS5EffectPadLights), false);
+
+        /* PadForge fork: init skips the firmware information read for a
+           Bluetooth controller in simple mode, since the read itself switches
+           it to enhanced reports. With the switch made, the next update reads
+           the version, which also retries a read that failed at init
+           (hifihedgehog/SDL#43). */
+        if (ctx->firmware_version == 0 &&
+            ctx->device->is_bluetooth &&
+            ctx->device->vendor_id == USB_VENDOR_SONY) {
+            ctx->firmware_read_pending = true;
+            ctx->firmware_read_attempts = 0;
+        }
     }
 }
 
@@ -1618,6 +1633,46 @@ static bool HIDAPI_DriverPS5_IsPacketValid(SDL_DriverPS5_Context *ctx, Uint8 *da
     return false;
 }
 
+/* A Bluetooth feature report ends with a CRC-32 of the hidp header 0xA3 and
+   the bytes before the CRC, as Linux checks it (hid-playstation.c,
+   ps_get_report) and DS4Windows does (DualSenseDevice.cs, ReadBTFeatureReport) */
+static bool VerifyFeatureCRC(const Uint8 *data, int size)
+{
+    Uint8 ubHdr = 0xA3; // hidp header is part of the CRC calculation
+    Uint32 unCRC;
+    const Uint8 *packetCRC = data + size - sizeof(unCRC);
+
+    unCRC = SDL_crc32(0, &ubHdr, 1);
+    unCRC = SDL_crc32(unCRC, data, (size_t)(size - sizeof(unCRC)));
+    return unCRC == LOAD32(packetCRC[0], packetCRC[1], packetCRC[2], packetCRC[3]);
+}
+
+/* The firmware read HIDAPI_DriverPS5_SetEnhancedMode asked for. It runs in
+   the update, under the joystick lock, since the switch can come from the
+   enhanced reports hint, whose callback runs on the thread that set it. The
+   reply must be all 64 bytes of report 0x20 with a good CRC, as Linux takes
+   it (hid-playstation.c, ps_get_report), and the update version is bytes 44
+   and 45, as at init. A failed read is tried again on the next update, five
+   tries for each switch, as DS4Windows tries its Bluetooth feature reads. */
+static void HIDAPI_DriverPS5_ReadPendingFirmwareVersion(SDL_DriverPS5_Context *ctx, SDL_Joystick *joystick)
+{
+    Uint8 data[USB_PACKET_LENGTH];
+
+    SDL_AssertJoysticksLocked();
+
+    if (ReadFeatureReport(ctx->device->dev, k_EPS5FeatureReportIdFirmwareInfo, data, sizeof(data)) >= (int)sizeof(data) &&
+        data[0] == k_EPS5FeatureReportIdFirmwareInfo &&
+        VerifyFeatureCRC(data, (int)sizeof(data))) {
+        ctx->firmware_version = (Uint16)data[44] | ((Uint16)data[45] << 8);
+        ctx->firmware_read_pending = false;
+        if (joystick) {
+            joystick->firmware_version = ctx->firmware_version;
+        }
+    } else if (++ctx->firmware_read_attempts >= 5) {
+        ctx->firmware_read_pending = false;
+    }
+}
+
 static bool HIDAPI_DriverPS5_UpdateDevice(SDL_HIDAPI_Device *device)
 {
     SDL_DriverPS5_Context *ctx = (SDL_DriverPS5_Context *)device->context;
@@ -1679,6 +1734,10 @@ static bool HIDAPI_DriverPS5_UpdateDevice(SDL_HIDAPI_Device *device)
 #endif
             break;
         }
+    }
+
+    if (ctx->firmware_read_pending) {
+        HIDAPI_DriverPS5_ReadPendingFirmwareVersion(ctx, joystick);
     }
 
     if (device->is_bluetooth) {
