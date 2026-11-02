@@ -28,14 +28,15 @@ void Check(bool value, const char *description)
     }
 }
 
-enum Key { Instance, Hardware, Service, Filters, Container, VendorSource, Vendor, ProductVersion };
+enum Key { Instance, Hardware, Service, Filters, Container };
 
+// Any other key, the Bluetooth PnP ID among them, fails the fixture: the
+// resolver reads no version from the metadata (hifihedgehog/SDL#46)
 int PropertyKey(const DEVPROPKEY &key)
 {
     const DEVPROPKEY *keys[] = {&DEVPKEY_Device_InstanceId, &DEVPKEY_Device_HardwareIds,
                                &DEVPKEY_Device_Service, &DEVPKEY_Device_UpperFilters,
-                               &DEVPKEY_Device_ContainerId, &BluetoothVendorSource,
-                               &BluetoothVendor, &BluetoothProductVersion};
+                               &DEVPKEY_Device_ContainerId};
     for (int i = 0; i < static_cast<int>(std::size(keys)); ++i) {
         if (key.pid == keys[i]->pid && IsEqualGUID(key.fmtid, keys[i]->fmtid)) {
             return i;
@@ -274,7 +275,7 @@ PhysicalIdentity Run(Fake &f, bool expected, std::uint32_t index = 0, std::uint3
                      const wchar_t *path = Path, const char *expectedError = nullptr)
 {
     ++cases;
-    PhysicalIdentity value{PaddleTransport::UsbGip, ContainerB, 0xff, L"HID\\old\\instance", 0xffff, 0xffff, 0xffff};
+    PhysicalIdentity value{PaddleTransport::UsbGip, ContainerB, 0xff, L"HID\\old\\instance", 0xffff, 0xffff};
     std::string error = "Previous error";
     const bool success = ResolveWithSource(f, path, index, count, value, error);
     Check(!f.harnessFailure, f.harnessFailure ? f.harnessFailure : "No fixture failure");
@@ -288,8 +289,7 @@ PhysicalIdentity Run(Fake &f, bool expected, std::uint32_t index = 0, std::uint3
         constexpr GUID zero{};
         Check(value.transport == PaddleTransport::None && value.nativeId == 0 &&
               value.instance.empty() && value.vendor == 0 && value.product == 0 &&
-              value.recordFirmware == 0 && IsEqualGUID(value.container, zero),
-              "Failure clears every identity field");
+              IsEqualGUID(value.container, zero), "Failure clears every identity field");
         Check(!error.empty(), "Failure has a diagnostic");
         if (expectedError) {
             Check(error.find(expectedError) != std::string::npos, error.c_str());
@@ -821,89 +821,32 @@ void WirelessHardware()
     Check(!SamePhysicalIdentity(a, Run(wired, true)), "Wired and wireless attachments have separate lifetimes");
 }
 
-// The PnP ID fields on a node, as Windows stores them for HID over GATT
-void PnpId(Fake &f, DEVINST node, std::uint8_t source, std::uint16_t vendor, std::uint16_t version)
+// What the firmware lookup reads about a slot, through the same resolution
+SDL_XInputSlotRecord Record(Fake &f, bool expected)
 {
-    f.nodes[node][VendorSource] = Raw(&source, sizeof(source), DEVPROP_TYPE_BYTE);
-    f.nodes[node][Vendor] = Raw(&vendor, sizeof(vendor), DEVPROP_TYPE_UINT16);
-    f.nodes[node][ProductVersion] = Raw(&version, sizeof(version), DEVPROP_TYPE_UINT16);
+    SDL_XInputSlotRecord record;
+    record.container = ContainerB;
+    ++cases;
+    const bool success = ReadSlotRecordWithSource(f, Path, record);
+    Check(!f.harnessFailure, f.harnessFailure ? f.harnessFailure : "No fixture failure");
+    Check(success == expected, success ? "Unexpected record" : "Unexpected failure to read a record");
+    return record;
 }
 
-std::uint16_t Firmware(Fake &f)
+void SlotRecord()
 {
-    return Run(f, true).recordFirmware;
-}
-
-void RecordFirmware()
-{
-    // The bench's Elite reports 0x0513 and runs 5.13.3146.0, and its Series X reports 0x0523
+    constexpr GUID zero{};
     auto f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x0513);
-    Check(Firmware(f) == 0x050d, "A Bluetooth product version of 0x0513 is firmware 5.13");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x0523);
-    Check(Firmware(f) == 0x0517, "A Bluetooth product version of 0x0523 is firmware 5.23");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x1009);
-    Check(Firmware(f) == 0x0a09, "A Bluetooth product version of 0x1009 is firmware 10.9");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x05a3);
-    Check(Firmware(f) == 0, "A hex letter spells no decimal digit");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x0f13);
-    Check(Firmware(f) == 0, "A hex letter in the major version spells no decimal digit");
-    f = Ble();
-    PnpId(f, 2, 1, 0x045e, 0x0513);
-    Check(Firmware(f) == 0, "045E from the Bluetooth SIG's list is not Microsoft");
-    f = Ble();
-    PnpId(f, 2, 2, 0x046d, 0x0513);
-    Check(Firmware(f) == 0, "Another vendor's product version is no Xbox firmware");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x0513);
-    const std::uint32_t wide = 0x0513;
-    f.nodes[2][ProductVersion] = Raw(&wide, sizeof(wide), DEVPROP_TYPE_UINT32);
-    Check(Firmware(f) == 0, "A product version of another type is not read");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x0513);
-    f.nodes[2].erase(VendorSource);
-    Check(Firmware(f) == 0, "A missing vendor ID source leaves no firmware");
-    f = Ble();
-    Check(Firmware(f) == 0, "A node without a PnP ID resolves, with no firmware");
-    f = Ble();
-    PnpId(f, 3, 2, 0x045e, 0x0513);
-    Check(Firmware(f) == 0, "Only the HID-over-GATT node's PnP ID is read");
-
-    // xpad reads the wired Elite Series 2's 0x050b as firmware 5.11
+    Check(IsEqualGUID(Record(f, true).container, ContainerA), "A Bluetooth slot's record is its controller's container");
     f = Usb();
-    f.nodes[3][Hardware] = List({L"USB\\VID_045E&PID_0B00&REV_050B", L"USB\\VID_045E&PID_0B00"});
-    Check(Firmware(f) == 0x050b, "A wired release number of 0x050B is firmware 5.11");
-    f = Usb();
-    f.nodes[3][Hardware] = List({L"usb\\vid_045e&pid_0b00&rev_0511", L"usb\\vid_045e&pid_0b00"});
-    Check(Firmware(f) == 0x0511, "A lowercase hardware ID keeps its release number");
-    f = Usb();
-    Check(Firmware(f) == 0, "A physical parent without a release number has no firmware");
-    f = Usb();
-    f.nodes[3][Hardware] = List({L"USB\\VID_045E&PID_0B00&REV_05G1"});
-    Check(Firmware(f) == 0, "A release number that is not hex is not read");
-    f = Usb();
-    f.nodes[3][Hardware] = List({L"USB\\VID_045E&PID_0B12&REV_0511"});
-    Check(Firmware(f) == 0, "Another product's release number is not read");
-    f = Usb();
-    f.nodes[3][Hardware] = List({L"USB\\VID_045E&PID_0B00&REV_0511&MI_00"});
-    Check(Firmware(f) == 0, "A longer hardware ID is not a release number");
-    f = Usb();
-    f.nodes[3][Instance] = String(L"USB\\VID_1234&PID_ABCD\\DIFFERENT_DEVICE");
-    f.nodes[3][Hardware] = List({L"USB\\VID_1234&PID_ABCD&REV_0511"});
-    Check(Firmware(f) == 0, "Only a Microsoft controller's release number is its firmware");
-
-    // The wireless receiver's release number is the receiver's own
+    f.nodes[3][Hardware] = List({L"USB\\VID_045E&PID_0B00&REV_0511", L"USB\\VID_045E&PID_0B00"});
+    Check(IsEqualGUID(Record(f, true).container, ContainerA), "A wired slot's record is its controller's container");
     f = Radio();
-    f.nodes[3][Hardware] = List({L"USB\\VID_045E&PID_02FE&REV_0511", L"USB\\VID_045E&PID_02FE"});
-    Check(Firmware(f) == 0, "Wireless GIP has no firmware in its metadata");
-    f = Ble();
-    PnpId(f, 2, 2, 0x045e, 0x0513);
+    Check(IsEqualGUID(Record(f, true).container, ContainerA), "A wireless slot's record is the controller's container, not the receiver's");
+    f = Usb();
     f.nodes[1].erase(Container);
-    Reject(f, "no qualified device container");
+    Check(IsEqualGUID(Record(f, false).container, zero), "A failed resolution zeroes the record");
+    Check(!SDL_XINPUT_ReadSlotRecord(Path, nullptr), "No record to fill is a failure");
 }
 
 } // namespace
@@ -916,7 +859,7 @@ int main()
         {"driver binding", DriverBinding}, {"property bounds", PropertyBounds},
         {"exclusion and channels", ExclusionAndChannels}, {"ancestry bounds", AncestryBounds},
         {"churn and failures", ChurnAndFailures}, {"Bluetooth identity", BluetoothIdentity}, {"equality", Equality},
-        {"record firmware", RecordFirmware}};
+        {"slot record", SlotRecord}};
     for (const auto &[name, run] : groups) {
         try {
             run();

@@ -281,7 +281,6 @@ struct FakeRecord
 {
     WCHAR path[512];
     GUID container;
-    Uint16 firmware;
 };
 
 FakeGameInput s_gameinput;
@@ -441,7 +440,6 @@ extern "C" bool Fake_ReadSlotRecord(const wchar_t *path, SDL_XInputSlotRecord *r
     for (i = 0; i < s_record_count; ++i) {
         if (SDL_wcscmp(s_records[i].path, path) == 0) {
             record->container = s_records[i].container;
-            record->firmware = s_records[i].firmware;
             return true;
         }
     }
@@ -616,7 +614,7 @@ void FakeGI_SetContainer(int device, int container)
     s_devices[device].container = Container(container);
 }
 
-void FakeGI_SetRecord(const char *path, int container, Uint16 firmware)
+void FakeGI_SetRecord(const char *path, int container)
 {
     if (s_record_count == FakeMaxRecords) {
         Unexpected();
@@ -624,7 +622,6 @@ void FakeGI_SetRecord(const char *path, int container, Uint16 firmware)
     }
     Widen(path, s_records[s_record_count].path, SDL_arraysize(s_records[s_record_count].path));
     s_records[s_record_count].container = Container(container);
-    s_records[s_record_count].firmware = firmware;
     ++s_record_count;
 }
 
