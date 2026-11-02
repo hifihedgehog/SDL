@@ -80,10 +80,26 @@ typedef struct joystick_hwdata
     SDL_GHLKeepAlive ghl_keepalive;
 } GAMEINPUT_InternalJoystickHwdata;
 
+/* PadForge fork: the device callback queues each event under a lock of its
+   own, and GAMEINPUT_JoystickDetect applies the queue under the joystick lock
+   (hifihedgehog/SDL#45). SDL_QuitJoysticks holds the joystick lock across this
+   driver's quit, and GameInput 4.0.302 makes UnregisterCallback wait for a
+   running callback, so a callback that took the joystick lock could hold the
+   quit forever. */
+typedef struct GAMEINPUT_PendingDeviceEvent
+{
+    IGameInputDevice *device; // Held until the event is applied or dropped
+    bool connected;
+} GAMEINPUT_PendingDeviceEvent;
+
 static GAMEINPUT_InternalList g_GameInputList = { NULL };
 static IGameInput *g_pGameInput = NULL;
 static GameInputCallbackToken g_GameInputCallbackToken = 0;
 static Uint64 g_GameInputTimestampOffset;
+// The device callback takes this lock and no other
+static SDL_Mutex *g_GameInputPendingLock = NULL;
+static GAMEINPUT_PendingDeviceEvent *g_GameInputPending = NULL;
+static int g_GameInputPendingCount = 0;
 
 #if GAMEINPUT_API_VERSION < 4
 static const GameInputDeviceInfo *GAMEINPUT_GetGameInputDeviceInfo(IGameInputDevice *pDevice)
@@ -424,7 +440,10 @@ static bool GAMEINPUT_InternalRemoveByIndex(int idx)
         g_GameInputList.devices = NULL;
     } else {
         if (idx != g_GameInputList.count - 1) {
-            bytes = sizeof(*devicelist) * (g_GameInputList.count - idx);
+            /* PadForge fork: the entries after idx, as the video backend
+               counts them (SDL_windowsgameinput.cpp). count - idx read one
+               pointer past the list (hifihedgehog/SDL#45). */
+            bytes = sizeof(*devicelist) * (g_GameInputList.count - idx - 1);
             SDL_memmove(&g_GameInputList.devices[idx], &g_GameInputList.devices[idx + 1], bytes);
         }
     }
@@ -441,6 +460,74 @@ static GAMEINPUT_InternalDevice *GAMEINPUT_InternalFindByIndex(int idx)
     return g_GameInputList.devices[idx];
 }
 
+static void GAMEINPUT_ApplyDeviceEvent(IGameInputDevice *device, bool connected)
+{
+    int idx = 0;
+    GAMEINPUT_InternalDevice *elem = NULL;
+
+    SDL_AssertJoysticksLocked();
+
+    if (connected) {
+        GAMEINPUT_InternalAddOrFind(device);
+    } else {
+        for (idx = 0; idx < g_GameInputList.count; ++idx) {
+            elem = g_GameInputList.devices[idx];
+            if (elem && elem->device == device) {
+                // will be deleted by the Detect call applying the queue
+                elem->isDeleteRequested = true;
+                break;
+            }
+        }
+    }
+}
+
+// Takes the queue, leaving it empty for the callback
+static GAMEINPUT_PendingDeviceEvent *GAMEINPUT_TakePendingDeviceEvents(int *count)
+{
+    GAMEINPUT_PendingDeviceEvent *events = NULL;
+
+    *count = 0;
+    if (g_GameInputPendingLock) {
+        SDL_LockMutex(g_GameInputPendingLock);
+        events = g_GameInputPending;
+        *count = g_GameInputPendingCount;
+        g_GameInputPending = NULL;
+        g_GameInputPendingCount = 0;
+        SDL_UnlockMutex(g_GameInputPendingLock);
+    }
+    return events;
+}
+
+// In the order GameInput reported them, as the callback once applied them
+static void GAMEINPUT_ApplyPendingDeviceEvents(void)
+{
+    GAMEINPUT_PendingDeviceEvent *events;
+    int count = 0;
+    int i;
+
+    SDL_AssertJoysticksLocked();
+
+    events = GAMEINPUT_TakePendingDeviceEvents(&count);
+    for (i = 0; i < count; ++i) {
+        GAMEINPUT_ApplyDeviceEvent(events[i].device, events[i].connected);
+        events[i].device->Release();
+    }
+    SDL_free(events);
+}
+
+static void GAMEINPUT_DropPendingDeviceEvents(void)
+{
+    GAMEINPUT_PendingDeviceEvent *events;
+    int count = 0;
+    int i;
+
+    events = GAMEINPUT_TakePendingDeviceEvents(&count);
+    for (i = 0; i < count; ++i) {
+        events[i].device->Release();
+    }
+    SDL_free(events);
+}
+
 static void CALLBACK GAMEINPUT_InternalJoystickDeviceCallback(
     _In_ GameInputCallbackToken callbackToken,
     _In_ void *context,
@@ -454,35 +541,36 @@ static void CALLBACK GAMEINPUT_InternalJoystickDeviceCallback(
     _In_ GameInputDeviceStatus previousStatus)
 #endif
 {
-    int idx = 0;
-    GAMEINPUT_InternalDevice *elem = NULL;
+    GAMEINPUT_PendingDeviceEvent *events;
+    bool connected;
+    bool queued = false;
 
     if (!device) {
         // This should never happen, but ignore it if it does
         return;
     }
 
-    SDL_LockJoysticks();
-
 #if GAMEINPUT_API_VERSION >= 4
-    if (device->IsConnected())
+    connected = device->IsConnected();
 #else
-    if (currentStatus & GameInputDeviceConnected)
+    connected = (currentStatus & GameInputDeviceConnected) != 0;
 #endif
-    {
-        GAMEINPUT_InternalAddOrFind(device);
-    } else {
-        for (idx = 0; idx < g_GameInputList.count; ++idx) {
-            elem = g_GameInputList.devices[idx];
-            if (elem && elem->device == device) {
-                // will be deleted on the next Detect call
-                elem->isDeleteRequested = true;
-                break;
-            }
-        }
-    }
 
-    SDL_UnlockJoysticks();
+    // Never the joystick lock, under which the quit unregisters this callback
+    device->AddRef();
+    SDL_LockMutex(g_GameInputPendingLock);
+    events = (GAMEINPUT_PendingDeviceEvent *)SDL_realloc(g_GameInputPending, sizeof(*events) * (g_GameInputPendingCount + 1LL));
+    if (events) {
+        events[g_GameInputPendingCount].device = device;
+        events[g_GameInputPendingCount].connected = connected;
+        g_GameInputPending = events;
+        ++g_GameInputPendingCount;
+        queued = true;
+    }
+    SDL_UnlockMutex(g_GameInputPendingLock);
+    if (!queued) {
+        device->Release();
+    }
 }
 
 static void GAMEINPUT_JoystickDetect(void);
@@ -503,6 +591,14 @@ static bool GAMEINPUT_JoystickInit(void)
 
     if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT) && !GAMEINPUT_IsRawGameInputEnabled()) {
         return true;
+    }
+
+    // Before the callback can run. The quit destroys it.
+    if (!g_GameInputPendingLock) {
+        g_GameInputPendingLock = SDL_CreateMutex();
+        if (!g_GameInputPendingLock) {
+            return false;
+        }
     }
 
     if (!SDL_InitGameInput(&g_pGameInput)) {
@@ -563,6 +659,8 @@ static void GAMEINPUT_JoystickDetect(void)
     bool connected;
 
     SDL_AssertJoysticksLocked();
+
+    GAMEINPUT_ApplyPendingDeviceEvents();
 
     for (idx = 0; idx < g_GameInputList.count; ++idx) {
         elem = g_GameInputList.devices[idx];
@@ -1240,16 +1338,23 @@ static void GAMEINPUT_JoystickClose(SDL_Joystick *joystick)
 
 static void GAMEINPUT_JoystickQuit(void)
 {
+    bool callback_stopped = true;
+
     if (g_pGameInput) {
         // free the callback
         if (g_GameInputCallbackToken) {
+            /* Under the joystick lock. The wait is only for a callback in
+               progress, and the callback takes no lock this thread holds. */
 #if GAMEINPUT_API_VERSION >= 4
-            g_pGameInput->UnregisterCallback(g_GameInputCallbackToken);
+            callback_stopped = g_pGameInput->UnregisterCallback(g_GameInputCallbackToken);
 #else
-            g_pGameInput->UnregisterCallback(g_GameInputCallbackToken, 10000);
+            callback_stopped = g_pGameInput->UnregisterCallback(g_GameInputCallbackToken, 10000);
 #endif
             g_GameInputCallbackToken = 0;
         }
+
+        // Devices reported during the quit go with the list
+        GAMEINPUT_DropPendingDeviceEvents();
 
         // free the list
         while (g_GameInputList.count > 0) {
@@ -1258,6 +1363,12 @@ static void GAMEINPUT_JoystickQuit(void)
 
         SDL_QuitGameInput();
         g_pGameInput = NULL;
+    }
+
+    // A callback that may still run keeps its lock
+    if (callback_stopped && g_GameInputPendingLock) {
+        SDL_DestroyMutex(g_GameInputPendingLock);
+        g_GameInputPendingLock = NULL;
     }
 }
 
