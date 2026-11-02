@@ -40,6 +40,9 @@ struct joystick_hwdata
     DWORD dwPacketNumber;
     int rb3pro_variant; // A Rock Band 3 Pro instrument, subtype 15 or 25
     BYTE rb3pro_extra[6]; // Its six trailing XUSB bytes in the last state posted
+    // The firmware version lookup in GameInput (hifihedgehog/SDL#44)
+    bool firmware_settled;   // Found, or no lookup can find it
+    int firmware_generation; // GameInput's device list at the last miss, -1 to look again
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
     void *paddle_context;
 #endif

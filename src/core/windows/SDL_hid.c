@@ -167,6 +167,20 @@ typedef DWORD (CALLBACK *PCM_NOTIFY_CALLBACK)(HCMNOTIFICATION hNotify, PVOID Con
 typedef DWORD (WINAPI *CM_Register_NotificationFunc)(PCM_NOTIFY_FILTER pFilter, PVOID pContext, PCM_NOTIFY_CALLBACK pCallback, PHCMNOTIFICATION pNotifyContext);
 typedef DWORD (WINAPI *CM_Unregister_NotificationFunc)(HCMNOTIFICATION NotifyContext);
 
+/* PadForge fork: CM_Get_Device_Interface_PropertyW and the one property
+   WIN_GetDeviceInterfaceInstanceId reads, as devpropdef.h and devpkey.h define
+   them (hifihedgehog/SDL#44) */
+typedef struct
+{
+    GUID fmtid;
+    ULONG pid;
+} SDL_DEVPROPKEY;
+
+typedef DWORD (WINAPI *CM_Get_Device_Interface_PropertyWFunc)(LPCWSTR pszDeviceInterface, const SDL_DEVPROPKEY *PropertyKey, ULONG *PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
+
+static const SDL_DEVPROPKEY SDL_DEVPKEY_Device_InstanceId = { { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } }, 256 };
+#define SDL_DEVPROP_TYPE_STRING 0x00000012
+
 #define CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES 0x00000001
 
 static GUID GUID_DEVINTERFACE_HID = { 0x4D1E55B2L, 0xF16F, 0x11CF, { 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
@@ -174,6 +188,7 @@ static GUID GUID_DEVINTERFACE_HID = { 0x4D1E55B2L, 0xF16F, 0x11CF, { 0x88, 0xCB,
 static SDL_InitState SDL_cfgmgr32_init;
 static CM_Register_NotificationFunc SDL_CM_Register_Notification;
 static CM_Unregister_NotificationFunc SDL_CM_Unregister_Notification;
+static CM_Get_Device_Interface_PropertyWFunc SDL_CM_Get_Device_Interface_PropertyW;
 
 static int s_DeviceNotificationsRequested;
 static HCMNOTIFICATION s_DeviceNotificationFuncHandle;
@@ -190,6 +205,7 @@ static bool WIN_LoadCfgMgr32(void)
         if (cfgmgr32) {
             SDL_CM_Register_Notification = (CM_Register_NotificationFunc)GetProcAddress(cfgmgr32, "CM_Register_Notification");
             SDL_CM_Unregister_Notification = (CM_Unregister_NotificationFunc)GetProcAddress(cfgmgr32, "CM_Unregister_Notification");
+            SDL_CM_Get_Device_Interface_PropertyW = (CM_Get_Device_Interface_PropertyWFunc)GetProcAddress(cfgmgr32, "CM_Get_Device_Interface_PropertyW");
         }
         SDL_SetInitialized(&SDL_cfgmgr32_init, true);
     }
@@ -318,6 +334,42 @@ void WIN_UnregisterDeviceInterfaceNotification(WIN_DeviceInterfaceNotification *
     }
 }
 
+/* The ID must arrive as a string with its terminator inside the returned
+   size and no earlier one, as the paddle route reads its properties
+   (SDL_xinput_paddle_identity.cpp, ReadString) */
+bool WIN_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity)
+{
+    ULONG type = 0;
+    ULONG bytes;
+    size_t length;
+
+    if (!instance || capacity < 2 || capacity > 4096) {
+        return false;
+    }
+    instance[0] = L'\0';
+    if (!path) {
+        return false;
+    }
+    (void)WIN_LoadCfgMgr32();
+    if (!SDL_CM_Get_Device_Interface_PropertyW) {
+        return false;
+    }
+
+    bytes = (ULONG)(capacity * sizeof(WCHAR));
+    if (SDL_CM_Get_Device_Interface_PropertyW(path, &SDL_DEVPKEY_Device_InstanceId, &type, (PBYTE)instance, &bytes, 0) != CR_SUCCESS ||
+        type != SDL_DEVPROP_TYPE_STRING || bytes < 2 * sizeof(WCHAR) || bytes > capacity * sizeof(WCHAR) ||
+        (bytes % sizeof(WCHAR)) != 0) {
+        instance[0] = L'\0';
+        return false;
+    }
+    length = bytes / sizeof(WCHAR);
+    if (instance[length - 1] != L'\0' || SDL_wcslen(instance) != length - 1) {
+        instance[0] = L'\0';
+        return false;
+    }
+    return true;
+}
+
 void WIN_QuitDeviceNotification(void)
 {
     if (--s_DeviceNotificationsRequested > 0) {
@@ -360,6 +412,14 @@ WIN_DeviceInterfaceNotification *WIN_RegisterDeviceInterfaceNotification(WIN_Dev
 
 void WIN_UnregisterDeviceInterfaceNotification(WIN_DeviceInterfaceNotification *notification)
 {
+}
+
+bool WIN_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity)
+{
+    if (instance && capacity > 0) {
+        instance[0] = L'\0';
+    }
+    return false;
 }
 
 #endif // !SDL_PLATFORM_XBOXONE && !SDL_PLATFORM_XBOXSERIES

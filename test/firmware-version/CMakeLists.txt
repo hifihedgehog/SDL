@@ -6,7 +6,8 @@ project(SDLFirmwareVersionTests LANGUAGES C CXX)
 # after a Bluetooth DualSense leaves simple mode for #43. Each real driver
 # runs against a scripted controller inside a real static SDL, whose joystick
 # core and hints it uses. No HID device opens and SDL's HID layer never
-# starts.
+# starts. The XInput driver and its lookup in GameInput's device information
+# (#44) run against scripted XInput slots and a scripted GameInput.
 if(NOT WIN32 OR NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The firmware version tests require native MSVC for 64-bit Windows.")
 endif()
@@ -106,19 +107,51 @@ foreach(name IN LISTS FIRMWARE_TEST_NAMES)
         VERBATIM)
 endforeach()
 
-set(FIRMWARE_OBJECTS testfirmwarefake)
+# The XInput driver and its firmware lookup (hifihedgehog/SDL#44).
+# testxinputfirmware.c includes the driver and scripts the XInput slots.
+# testxinputfirmware_gameinput.cpp includes SDL_xinput_firmware.cpp and
+# scripts GameInput. Both objects also fail the build if they call the real
+# GameInput start, the configuration manager lookup, the XInput loader,
+# device notifications, or the functions that change SDL's joystick list.
+set(XINPUT_FIRMWARE_FORBIDDEN "${CMAKE_CURRENT_BINARY_DIR}/xinput-firmware-forbidden.txt")
+file(WRITE "${XINPUT_FIRMWARE_FORBIDDEN}"
+    "SDL_InitGameInput|SDL_QuitGameInput|GameInputInitialize|GameInputCreate|WIN_GetDeviceInterfaceInstanceId|WIN_LoadXInputDLL|WIN_UnloadXInputDLL|WIN_InitDeviceNotification|WIN_QuitDeviceNotification|WIN_GetLastDeviceNotification|SDL_PrivateJoystickAdded|SDL_PrivateJoystickRemoved|SDL_JoystickHandledByAnotherDriver|^(__imp_)?XInput\n")
+add_library(testxinputfirmware_main OBJECT "${FIRMWARE_TESTS}/testxinputfirmware.c")
+add_library(testxinputfirmware_gameinput OBJECT "${FIRMWARE_TESTS}/testxinputfirmware_gameinput.cpp")
+add_executable(testxinputfirmware $<TARGET_OBJECTS:testxinputfirmware_main> $<TARGET_OBJECTS:testxinputfirmware_gameinput>)
+target_link_libraries(testxinputfirmware PRIVATE SDL3-static)
+target_link_options(testxinputfirmware PRIVATE /INCREMENTAL:NO "/MAP:${CMAKE_CURRENT_BINARY_DIR}/testxinputfirmware.map")
+if(SDL_FIRMWARE_VERSION_TEST_ASAN)
+    target_link_options(testxinputfirmware PRIVATE /DEBUG)
+endif()
+add_custom_command(TARGET testxinputfirmware PRE_LINK
+    COMMAND "${CMAKE_COMMAND}" "-DDUMPBIN=${FIRMWARE_DUMPBIN}"
+        "-DOBJECT=$<TARGET_OBJECTS:testxinputfirmware_main>"
+        "-DREPORT=${CMAKE_CURRENT_BINARY_DIR}/testxinputfirmware-externals.txt"
+        "-DEXTRA_FILE=${XINPUT_FIRMWARE_FORBIDDEN}"
+        -P "${CMAKE_CURRENT_LIST_DIR}/CheckSystem.cmake"
+    COMMAND "${CMAKE_COMMAND}" "-DDUMPBIN=${FIRMWARE_DUMPBIN}"
+        "-DOBJECT=$<TARGET_OBJECTS:testxinputfirmware_gameinput>"
+        "-DREPORT=${CMAKE_CURRENT_BINARY_DIR}/testxinputfirmware-gameinput-externals.txt"
+        "-DEXTRA_FILE=${XINPUT_FIRMWARE_FORBIDDEN}"
+        -P "${CMAKE_CURRENT_LIST_DIR}/CheckSystem.cmake"
+    VERBATIM)
+
+set(FIRMWARE_OBJECTS testfirmwarefake testxinputfirmware_main testxinputfirmware_gameinput testxinputfirmware)
 foreach(name IN LISTS FIRMWARE_TEST_NAMES)
     list(APPEND FIRMWARE_OBJECTS test${name}firmware_main test${name}firmware)
 endforeach()
 foreach(target IN LISTS FIRMWARE_OBJECTS)
     set_target_properties(${target} PROPERTIES
-        C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+        C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
     target_compile_options(${target} PRIVATE /W4 /WX /utf-8)
     if(SDL_FIRMWARE_VERSION_TEST_ASAN)
         target_compile_options(${target} PRIVATE /fsanitize=address /Zi)
     endif()
 endforeach()
-foreach(target IN ITEMS testfirmwarefake testgipfirmware_main testxboxonefirmware_main testswitchfirmware_main testflydigifirmware_main testps5firmware_main)
+foreach(target IN ITEMS testfirmwarefake testgipfirmware_main testxboxonefirmware_main testswitchfirmware_main testflydigifirmware_main testps5firmware_main
+                        testxinputfirmware_main testxinputfirmware_gameinput)
     target_compile_definitions(${target} PRIVATE USING_GENERATED_CONFIG_H SDL_STATIC_LIB)
     target_include_directories(${target} PRIVATE
         "${FIRMWARE_SDL_ROOT}/src"
@@ -126,12 +159,16 @@ foreach(target IN ITEMS testfirmwarefake testgipfirmware_main testxboxonefirmwar
         "${CMAKE_CURRENT_BINARY_DIR}/sdl/include-revision")
     target_link_libraries(${target} PRIVATE SDL3::Headers)
 endforeach()
-# The drivers leave parameters of their HIDAPI entry points unused (C4100),
-# which SDL's own /W3 build does not report. Every other warning stays an
-# error.
+# SDL_gameinput.h includes the vendored GameInput header by its bare name
+target_include_directories(testxinputfirmware_gameinput PRIVATE "${FIRMWARE_SDL_ROOT}/src/core/windows/gameinput")
+# The drivers leave parameters of their entry points unused (C4100), and so
+# do the scripted GameInput's methods. SDL's own /W3 build does not report
+# it. Every other warning stays an error.
 foreach(name IN LISTS FIRMWARE_TEST_NAMES)
     target_compile_options(test${name}firmware_main PRIVATE /wd4100)
 endforeach()
+target_compile_options(testxinputfirmware_main PRIVATE /wd4100)
+target_compile_options(testxinputfirmware_gameinput PRIVATE /wd4100)
 
 # The tests never start SDL's joystick subsystem. Every joystick driver is
 # off all the same, so none could add a device were one started. The hints
@@ -176,3 +213,16 @@ foreach(name IN LISTS FIRMWARE_TEST_NAMES)
         ENVIRONMENT_MODIFICATION "${FIRMWARE_CLEARED_ENVIRONMENT}")
     set_property(TEST firmware-version.${name} PROPERTY LABELS firmware-version offline)
 endforeach()
+
+# The XInput test starts the XInput driver itself, against its fakes, so
+# its hint is cleared rather than set to 0
+set(XINPUT_FIRMWARE_ENVIRONMENT ${FIRMWARE_OFFLINE_ENVIRONMENT})
+list(REMOVE_ITEM XINPUT_FIRMWARE_ENVIRONMENT "SDL_XINPUT_ENABLED=0")
+set(XINPUT_FIRMWARE_CLEARED_ENVIRONMENT ${FIRMWARE_CLEARED_ENVIRONMENT} "SDL_XINPUT_ENABLED=unset:")
+add_test(NAME firmware-version.xinput COMMAND testxinputfirmware)
+set_tests_properties(firmware-version.xinput PROPERTIES
+    TIMEOUT 120
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    ENVIRONMENT "${XINPUT_FIRMWARE_ENVIRONMENT}"
+    ENVIRONMENT_MODIFICATION "${XINPUT_FIRMWARE_CLEARED_ENVIRONMENT}")
+set_property(TEST firmware-version.xinput PROPERTY LABELS firmware-version offline)
