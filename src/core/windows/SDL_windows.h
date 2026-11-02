@@ -241,6 +241,12 @@ typedef void (*WIN_DeviceInterfaceCallback)(void *userdata);
 extern WIN_DeviceInterfaceNotification *WIN_RegisterDeviceInterfaceNotification(WIN_DeviceInterfaceCallback callback, void *userdata);
 extern void WIN_UnregisterDeviceInterfaceNotification(WIN_DeviceInterfaceNotification *notification);
 
+/* PadForge fork: the device instance ID a device interface path belongs to,
+   DEVPKEY_Device_InstanceId read with CM_Get_Device_Interface_PropertyW.
+   False when cfgmgr32 or the property is unavailable, or the ID does not fit
+   in capacity characters (hifihedgehog/SDL#44). */
+extern bool WIN_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity);
+
 // Ends C function definitions when using C++
 #ifdef __cplusplus
 }

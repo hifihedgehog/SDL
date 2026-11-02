@@ -5,7 +5,10 @@
 # joystick list, SDL's joystick lookup the fake replaces, or a Win32 function
 # that opens or reads a device or loads a library. The scripted controller
 # must be the only device the code under test can reach.
-#   cmake -DDUMPBIN=<dumpbin.exe> -DOBJECT=<object file> -DREPORT=<file> -P CheckSystem.cmake
+#   cmake -DDUMPBIN=<dumpbin.exe> -DOBJECT=<object file> -DREPORT=<file> [-DEXTRA_FILE=<file>] -P CheckSystem.cmake
+# EXTRA_FILE holds a regular expression for more calls a test must reach
+# only through its fakes. It is a file because cmd would read the
+# expression's | as a pipe on the command line.
 foreach(variable DUMPBIN OBJECT REPORT)
     if(NOT DEFINED ${variable})
         message(FATAL_ERROR "CheckSystem.cmake needs -D${variable}=...")
@@ -30,6 +33,12 @@ endforeach()
 list(REMOVE_DUPLICATES names)
 list(SORT names)
 
+set(extra "")
+if(DEFINED EXTRA_FILE)
+    file(READ "${EXTRA_FILE}" extra)
+    string(STRIP "${extra}" extra)
+endif()
+
 set(forbidden)
 foreach(name IN LISTS names)
     if(name MATCHES "^SDL_hid_" OR
@@ -38,7 +47,8 @@ foreach(name IN LISTS names)
        name MATCHES "^SDL_GetJoystickFromID" OR
        name MATCHES "^(__imp_)?(CreateFile[AW]?|CreateFile2|ReadFile|ReadFileEx|WriteFile|WriteFileEx|DeviceIoControl)$" OR
        name MATCHES "^(__imp_)?(LoadLibrary[AW]?|LoadLibraryEx[AW]?|GetProcAddress)$" OR
-       name MATCHES "^(__imp_)?(HidD_|HidP_|CM_|SetupDi)")
+       name MATCHES "^(__imp_)?(HidD_|HidP_|CM_|SetupDi)" OR
+       (NOT extra STREQUAL "" AND name MATCHES "${extra}"))
         list(APPEND forbidden "${name}")
     endif()
 endforeach()

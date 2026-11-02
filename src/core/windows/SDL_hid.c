@@ -196,6 +196,20 @@ typedef DWORD (WINAPI *CM_Get_Device_Interface_PropertyWFunc)(LPCWSTR pszDeviceI
 typedef DWORD (WINAPI *CM_Locate_DevNodeWFunc)(PDWORD pdnDevInst, WCHAR *pDeviceID, ULONG ulFlags);
 typedef DWORD (WINAPI *CM_Get_DevNode_PropertyWFunc)(DWORD dnDevInst, const DEVPROPKEY *PropertyKey, DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
 
+/* PadForge fork: CM_Get_Device_Interface_PropertyW and the one property
+   WIN_GetDeviceInterfaceInstanceId reads, as devpropdef.h and devpkey.h define
+   them (hifihedgehog/SDL#44) */
+typedef struct
+{
+    GUID fmtid;
+    ULONG pid;
+} SDL_DEVPROPKEY;
+
+typedef DWORD (WINAPI *CM_Get_Device_Interface_PropertyWFunc)(LPCWSTR pszDeviceInterface, const SDL_DEVPROPKEY *PropertyKey, ULONG *PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
+
+static const SDL_DEVPROPKEY SDL_DEVPKEY_Device_InstanceId = { { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } }, 256 };
+#define SDL_DEVPROP_TYPE_STRING 0x00000012
+
 #define CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES 0x00000001
 #define CM_GET_DEVICE_INTERFACE_LIST_PRESENT        0x00000000
 #define CM_LOCATE_DEVNODE_NORMAL                    0x00000000
@@ -373,6 +387,42 @@ void WIN_UnregisterDeviceInterfaceNotification(WIN_DeviceInterfaceNotification *
     }
 }
 
+/* The ID must arrive as a string with its terminator inside the returned
+   size and no earlier one, as the paddle route reads its properties
+   (SDL_xinput_paddle_identity.cpp, ReadString) */
+bool WIN_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity)
+{
+    ULONG type = 0;
+    ULONG bytes;
+    size_t length;
+
+    if (!instance || capacity < 2 || capacity > 4096) {
+        return false;
+    }
+    instance[0] = L'\0';
+    if (!path) {
+        return false;
+    }
+    (void)WIN_LoadCfgMgr32();
+    if (!SDL_CM_Get_Device_Interface_PropertyW) {
+        return false;
+    }
+
+    bytes = (ULONG)(capacity * sizeof(WCHAR));
+    if (SDL_CM_Get_Device_Interface_PropertyW(path, &SDL_DEVPKEY_Device_InstanceId, &type, (PBYTE)instance, &bytes, 0) != CR_SUCCESS ||
+        type != SDL_DEVPROP_TYPE_STRING || bytes < 2 * sizeof(WCHAR) || bytes > capacity * sizeof(WCHAR) ||
+        (bytes % sizeof(WCHAR)) != 0) {
+        instance[0] = L'\0';
+        return false;
+    }
+    length = bytes / sizeof(WCHAR);
+    if (instance[length - 1] != L'\0' || SDL_wcslen(instance) != length - 1) {
+        instance[0] = L'\0';
+        return false;
+    }
+    return true;
+}
+
 void WIN_QuitDeviceNotification(void)
 {
     if (--s_DeviceNotificationsRequested > 0) {
@@ -538,6 +588,14 @@ char *WIN_GetContainerIDFromInterfacePath(const char *path)
 
 bool WIN_IsXInputHIDInterfacePath(const char *path)
 {
+    return false;
+}
+
+bool WIN_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity)
+{
+    if (instance && capacity > 0) {
+        instance[0] = L'\0';
+    }
     return false;
 }
 

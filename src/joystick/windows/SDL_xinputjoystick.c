@@ -28,6 +28,7 @@
 #include "../../core/windows/SDL_xinput.h"
 #include "../../core/windows/SDL_hid.h"
 #include "SDL_xinput_paddle_c.h"
+#include "SDL_xinput_firmware_c.h"
 #include "SDL_xinputjoystick_hwdata.h"
 #include "../../core/windows/SDL_gameinput.h"
 #include "../hidapi/SDL_hidapijoystick_c.h"
@@ -328,6 +329,11 @@ static bool XINPUT_JoystickInit(void)
     }
     s_bXInputEnabled = enabled;
 
+    if (enabled) {
+        // PadForge fork: GameInput's device list, for firmware versions (hifihedgehog/SDL#44)
+        SDL_XINPUT_FirmwareInit();
+    }
+
     return true;
 }
 
@@ -410,6 +416,9 @@ static bool XINPUT_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *devi
         joystick->nhats = 1;
     }
 
+    // PadForge fork: the version GameInput reports for the slot's device (hifihedgehog/SDL#44)
+    SDL_XINPUT_FirmwareOpen(joystick);
+
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
     SDL_XINPUT_PaddleOpen(joystick, userId);
 #endif
@@ -467,6 +476,7 @@ static void XINPUT_JoystickUpdate(SDL_Joystick *joystick)
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
         SDL_XINPUT_PaddleRemoved(joystick->instance_id);
 #endif
+        SDL_XINPUT_FirmwareLost(joystick);
         SDL_RequestJoystickDeviceUpdate(true);
         return;
     }
@@ -520,6 +530,8 @@ static void XINPUT_JoystickUpdate(SDL_Joystick *joystick)
     // The supplemental reports have their own sequence, separate from XInput.
     SDL_XINPUT_PaddleUpdate(joystick);
 #endif
+    // A version GameInput lists after the open (hifihedgehog/SDL#44)
+    SDL_XINPUT_FirmwareUpdate(joystick);
 }
 
 static void XINPUT_JoystickClose(SDL_Joystick *joystick)
@@ -536,6 +548,7 @@ static void XINPUT_JoystickQuit(void)
 #ifdef SDL_JOYSTICK_XINPUT_PADDLES
         SDL_XINPUT_PaddleQuit();
 #endif
+        SDL_XINPUT_FirmwareQuit();
         s_bXInputEnabled = false;
         WIN_UnloadXInputDLL();
         WIN_QuitDeviceNotification();
