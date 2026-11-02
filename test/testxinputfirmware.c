@@ -18,12 +18,18 @@
    (major << 8) | minor.
 
    GameInput 4.0.302 made RegisterDeviceCallback and UnregisterCallback wait
-   for any running callback on the bench, and SDL's GameInput driver's
-   callback waits on the joystick lock, under which the XInput driver starts
-   and quits. So the lookup registers from a thread of its own and never
-   unregisters, and its device list lasts for the process. The scenarios run
-   in that order: GameInput missing, then refusing the callback, then present
-   while another client's callback holds GameInput's dispatch.
+   for any running callback on the bench, and the XInput driver starts and
+   quits under the joystick lock, which a callback can wait on, as SDL's
+   GameInput driver's did before hifihedgehog/SDL#45. So the lookup
+   registers from a thread of its own and never unregisters, and its device
+   list lasts for the process. The scenarios run in that order: GameInput
+   missing, then refusing the callback, then present while another client's
+   callback holds GameInput's dispatch.
+
+   When GameInput has no version, the slot's device metadata can: the
+   resolver behind SDL_XINPUT_ReadSlotRecord reads a Bluetooth pad's PnP ID
+   product version or a wired pad's USB release number, and the slot's
+   device container, which matches the only listed device in it.
 
    1. A slot whose path GameInput lists with 5.17.3202.0 reports 0x0511.
    2. A path that differs only in case, and a different path naming the
@@ -39,7 +45,12 @@
    7. The driver starting and quitting while another client's callback
       waits on the joystick lock inside GameInput's dispatch, callbacks
       delivered while that lock is held, and a flood of them during updates
-      and across a quit. */
+      and across a quit.
+   8. The metadata's version without GameInput, GameInput's version over
+      it, the metadata's version beside GameInput's 0.0, and the metadata's
+      version until GameInput lists the pad.
+   9. The only listed device in the slot's container, two in it, the slot's
+      path over its container, and the empty and system containers. */
 
 #define SDL_MAIN_HANDLED
 #include "testxinputfirmware.h"
@@ -83,6 +94,11 @@ static const char *INSTANCE_B = "USB\\VID_045E&PID_0B00&IG_00\\7&5E6F7A8B&0&0000
 static const char *XUSB_C = "\\\\?\\USB#VID_045E&PID_0B13&IG_00#7&9c0d1e2f&0&0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}";
 /* As GameInput lists a HIDMaestro virtual pad on the bench */
 static const char *HIDMAESTRO = "\\\\?\\HID#HIDMAESTRO_VID_045E_PID_0B13&IG_00#1&d3dd7a1f&0&0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}";
+/* A Bluetooth pad's XInput interface, in the form the bench lists one */
+static const char *BLE_A = "\\\\?\\HID#{00001812-0000-1000-8000-00805f9b34fb}&Dev&VID_045e&PID_0b13&REV_0523&000000000001&IG_00#b&1a2b3c4&1&0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}";
+/* Paths of the controller in other interfaces, with no device instance scripted */
+static const char *GIP_A = "\\\\?\\USB#VID_045E&PID_0B12#UNIT_A#{020bc73c-0dca-4ee3-96d5-ab006adae9e9}";
+static const char *GIP_B = "\\\\?\\USB#VID_045E&PID_0B12#UNIT_B#{020bc73c-0dca-4ee3-96d5-ab006adae9e9}";
 
 typedef struct FakeSlot
 {
@@ -758,6 +774,129 @@ static void TestThreads(void)
     Finish(2);
 }
 
+/* First in the run, before any GameInput starts: the lookup keeps the first
+   GameInput it gets for the process */
+static void TestRecordWithoutGameInput(void)
+{
+    SDL_Joystick *joystick;
+    int queries;
+
+    Begin("a Bluetooth pad's metadata without GameInput", false, false);
+    ScriptSlot(0, BLE_A, 0x0B13);
+    ScriptSlot(1, XUSB_B, 0x0B00);
+    /* 5.23, as the resolver reports a product version of 0x0523 */
+    FakeGI_SetRecord(BLE_A, 1, 0x0517);
+    CHECK(Start(), "the driver did not start");
+    joystick = Open(0);
+    CHECK(joystick != NULL, "the open failed: %s", SDL_GetError());
+    CHECK(Reported(joystick) == 0x0517, "the metadata reported 0x%04x", Reported(joystick));
+    CHECK(FakeGI_RecordReads() == 1, "the metadata was read %d times", FakeGI_RecordReads());
+    queries = identity_queries;
+    Update(joystick);
+    CHECK(identity_queries == queries, "a settled version was looked up again");
+    Close(joystick);
+    joystick = Open(1);
+    CHECK(joystick != NULL, "the open failed: %s", SDL_GetError());
+    CHECK(Reported(joystick) == 0, "a slot without a record reported 0x%04x", Reported(joystick));
+    Close(joystick);
+    Stop();
+    CHECK(FakeGI_Inits() == 0, "GameInput was started %d times", FakeGI_Inits());
+    Finish(0);
+}
+
+static void TestRecordAndGameInput(void)
+{
+    SDL_Joystick *joystick;
+    int queries;
+
+    Begin("GameInput's version over the metadata's", true, false);
+    ScriptSlot(0, XUSB_A, 0x0B12);
+    FakeGI_SetRecord(XUSB_A, 1, 0x050D);
+    (void)FakeGI_AddDevice(XUSB_A, 5, 17, 3202, 0);
+    CHECK(Start(), "the driver did not start");
+    FakeGI_Deliver();
+    joystick = Open(0);
+    CHECK(Reported(joystick) == 0x0511, "the open reported 0x%04x", Reported(joystick));
+    Close(joystick);
+    Stop();
+    Finish(1);
+
+    Begin("GameInput's 0.0 beside the metadata's version", true, false);
+    ScriptSlot(0, XUSB_A, 0x0B12);
+    FakeGI_SetRecord(XUSB_A, 1, 0x050D);
+    (void)FakeGI_AddDevice(XUSB_A, 0, 0, 0, 0);
+    CHECK(Start(), "the driver did not start");
+    FakeGI_Deliver();
+    joystick = Open(0);
+    CHECK(Reported(joystick) == 0x050D, "the open reported 0x%04x", Reported(joystick));
+    queries = identity_queries;
+    (void)FakeGI_AddDevice(XUSB_B, 5, 21, 3307, 0);
+    FakeGI_Deliver();
+    Update(joystick);
+    CHECK(identity_queries == queries, "a device found with 0.0 was looked up again");
+    CHECK(Reported(joystick) == 0x050D, "the update reported 0x%04x", Reported(joystick));
+    Close(joystick);
+    Stop();
+    Finish(2);
+
+    Begin("the metadata's version until GameInput lists the pad", true, false);
+    ScriptSlot(0, XUSB_A, 0x0B12);
+    FakeGI_SetRecord(XUSB_A, 1, 0x050D);
+    CHECK(Start(), "the driver did not start");
+    joystick = Open(0);
+    CHECK(Reported(joystick) == 0x050D, "the open reported 0x%04x", Reported(joystick));
+    Update(joystick);
+    CHECK(Reported(joystick) == 0x050D, "an update before the listing reported 0x%04x", Reported(joystick));
+    (void)FakeGI_AddDevice(XUSB_A, 5, 17, 3202, 0);
+    FakeGI_Deliver();
+    Update(joystick);
+    CHECK(Reported(joystick) == 0x0511, "the update after the listing reported 0x%04x", Reported(joystick));
+    queries = identity_queries;
+    (void)FakeGI_AddDevice(HIDMAESTRO, 0, 0, 0, 0);
+    FakeGI_Deliver();
+    Update(joystick);
+    CHECK(identity_queries == queries, "GameInput's version was looked up again");
+    Close(joystick);
+    Stop();
+    Finish(2);
+}
+
+/* The slot's record names a container, and GameInput lists two devices at
+   other paths, or the second at the slot's path */
+static void ContainerCase(const char *name, bool has_record, int record, int first, int second, bool second_at_slot_path, Uint16 expected)
+{
+    SDL_Joystick *joystick;
+    int device;
+
+    Begin(name, true, false);
+    ScriptSlot(0, XUSB_A, 0x0B12);
+    if (has_record) {
+        FakeGI_SetRecord(XUSB_A, record, 0);
+    }
+    device = FakeGI_AddDevice(GIP_A, 5, 17, 3202, 0);
+    FakeGI_SetContainer(device, first);
+    device = FakeGI_AddDevice(second_at_slot_path ? XUSB_A : GIP_B, 5, 21, 3307, 0);
+    FakeGI_SetContainer(device, second);
+    CHECK(Start(), "the driver did not start");
+    FakeGI_Deliver();
+    joystick = Open(0);
+    CHECK(joystick != NULL, "the open failed: %s", SDL_GetError());
+    CHECK(Reported(joystick) == expected, "the open reported 0x%04x, expected 0x%04x", Reported(joystick), expected);
+    Close(joystick);
+    Stop();
+    Finish(2);
+}
+
+static void TestContainer(void)
+{
+    ContainerCase("the only listed device in the slot's container", true, 7, 7, 8, false, 0x0511);
+    ContainerCase("two listed devices in the slot's container", true, 7, 7, 7, false, 0);
+    ContainerCase("the slot's path over its container", true, 7, 7, 9, true, 0x0515);
+    ContainerCase("no record for the slot", false, 0, 7, 8, false, 0);
+    ContainerCase("the system container", true, -1, -1, 8, false, 0);
+    ContainerCase("the empty container", true, 0, 0, 8, false, 0);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -768,6 +907,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    TestRecordWithoutGameInput();
     TestWithoutGameInput();
     TestMatch("the slot's path", XUSB_A, false);
     TestMatch("the slot's path in other case", XUSB_A_UPPER, false);
@@ -779,6 +919,8 @@ int main(int argc, char *argv[])
     TestIdentity();
     TestSlotChanges();
     TestThreads();
+    TestRecordAndGameInput();
+    TestContainer();
 
     SDL_Quit();
     if (xf_failures) {

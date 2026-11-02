@@ -15,7 +15,8 @@
    hifihedgehog/SDL#44. testxinputfirmware.c includes the driver source and
    testxinputfirmware_gameinput.cpp includes SDL_xinput_firmware.cpp, each
    after naming its own fakes for every call that would reach XInput,
-   GameInput, the configuration manager or SDL's joystick list. */
+   GameInput, the configuration manager, the slot's device metadata or SDL's
+   joystick list. */
 
 #ifndef testxinputfirmware_h_
 #define testxinputfirmware_h_
@@ -54,7 +55,8 @@ bool FakeGI_WaitRegistrations(int count, int milliseconds);
 /* Waits until the lookup's registering thread has finished */
 bool FakeGI_WaitModuleSettled(int milliseconds);
 /* Another client's callback, running in GameInput's dispatch and waiting on
-   the joystick lock, as SDL's GameInput driver's device callback does */
+   the joystick lock, as SDL's GameInput driver's device callback did before
+   hifihedgehog/SDL#45 */
 void FakeGI_StartForeign(void);
 void FakeGI_WaitForeign(void);
 int FakeGI_AddDevice(const char *path, Uint16 major, Uint16 minor, Uint16 build, Uint16 revision);
@@ -66,6 +68,13 @@ void FakeGI_StartFlood(int device, int count);
 void FakeGI_WaitFlood(void);
 /* The device instance the configuration manager gives for a path */
 void FakeGI_SetInstance(const char *path, const char *instance);
+/* Containers are numbered: 0 is the empty GUID and -1 the container Windows
+   gives internal devices. A device's container in GameInput's list. */
+void FakeGI_SetContainer(int device, int container);
+/* What the slot's device metadata gives for a path: its container and the
+   firmware the resolver reads there. A path never set has no record. */
+void FakeGI_SetRecord(const char *path, int container, Uint16 firmware);
+int FakeGI_RecordReads(void);
 int FakeGI_Inits(void);
 int FakeGI_Quits(void);
 int FakeGI_Registrations(void);

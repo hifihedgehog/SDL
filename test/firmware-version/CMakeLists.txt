@@ -115,7 +115,7 @@ endforeach()
 # device notifications, or the functions that change SDL's joystick list.
 set(XINPUT_FIRMWARE_FORBIDDEN "${CMAKE_CURRENT_BINARY_DIR}/xinput-firmware-forbidden.txt")
 file(WRITE "${XINPUT_FIRMWARE_FORBIDDEN}"
-    "SDL_InitGameInput|SDL_QuitGameInput|GameInputInitialize|GameInputCreate|WIN_GetDeviceInterfaceInstanceId|WIN_LoadXInputDLL|WIN_UnloadXInputDLL|WIN_InitDeviceNotification|WIN_QuitDeviceNotification|WIN_GetLastDeviceNotification|SDL_PrivateJoystickAdded|SDL_PrivateJoystickRemoved|SDL_JoystickHandledByAnotherDriver|^(__imp_)?XInput\n")
+    "SDL_InitGameInput|SDL_QuitGameInput|GameInputInitialize|GameInputCreate|WIN_GetDeviceInterfaceInstanceId|SDL_XINPUT_ReadSlotRecord|WIN_LoadXInputDLL|WIN_UnloadXInputDLL|WIN_InitDeviceNotification|WIN_QuitDeviceNotification|WIN_GetLastDeviceNotification|SDL_PrivateJoystickAdded|SDL_PrivateJoystickRemoved|SDL_JoystickHandledByAnotherDriver|^(__imp_)?XInput\n")
 add_library(testxinputfirmware_main OBJECT "${FIRMWARE_TESTS}/testxinputfirmware.c")
 add_library(testxinputfirmware_gameinput OBJECT "${FIRMWARE_TESTS}/testxinputfirmware_gameinput.cpp")
 add_executable(testxinputfirmware $<TARGET_OBJECTS:testxinputfirmware_main> $<TARGET_OBJECTS:testxinputfirmware_gameinput>)

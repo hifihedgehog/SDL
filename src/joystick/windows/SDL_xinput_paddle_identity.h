@@ -50,6 +50,12 @@ struct PhysicalIdentity {
     // uses the controller child, never the receiver's VID/PID. XUSB can expose
     // Microsoft's generic 02FF product in its public slot metadata.
     std::uint16_t vendor = 0, product = 0;
+    // A Microsoft controller's firmware major and minor version from its own
+    // device metadata, as (major << 8) | minor, or 0. Bluetooth reads the PnP
+    // ID product version, whose hex digits spell the version. Wired reads the
+    // USB release number. Wireless GIP metadata names only the receiver.
+    // SamePhysicalIdentity ignores it.
+    std::uint16_t recordFirmware = 0;
 };
 
 // The caller supplies the authoritative OpenXInput interface and channel tuple.

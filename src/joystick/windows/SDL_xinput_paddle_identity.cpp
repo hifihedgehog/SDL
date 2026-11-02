@@ -19,6 +19,7 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 #include "SDL_xinput_paddle_identity.h"
+#include "SDL_xinput_slot_record.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -396,6 +397,103 @@ bool BleNode(const Node &node) noexcept
     return false;
 }
 
+// The HID-over-GATT node, where Windows stores the controller's PnP ID
+bool BleHidNode(const Node &node) noexcept
+{
+    if (BleHidMetadata(node.instance)) {
+        return true;
+    }
+    for (const auto &hardware : node.hardware) {
+        if (BleHidMetadata(hardware)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The PnP ID fields, as the Windows SDK 10.0.26100.0 defines them in
+// km\bthguid.h (lines 49-52): the vendor ID source a DEVPROP_TYPE_BYTE, the
+// vendor ID and the product version each a DEVPROP_TYPE_UINT16
+constexpr DEVPROPKEY BluetoothVendorSource = {{0x2bd67d8b, 0x8beb, 0x48d5, {0x87, 0xe0, 0x6c, 0xda, 0x34, 0x28, 0x04, 0x0a}}, 6};
+constexpr DEVPROPKEY BluetoothVendor = {{0x2bd67d8b, 0x8beb, 0x48d5, {0x87, 0xe0, 0x6c, 0xda, 0x34, 0x28, 0x04, 0x0a}}, 7};
+constexpr DEVPROPKEY BluetoothProductVersion = {{0x2bd67d8b, 0x8beb, 0x48d5, {0x87, 0xe0, 0x6c, 0xda, 0x34, 0x28, 0x04, 0x0a}}, 9};
+
+bool ReadFixed(MetadataSource &source, DEVINST node, const DEVPROPKEY &key, ULONG type, ULONG size,
+               std::uint16_t &value)
+{
+    Property p;
+    if (source.Read(node, key, p) != CR_SUCCESS || p.type != type || p.bytes != size ||
+        size > sizeof(value)) {
+        return false;
+    }
+    std::uint16_t read = 0;
+    std::memcpy(&read, p.text.data(), size);
+    value = read;
+    return true;
+}
+
+// A byte whose hex digits spell a decimal number, as 0x13 spells 13
+bool SpelledDecimal(unsigned value, unsigned &decimal) noexcept
+{
+    const unsigned high = (value >> 4) & 0x0f, low = value & 0x0f;
+    if (high > 9 || low > 9) {
+        return false;
+    }
+    decimal = high * 10 + low;
+    return true;
+}
+
+// xpadneo prints this product version as the firmware version, each byte in
+// hex (hid-xpadneo core.c, "BLE firmware version %x.%02x"), and the Elite
+// Series 2 that reports 0x0513 runs firmware 5.13.3146.0 (hifihedgehog/SDL#28)
+std::uint16_t BluetoothFirmware(MetadataSource &source, const Node &node)
+{
+    std::uint16_t vendorSource = 0, vendor = 0, version = 0;
+    unsigned major = 0, minor = 0;
+    // Vendor ID source 2 is the USB Implementers Forum, whose 045E is Microsoft
+    if (!ReadFixed(source, node.id, BluetoothVendorSource, DEVPROP_TYPE_BYTE, 1, vendorSource) ||
+        vendorSource != 2 ||
+        !ReadFixed(source, node.id, BluetoothVendor, DEVPROP_TYPE_UINT16, 2, vendor) || vendor != 0x045e ||
+        !ReadFixed(source, node.id, BluetoothProductVersion, DEVPROP_TYPE_UINT16, 2, version) ||
+        !SpelledDecimal(version >> 8, major) || !SpelledDecimal(version & 0xff, minor)) {
+        return 0;
+    }
+    return static_cast<std::uint16_t>((major << 8) | minor);
+}
+
+// xpad reads a wired Elite Series 2's USB release number as its firmware
+// version, 0x050b being 5.11 (xpad.c, the packet type selection). Windows
+// lists the number in the hardware ID USB\VID_vvvv&PID_pppp&REV_rrrr.
+std::uint16_t UsbFirmware(const Node &physical, std::uint16_t vendor, std::uint16_t product) noexcept
+{
+    constexpr size_t length = 30;
+    if (vendor != 0x045e) {
+        return 0;
+    }
+    for (const auto &hardware : physical.hardware) {
+        std::uint16_t idVendor = 0, idProduct = 0;
+        if (hardware.size() != length || !UsbIds(hardware, idVendor, idProduct) ||
+            idVendor != vendor || idProduct != product ||
+            !EqualText(std::wstring_view(hardware).substr(21, 5), L"&REV_")) {
+            continue;
+        }
+        std::uint16_t release = 0;
+        bool digits = true;
+        for (size_t i = 26; i < length; ++i) {
+            const int digit = HexDigit(hardware[i]);
+            if (digit < 0) {
+                digits = false;
+                break;
+            }
+            release = static_cast<std::uint16_t>((release << 4) | digit);
+        }
+        if (digits) {
+            return release;
+        }
+    }
+    return 0;
+}
+
 bool QualifiedDriver(MetadataSource &source)
 {
     Property p;
@@ -605,12 +703,24 @@ bool ResolveCore(MetadataSource &source, const wchar_t *path, std::uint32_t inde
         !SameNode(leaf, finalLeaf) || (IsGipTransport(transport) && !QualifiedDriver(source))) {
         return fail("The interface or driver binding changed during resolution.");
     }
+    // Optional: a record without the firmware leaves 0 and fails nothing
+    std::uint16_t recordFirmware = 0;
+    if (transport == PaddleTransport::Bluetooth) {
+        for (size_t i = 0; i <= ble && recordFirmware == 0; ++i) {
+            if (BleHidNode(nodes[i])) {
+                recordFirmware = BluetoothFirmware(source, nodes[i]);
+            }
+        }
+    } else if (transport == PaddleTransport::UsbGip) {
+        recordFirmware = UsbFirmware(nodes[lastPhysical], hardwareVendor, hardwareProduct);
+    }
     result.transport = transport;
     result.container = leaf.container;
     result.nativeId = nativeId;
     result.instance = leaf.instance;
     result.vendor = hardwareVendor;
     result.product = hardwareProduct;
+    result.recordFirmware = recordFirmware;
     return true;
 }
 
@@ -621,6 +731,7 @@ void ClearIdentity(PhysicalIdentity &identity) noexcept
     identity.nativeId = 0;
     identity.instance.clear();
     identity.vendor = identity.product = 0;
+    identity.recordFirmware = 0;
 }
 
 bool ResolveWithSource(MetadataSource &source, const wchar_t *path, std::uint32_t index,
@@ -670,3 +781,20 @@ bool SamePhysicalIdentity(const PhysicalIdentity &a, const PhysicalIdentity &b) 
 }
 
 } // namespace sdl_paddles
+
+extern "C" bool SDL_XINPUT_ReadSlotRecord(const wchar_t *path, SDL_XInputSlotRecord *record)
+{
+    if (!record) {
+        return false;
+    }
+    *record = {};
+    sdl_paddles::PhysicalIdentity identity;
+    std::string error;
+    // The firmware lookup checked the slot's interface tuple, as QuerySlot does
+    if (!sdl_paddles::ResolvePaddleIdentity(path, 0, 1, identity, error)) {
+        return false;
+    }
+    record->container = identity.container;
+    record->firmware = identity.recordFirmware;
+    return true;
+}

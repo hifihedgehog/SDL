@@ -2731,13 +2731,24 @@ elseif(WINDOWS OR CYGWIN)
       # PadForge fork: the XInput driver reads firmware versions from
       # GameInput's device information (hifihedgehog/SDL#44)
       sdl_sources("${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_firmware.cpp")
+      # The paddle route's identity resolver also gives the firmware lookup a
+      # slot's device container and the firmware in its metadata, with or
+      # without the paddle route
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        set(SDL_JOYSTICK_XINPUT_SLOT_RECORD 1)
+        sdl_sources("${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_identity.cpp")
+        set_source_files_properties("${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_identity.cpp" PROPERTIES
+          SKIP_PRECOMPILE_HEADERS ON
+          COMPILE_OPTIONS "/std:c++20;/EHsc;/permissive-"
+        )
+        sdl_link_dependency(xinput_slot_record LIBS cfgmgr32 advapi32)
+      endif()
       if(SDL_XINPUT_PADDLES AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         set(SDL_JOYSTICK_XINPUT_PADDLES 1)
         set(HAVE_XINPUT_PADDLES TRUE)
         set(xinput_paddle_sources
           "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle.cpp"
           "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_gatt.cpp"
-          "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_identity.cpp"
           "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_reader.cpp"
           "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_runtime.cpp"
           "${SDL3_SOURCE_DIR}/src/joystick/windows/SDL_xinput_paddle_service.cpp"
