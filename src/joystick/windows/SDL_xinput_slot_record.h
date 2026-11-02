@@ -21,10 +21,12 @@
 #ifndef SDL_xinput_slot_record_h_
 #define SDL_xinput_slot_record_h_
 
-/* PadForge fork: what an XInput slot's device metadata says about the
-   controller behind it, for the firmware lookup (hifihedgehog/SDL#44). The
-   paddle route's identity resolver reads it, in SDL_xinput_paddle_identity.cpp,
-   from PnP and registry metadata only. No device opens. */
+/* PadForge fork: which physical controller an XInput slot's interface
+   belongs to, for the firmware lookup's container match
+   (hifihedgehog/SDL#44). The paddle route's identity resolver reads it, in
+   SDL_xinput_paddle_identity.cpp, from PnP and registry metadata only. No
+   device opens. The metadata gives no firmware version: a product version
+   is not one (hifihedgehog/SDL#46). */
 
 #include <guiddef.h>
 #ifndef __cplusplus
@@ -33,8 +35,7 @@
 
 typedef struct SDL_XInputSlotRecord
 {
-    GUID container;          // The controller's device container
-    unsigned short firmware; // (major << 8) | minor from the metadata, or 0
+    GUID container; // The controller's device container
 } SDL_XInputSlotRecord;
 
 #ifdef __cplusplus

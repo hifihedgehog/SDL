@@ -32,6 +32,13 @@ extern "C" {
    XInput slot (hifihedgehog/SDL#44). Device information only: no joystick,
    input or device ownership comes from GameInput. All calls run under SDL's
    joystick lock. */
+
+/* GameInput's whole firmware version for the slot's device, in decimal as
+   major.minor.build.revision, for example "5.17.3202.0". Absent while no
+   GameInput device matches the slot or all four parts are 0, and cleared
+   when the slot's device leaves (hifihedgehog/SDL#46). */
+#define SDL_PROP_JOYSTICK_XINPUT_FIRMWARE_STRING "SDL.joystick.xinput.firmware"
+
 void SDL_XINPUT_FirmwareInit(void);
 void SDL_XINPUT_FirmwareOpen(SDL_Joystick *joystick);
 void SDL_XINPUT_FirmwareUpdate(SDL_Joystick *joystick);

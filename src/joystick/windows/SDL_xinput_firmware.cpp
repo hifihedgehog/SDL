@@ -43,12 +43,12 @@
    in the hifihedgehog/SDL#28 tests. GameInput supplies the number only: no
    joystick, input or device ownership comes from it.
 
-   When GameInput has no version for the slot, the slot's device metadata can
-   have one: a Bluetooth controller's PnP ID product version, or a wired
-   controller's USB release number (SDL_xinput_slot_record.h). That covers a
-   machine without a GameInput runtime that offers the v4 interface, and a
-   pad GameInput has not listed yet. GameInput's version replaces it once
-   GameInput lists the pad.
+   The slot's container comes from the paddle route's identity resolver
+   (SDL_xinput_slot_record.h). A slot GameInput gives no version for reports
+   0: a product version or a USB release number is no firmware version
+   (hifihedgehog/SDL#46). The joystick also carries GameInput's whole version
+   as the string property SDL_PROP_JOYSTICK_XINPUT_FIRMWARE_STRING, since
+   firmware_version keeps only the first two of its four parts.
 
    GameInput 4.0.302 makes RegisterDeviceCallback and UnregisterCallback wait
    for whatever callback it is running, any client's. The XInput driver
@@ -75,7 +75,7 @@ typedef struct XInputFirmwareDevice
     WCHAR instance[FIRMWARE_INSTANCE_LIMIT]; // Empty when unknown
     GUID container;           // GetContainerId
     bool has_container;       // False for the empty and the system container
-    Uint16 version;           // (major << 8) | minor
+    GameInputVersion version; // GetFirmwareVersion, all four parts
 } XInputFirmwareDevice;
 
 enum
@@ -134,10 +134,9 @@ static void AddFirmwareDevice(IGameInputDevice *device)
     if (!entry.path) {
         return;
     }
-    // The encoding the GIP driver gives its version (SDL_hidapi_gip.c, GIP_GetFirmwareVersion)
     SDL_zero(version);
     device->GetFirmwareVersion(&version);
-    entry.version = (Uint16)((version.major << 8) | version.minor);
+    entry.version = version;
     (void)WIN_GetDeviceInterfaceInstanceId(entry.path, entry.instance, SDL_arraysize(entry.instance));
     device->GetContainerId(&entry.container);
     entry.has_container = ValidContainer(&entry.container);
@@ -242,15 +241,16 @@ static DWORD QuerySlotPath(Uint8 userid, WCHAR *path, DWORD capacity)
 /* The slot's device in GameInput's list: the one with the slot's path,
    ignoring case, or with the slot's device instance, or else the only one in
    the slot's device container. Two in one container match neither. */
-static bool FindFirmwareDevice(const WCHAR *path, const GUID *container, Uint16 *version)
+static bool FindFirmwareDevice(const WCHAR *path, const GUID *container, GameInputVersion *version)
 {
     WCHAR instance[FIRMWARE_INSTANCE_LIMIT];
     const bool have_instance = WIN_GetDeviceInterfaceInstanceId(path, instance, SDL_arraysize(instance));
-    Uint16 container_version = 0;
+    GameInputVersion container_version;
     int in_container = 0;
     bool found = false;
     int i;
 
+    SDL_zero(container_version);
     SDL_LockMutex(s_firmware_lock);
     for (i = 0; i < s_firmware_device_count; ++i) {
         const XInputFirmwareDevice *device = &s_firmware_devices[i];
@@ -274,22 +274,41 @@ static bool FindFirmwareDevice(const WCHAR *path, const GUID *container, Uint16 
     return found;
 }
 
+/* GameInput's whole version as a string property, in decimal as
+   major.minor.build.revision, or no property when there is none
+   (hifihedgehog/SDL#46) */
+static void PublishFirmwareString(SDL_Joystick *joystick, const GameInputVersion *version)
+{
+    const SDL_PropertiesID props = SDL_GetJoystickProperties(joystick);
+    char text[32];
+
+    if (!props) {
+        return;
+    }
+    if (version && (version->major || version->minor || version->build || version->revision)) {
+        (void)SDL_snprintf(text, sizeof(text), "%u.%u.%u.%u", (unsigned int)version->major, (unsigned int)version->minor,
+                           (unsigned int)version->build, (unsigned int)version->revision);
+        SDL_SetStringProperty(props, SDL_PROP_JOYSTICK_XINPUT_FIRMWARE_STRING, text);
+    } else {
+        SDL_ClearProperty(props, SDL_PROP_JOYSTICK_XINPUT_FIRMWARE_STRING);
+    }
+}
+
 static void LookUpFirmwareVersion(SDL_Joystick *joystick)
 {
     struct joystick_hwdata *hwdata = joystick->hwdata;
     WCHAR path[FIRMWARE_PATH_LIMIT];
     GUID container;
     bool have_container = false;
-    Uint16 record = 0;  // From the slot's device metadata
-    Uint16 version = 0; // From GameInput
+    GameInputVersion version;
     bool found = false;
     int generation;
     DWORD status;
 
     SDL_AssertJoysticksLocked();
 
-    if (!SDL_XInputGetDeviceIdentity) {
-        // Microsoft's xinput1_4.dll names no device for a slot: the version stays 0
+    if (!s_firmware_gameinput || !SDL_XInputGetDeviceIdentity) {
+        // GameInput or OpenXInput's identity call is missing: the version stays 0
         hwdata->firmware_settled = true;
         return;
     }
@@ -303,24 +322,29 @@ static void LookUpFirmwareVersion(SDL_Joystick *joystick)
         return;
     }
     SDL_zero(container);
+    SDL_zero(version);
     if (status == ERROR_SUCCESS) {
 #ifdef SDL_JOYSTICK_XINPUT_SLOT_RECORD
-        SDL_XInputSlotRecord slot;
+        SDL_XInputSlotRecord record;
 
-        if (SDL_XINPUT_ReadSlotRecord(path, &slot)) {
-            container = slot.container;
+        if (SDL_XINPUT_ReadSlotRecord(path, &record)) {
+            container = record.container;
             have_container = ValidContainer(&container);
-            record = slot.firmware;
         }
 #endif
-        if (s_firmware_gameinput) {
-            found = FindFirmwareDevice(path, have_container ? &container : NULL, &version);
-        }
+        found = FindFirmwareDevice(path, have_container ? &container : NULL, &version);
     }
 
-    // GameInput's version, or the metadata's while GameInput has none
-    joystick->firmware_version = version ? version : record;
-    if (found || !s_firmware_gameinput) {
+    /* The encoding the GIP driver gives its version (SDL_hidapi_gip.c,
+       GIP_GetFirmwareVersion). A part above 255 would spill into the other,
+       so then only the string property carries the version. */
+    if (version.major <= 0xFF && version.minor <= 0xFF) {
+        joystick->firmware_version = (Uint16)((version.major << 8) | version.minor);
+    } else {
+        joystick->firmware_version = 0;
+    }
+    PublishFirmwareString(joystick, &version);
+    if (found) {
         hwdata->firmware_settled = true;
     } else {
         hwdata->firmware_generation = generation;
@@ -391,6 +415,8 @@ void SDL_XINPUT_FirmwareLost(SDL_Joystick *joystick)
 {
     joystick->hwdata->firmware_settled = false;
     joystick->hwdata->firmware_generation = -1;
+    // The whole version was the device's that left
+    PublishFirmwareString(joystick, NULL);
 }
 
 /* Nothing to undo. UnregisterCallback here, under the joystick lock, would

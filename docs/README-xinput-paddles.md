@@ -175,6 +175,16 @@ contract. Trace records add
 `source-changed`, `gatt-retry`, and `gatt-rearm`, and raw records carry their
 origin: `service`, `wgi`, or `gatt`.
 
+Every XInput joystick, Elite or not, also has `SDL.joystick.xinput.firmware`:
+the firmware version GameInput reports for the slot's device, in decimal as
+major.minor.build.revision, for example `5.17.3202.0`. It is set at open, or
+at the first update after GameInput lists the device, and cleared when the
+slot's device leaves. It is absent while no GameInput device matches the slot
+or GameInput reports 0.0.0.0. `SDL_GetJoystickFirmwareVersion` gives the same
+version's first two parts as (major << 8) | minor, and 0 when GameInput gives
+none. A product version or a USB release number is not a firmware version, so
+neither stands in for it.
+
 Set `SDL_JOYSTICK_XINPUT_PADDLE_TRACE` to `1` before Open and enable input debug
 logging for bounded passive traces. Records include WGI resume/suspend and raw
 messages, service reading generations and raw sequences, payload bytes, decoded

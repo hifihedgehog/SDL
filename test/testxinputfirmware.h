@@ -71,9 +71,9 @@ void FakeGI_SetInstance(const char *path, const char *instance);
 /* Containers are numbered: 0 is the empty GUID and -1 the container Windows
    gives internal devices. A device's container in GameInput's list. */
 void FakeGI_SetContainer(int device, int container);
-/* What the slot's device metadata gives for a path: its container and the
-   firmware the resolver reads there. A path never set has no record. */
-void FakeGI_SetRecord(const char *path, int container, Uint16 firmware);
+/* The device container the slot's metadata gives for a path. A path never
+   set has no record. */
+void FakeGI_SetRecord(const char *path, int container);
 int FakeGI_RecordReads(void);
 int FakeGI_Inits(void);
 int FakeGI_Quits(void);
