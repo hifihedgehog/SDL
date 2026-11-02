@@ -28,25 +28,37 @@
 #include "../../core/windows/SDL_gameinput.h"
 #include "SDL_xinputjoystick_hwdata.h"
 #include "SDL_xinput_firmware_c.h"
+#ifdef SDL_JOYSTICK_XINPUT_SLOT_RECORD
+#include "SDL_xinput_slot_record.h"
+#endif
 
 /* PadForge fork: XInput has no firmware query, so the XInput driver reads an
    open pad's version from GameInput's device information
    (hifihedgehog/SDL#44). A GameInput device callback keeps a list of every
-   controller's device path, device instance and firmware version. A slot's
-   device is the one whose path is the path OpenXInput gives for the slot,
-   ignoring case, or whose path names the same device instance. Not
-   FindDeviceFromPlatformString, which returned 0x80070490 for these paths in
-   the hifihedgehog/SDL#28 tests. GameInput supplies the number only: no
+   controller's device path, device instance, device container and firmware
+   version. A slot's device is the one whose path is the path OpenXInput
+   gives for the slot, ignoring case, or whose path names the same device
+   instance, or else the only listed device in the slot's device container.
+   Not FindDeviceFromPlatformString, which returned 0x80070490 for these paths
+   in the hifihedgehog/SDL#28 tests. GameInput supplies the number only: no
    joystick, input or device ownership comes from it.
 
+   When GameInput has no version for the slot, the slot's device metadata can
+   have one: a Bluetooth controller's PnP ID product version, or a wired
+   controller's USB release number (SDL_xinput_slot_record.h). That covers a
+   machine without a GameInput runtime that offers the v4 interface, and a
+   pad GameInput has not listed yet. GameInput's version replaces it once
+   GameInput lists the pad.
+
    GameInput 4.0.302 makes RegisterDeviceCallback and UnregisterCallback wait
-   for whatever callback it is running, and SDL's GameInput driver's device
-   callback waits on the joystick lock. Under that lock, where the XInput
-   driver starts and quits, either call could wait forever. So a thread of
-   this module's own registers the callback, the callback takes no lock but
-   the list's, and nothing unregisters: the registration, its device list and
-   the GameInput reference last for the process. This fork serves PadForge,
-   which loads SDL for the life of its process. */
+   for whatever callback it is running, any client's. The XInput driver
+   starts and quits under the joystick lock, so a callback waiting on that
+   lock would hold either call forever, as SDL's GameInput driver's callback
+   could until hifihedgehog/SDL#45. So a thread of this module's own
+   registers the callback, the callback takes no lock but the list's, and
+   nothing unregisters: the registration, its device list and the GameInput
+   reference last for the process, whatever another callback waits on. This
+   fork serves PadForge, which loads SDL for the life of its process. */
 
 #if defined(HAVE_GAMEINPUT_H) && (GAMEINPUT_API_VERSION >= 4) && \
     !defined(SDL_PLATFORM_XBOXONE) && !defined(SDL_PLATFORM_XBOXSERIES)
@@ -61,6 +73,8 @@ typedef struct XInputFirmwareDevice
     IGameInputDevice *device; // Held, and the key for its removal
     WCHAR *path;              // GetPnpPath, in UTF-16
     WCHAR instance[FIRMWARE_INSTANCE_LIMIT]; // Empty when unknown
+    GUID container;           // GetContainerId
+    bool has_container;       // False for the empty and the system container
     Uint16 version;           // (major << 8) | minor
 } XInputFirmwareDevice;
 
@@ -90,6 +104,18 @@ static bool EqualText(const WCHAR *a, const WCHAR *b)
     return a && b && a[0] && b[0] && SDL_wcscasecmp(a, b) == 0;
 }
 
+/* Not the empty GUID, and not the container Windows gives every internal
+   device, as the paddle route qualifies one (SDL_xinput_paddle_identity.cpp,
+   ValidContainer) */
+static bool ValidContainer(const GUID *container)
+{
+    static const GUID empty = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+    static const GUID system = { 0, 0, 0, { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } };
+
+    return SDL_memcmp(container, &empty, sizeof(*container)) != 0 &&
+           SDL_memcmp(container, &system, sizeof(*container)) != 0;
+}
+
 static void AddFirmwareDevice(IGameInputDevice *device)
 {
     char path[FIRMWARE_PATH_LIMIT];
@@ -113,6 +139,8 @@ static void AddFirmwareDevice(IGameInputDevice *device)
     device->GetFirmwareVersion(&version);
     entry.version = (Uint16)((version.major << 8) | version.minor);
     (void)WIN_GetDeviceInterfaceInstanceId(entry.path, entry.instance, SDL_arraysize(entry.instance));
+    device->GetContainerId(&entry.container);
+    entry.has_container = ValidContainer(&entry.container);
 
     SDL_LockMutex(s_firmware_lock);
     for (i = 0; i < s_firmware_device_count; ++i) {
@@ -211,21 +239,57 @@ static DWORD QuerySlotPath(Uint8 userid, WCHAR *path, DWORD capacity)
     return ERROR_SUCCESS;
 }
 
+/* The slot's device in GameInput's list: the one with the slot's path,
+   ignoring case, or with the slot's device instance, or else the only one in
+   the slot's device container. Two in one container match neither. */
+static bool FindFirmwareDevice(const WCHAR *path, const GUID *container, Uint16 *version)
+{
+    WCHAR instance[FIRMWARE_INSTANCE_LIMIT];
+    const bool have_instance = WIN_GetDeviceInterfaceInstanceId(path, instance, SDL_arraysize(instance));
+    Uint16 container_version = 0;
+    int in_container = 0;
+    bool found = false;
+    int i;
+
+    SDL_LockMutex(s_firmware_lock);
+    for (i = 0; i < s_firmware_device_count; ++i) {
+        const XInputFirmwareDevice *device = &s_firmware_devices[i];
+
+        if (EqualText(device->path, path) || (have_instance && EqualText(device->instance, instance))) {
+            found = true;
+            *version = device->version;
+            break;
+        }
+        if (container && device->has_container && SDL_memcmp(&device->container, container, sizeof(*container)) == 0) {
+            ++in_container;
+            container_version = device->version;
+        }
+    }
+    SDL_UnlockMutex(s_firmware_lock);
+
+    if (!found && in_container == 1) {
+        found = true;
+        *version = container_version;
+    }
+    return found;
+}
+
 static void LookUpFirmwareVersion(SDL_Joystick *joystick)
 {
     struct joystick_hwdata *hwdata = joystick->hwdata;
     WCHAR path[FIRMWARE_PATH_LIMIT];
-    WCHAR instance[FIRMWARE_INSTANCE_LIMIT];
+    GUID container;
+    bool have_container = false;
+    Uint16 record = 0;  // From the slot's device metadata
+    Uint16 version = 0; // From GameInput
     bool found = false;
-    Uint16 version = 0;
     int generation;
-    int i;
     DWORD status;
 
     SDL_AssertJoysticksLocked();
 
-    if (!s_firmware_gameinput || !SDL_XInputGetDeviceIdentity) {
-        // GameInput or OpenXInput's identity call is missing: the version stays 0
+    if (!SDL_XInputGetDeviceIdentity) {
+        // Microsoft's xinput1_4.dll names no device for a slot: the version stays 0
         hwdata->firmware_settled = true;
         return;
     }
@@ -238,24 +302,25 @@ static void LookUpFirmwareVersion(SDL_Joystick *joystick)
         // OpenXInput's lock was held. The next update asks again.
         return;
     }
+    SDL_zero(container);
     if (status == ERROR_SUCCESS) {
-        const bool have_instance = WIN_GetDeviceInterfaceInstanceId(path, instance, SDL_arraysize(instance));
+#ifdef SDL_JOYSTICK_XINPUT_SLOT_RECORD
+        SDL_XInputSlotRecord slot;
 
-        SDL_LockMutex(s_firmware_lock);
-        for (i = 0; i < s_firmware_device_count; ++i) {
-            const XInputFirmwareDevice *device = &s_firmware_devices[i];
-
-            if (EqualText(device->path, path) || (have_instance && EqualText(device->instance, instance))) {
-                found = true;
-                version = device->version;
-                break;
-            }
+        if (SDL_XINPUT_ReadSlotRecord(path, &slot)) {
+            container = slot.container;
+            have_container = ValidContainer(&container);
+            record = slot.firmware;
         }
-        SDL_UnlockMutex(s_firmware_lock);
+#endif
+        if (s_firmware_gameinput) {
+            found = FindFirmwareDevice(path, have_container ? &container : NULL, &version);
+        }
     }
 
-    joystick->firmware_version = version;
-    if (found) {
+    // GameInput's version, or the metadata's while GameInput has none
+    joystick->firmware_version = version ? version : record;
+    if (found || !s_firmware_gameinput) {
         hwdata->firmware_settled = true;
     } else {
         hwdata->firmware_generation = generation;
@@ -328,9 +393,10 @@ void SDL_XINPUT_FirmwareLost(SDL_Joystick *joystick)
     joystick->hwdata->firmware_generation = -1;
 }
 
-/* Nothing to undo. UnregisterCallback here, under the joystick lock, could
-   wait forever on SDL's GameInput driver's callback. The list stays current
-   for the next start. */
+/* Nothing to undo. UnregisterCallback here, under the joystick lock, would
+   wait on any GameInput callback running in the process, forever on one
+   that waits on the joystick lock. The list stays current for the next
+   start. */
 void SDL_XINPUT_FirmwareQuit(void)
 {
 }

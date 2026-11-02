@@ -12,43 +12,68 @@
 
 /* The scripted GameInput of the XInput firmware test (hifihedgehog/SDL#44),
    and the real SDL_xinput_firmware.cpp, which this file includes after
-   naming fakes for SDL_InitGameInput, SDL_QuitGameInput and
-   WIN_GetDeviceInterfaceInstanceId. Its callbacks run one at a time on a
-   thread of their own, as GameInput documents. RegisterDeviceCallback and
-   UnregisterCallback wait for any running callback, as GameInput 4.0.302
-   did on the bench. Every call the firmware lookup has no use for counts as
-   unexpected: input, output, other device information, unregistering, and
-   FindDeviceFromPlatformString. */
+   naming fakes for SDL_InitGameInput, SDL_QuitGameInput,
+   WIN_GetDeviceInterfaceInstanceId and SDL_XINPUT_ReadSlotRecord. Its
+   callbacks run one at a time on a thread of their own, as GameInput
+   documents. RegisterDeviceCallback and UnregisterCallback wait for any
+   running callback, as GameInput 4.0.302 did on the bench. Every call the
+   firmware lookup has no use for counts as unexpected: input, output, other
+   device information, unregistering, and FindDeviceFromPlatformString. */
 
 #include "testxinputfirmware.h"
 
 #include "core/windows/SDL_windows.h"
 #include "core/windows/SDL_gameinput.h"
+#include "joystick/windows/SDL_xinput_slot_record.h"
 
 extern bool Fake_InitGameInput(IGameInput **ppGameInput);
 extern void Fake_QuitGameInput(void);
 extern "C" bool Fake_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity);
+extern "C" bool Fake_ReadSlotRecord(const wchar_t *path, SDL_XInputSlotRecord *record);
 
 #define SDL_InitGameInput Fake_InitGameInput
 #define SDL_QuitGameInput Fake_QuitGameInput
 #define WIN_GetDeviceInterfaceInstanceId Fake_GetDeviceInterfaceInstanceId
+#define SDL_XINPUT_ReadSlotRecord Fake_ReadSlotRecord
 
 #include "../src/joystick/windows/SDL_xinput_firmware.cpp"
+
+#ifndef SDL_JOYSTICK_XINPUT_SLOT_RECORD
+#error The test build compiles the slot record reader, so the lookup must use it
+#endif
 
 namespace {
 
 constexpr int FakeMaxDevices = 16;
 constexpr int FakeMaxEvents = 64;
 constexpr int FakeMaxInstances = 16;
+constexpr int FakeMaxRecords = 16;
 constexpr GameInputCallbackToken FakeToken = 0x44;
 
 SDL_AtomicInt s_unexpected;
 SDL_AtomicInt s_instance_lookups;
 SDL_AtomicInt s_platform_lookups;
+SDL_AtomicInt s_record_reads;
 
 void Unexpected()
 {
     SDL_AddAtomicInt(&s_unexpected, 1);
+}
+
+// 0 is the empty GUID, -1 the container Windows gives internal devices
+GUID Container(int number)
+{
+    GUID container = {};
+
+    if (number == -1) {
+        SDL_memset(container.Data4, 0xff, sizeof(container.Data4));
+    } else if (number != 0) {
+        container.Data1 = (unsigned long)number;
+        container.Data2 = 0x4444;
+        container.Data3 = 0x4444;
+        container.Data4[0] = 0x80;
+    }
+    return container;
 }
 
 class FakeDevice final : public IGameInputDevice
@@ -58,6 +83,7 @@ public:
     LONG connected = 0;
     char path[512] = {};
     GameInputVersion firmware = {};
+    GUID container = {};
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv) override
     {
@@ -82,6 +108,7 @@ public:
     }
     IFACEMETHODIMP_(void) GetFirmwareVersion(GameInputVersion *version) override { *version = firmware; }
     IFACEMETHODIMP_(bool) IsConnected() override { return InterlockedCompareExchange(&connected, 0, 0) != 0; }
+    IFACEMETHODIMP_(void) GetContainerId(GUID *containerId) override { *containerId = container; }
 
     // Everything else
     IFACEMETHODIMP_(uint16_t) GetVendorId() override { Unexpected(); return 0; }
@@ -97,7 +124,6 @@ public:
     IFACEMETHODIMP_(GameInputSystemButtons) GetSupportedSystemButtons() override { Unexpected(); return (GameInputSystemButtons)0; }
     IFACEMETHODIMP_(GameInputLightingGroups) GetSupportedLightingGroups() override { Unexpected(); return (GameInputLightingGroups)0; }
     IFACEMETHODIMP_(uint32_t) GetSupportedLightingGroupSize(GameInputLightingGroups group) override { Unexpected(); return 0; }
-    IFACEMETHODIMP_(void) GetContainerId(GUID *containerId) override { Unexpected(); SDL_zerop(containerId); }
     IFACEMETHODIMP_(uint32_t) GetDisplayName(uint32_t bufferByteCount, char *buffer) override { Unexpected(); return 0; }
     IFACEMETHODIMP_(bool) GetXInputDeviceIndex(uint32_t *index) override { Unexpected(); *index = 0; return false; }
     IFACEMETHODIMP_(bool) GetKeyboardInfo(GameInputKeyboardInfo *info) override { Unexpected(); return false; }
@@ -251,6 +277,13 @@ struct FakeInstance
     WCHAR instance[256];
 };
 
+struct FakeRecord
+{
+    WCHAR path[512];
+    GUID container;
+    Uint16 firmware;
+};
+
 FakeGameInput s_gameinput;
 FakeDevice s_devices[FakeMaxDevices];
 int s_device_count;
@@ -258,6 +291,8 @@ FakeEvent s_events[FakeMaxEvents];
 int s_event_count;
 FakeInstance s_instances[FakeMaxInstances];
 int s_instance_count;
+FakeRecord s_records[FakeMaxRecords];
+int s_record_count;
 bool s_available;
 int s_inits;
 int s_quits;
@@ -313,7 +348,8 @@ int SDLCALL FloodThread(void *unused)
     return 0;
 }
 
-// As GameInput runs SDL's GameInput driver's device callback, which takes the joystick lock
+/* As GameInput would run a callback that takes the joystick lock, as SDL's
+   GameInput driver's did before hifihedgehog/SDL#45 */
 int SDLCALL ForeignThread(void *unused)
 {
     (void)unused;
@@ -396,6 +432,22 @@ void Fake_QuitGameInput(void)
     ++s_quits;
 }
 
+extern "C" bool Fake_ReadSlotRecord(const wchar_t *path, SDL_XInputSlotRecord *record)
+{
+    int i;
+
+    SDL_AddAtomicInt(&s_record_reads, 1);
+    SDL_zerop(record);
+    for (i = 0; i < s_record_count; ++i) {
+        if (SDL_wcscmp(s_records[i].path, path) == 0) {
+            record->container = s_records[i].container;
+            record->firmware = s_records[i].firmware;
+            return true;
+        }
+    }
+    return false;
+}
+
 extern "C" bool Fake_GetDeviceInterfaceInstanceId(const WCHAR *path, WCHAR *instance, size_t capacity)
 {
     int i;
@@ -437,15 +489,18 @@ void FakeGI_Reset(bool available, bool register_fails)
         s_devices[i].connected = 0;
         s_devices[i].path[0] = '\0';
         SDL_zero(s_devices[i].firmware);
+        SDL_zero(s_devices[i].container);
     }
     s_device_count = 0;
     s_event_count = 0;
     s_instance_count = 0;
+    s_record_count = 0;
     s_available = available;
     s_inits = 0;
     s_quits = 0;
     SDL_SetAtomicInt(&s_instance_lookups, 0);
     SDL_SetAtomicInt(&s_platform_lookups, 0);
+    SDL_SetAtomicInt(&s_record_reads, 0);
 }
 
 bool FakeGI_WaitRegistered(int milliseconds)
@@ -554,6 +609,28 @@ void FakeGI_SetInstance(const char *path, const char *instance)
     Widen(path, s_instances[s_instance_count].path, SDL_arraysize(s_instances[s_instance_count].path));
     Widen(instance, s_instances[s_instance_count].instance, SDL_arraysize(s_instances[s_instance_count].instance));
     ++s_instance_count;
+}
+
+void FakeGI_SetContainer(int device, int container)
+{
+    s_devices[device].container = Container(container);
+}
+
+void FakeGI_SetRecord(const char *path, int container, Uint16 firmware)
+{
+    if (s_record_count == FakeMaxRecords) {
+        Unexpected();
+        return;
+    }
+    Widen(path, s_records[s_record_count].path, SDL_arraysize(s_records[s_record_count].path));
+    s_records[s_record_count].container = Container(container);
+    s_records[s_record_count].firmware = firmware;
+    ++s_record_count;
+}
+
+int FakeGI_RecordReads(void)
+{
+    return SDL_GetAtomicInt(&s_record_reads);
 }
 
 int FakeGI_Inits(void)
