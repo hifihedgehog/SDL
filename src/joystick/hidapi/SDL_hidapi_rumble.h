@@ -40,10 +40,10 @@ void SDL_HIDAPI_UnlockRumble(void) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
    output report: e.g. the Steam Controller's BLE haptic path, where one queued
    request becomes four segmented feature writes that must not run under the
    joystick lock (hifihedgehog/SDL#22). The function runs on the rumble thread
-   after device->dev is checked non-NULL. It must not touch device->context:
-   HIDAPI_CleanupDeviceDriver frees the context and closes the handle BEFORE
-   the rumble_pending drain, so only the device struct itself is guaranteed to
-   outlive an in-flight request. */
+   after device->dev is checked non-NULL. HIDAPI_CleanupDeviceDriver waits for
+   the device's queued requests to finish before it frees device->context and
+   closes the handle (upstream 79306fb73a), so both outlive a request in
+   flight. */
 typedef int (*SDL_HIDAPI_RumbleWriteFunc)(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
 
 /* Queues a request with a send override after every pending request. Like

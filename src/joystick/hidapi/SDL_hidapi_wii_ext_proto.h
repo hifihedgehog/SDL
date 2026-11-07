@@ -22,9 +22,9 @@
 /* Wii Remote extensions beyond the Nunchuk, Classic Controller, Wii U Pro and
  * Balance Board: the Guitar Hero guitars, the World Tour drum kit, the DJ Hero
  * turntable, the Taiko TaTaCon, the uDraw and Drawsome tablets and the
- * Densha de GO! Shinkansen controller. Pure C99: no SDL runtime and no I/O.
- * SDL_hidapi_wii.c sends the requests built here and posts what the decoders
- * return.
+ * Densha de GO! Shinkansen controller, and the remote's own memory reads.
+ * Pure C99: no SDL runtime and no I/O. SDL_hidapi_wii.c sends the requests
+ * built here and posts what the decoders return.
  *
  * The byte layouts are facts from wiibrew, Dolphin, Linux, WiitarThing,
  * NintendoExtensionCtrl, PlasticBand, raphnet and uDrawTablet. No code from
@@ -87,6 +87,36 @@ extern void SDL_WiiExt_BuildModeRequest(uint8_t out[SDL_WII_EXT_MODE_REQUEST_SIZ
 /* Output report 0x15: a status report, which also resets the data report. */
 #define SDL_WII_EXT_STATUS_REQUEST_SIZE 2
 extern void SDL_WiiExt_BuildStatusRequest(uint8_t out[SDL_WII_EXT_STATUS_REQUEST_SIZE], bool rumble);
+
+/* Output report 0x17 for the remote's EEPROM, where byte 1 leaves 0x04, the
+ * register space, clear (Linux hid-wiimote-core.c wiiproto_req_rmem, Dolphin
+ * WiimoteConstants.h AddressSpace::EEPROM). */
+extern void SDL_WiiExt_BuildEepromReadRequest(uint8_t out[SDL_WII_EXT_READ_REQUEST_SIZE], bool rumble, uint32_t address, uint16_t size);
+
+/* A clean 0x21 reply to a read of size bytes, 1 to 16, at address. It echoes
+ * the address's low 16 bits, carries SE = (size - 1) << 4, which is the size
+ * less one with no error, and holds the bytes, which go to dest. Linux takes
+ * the same three fields from the reply (hid-wiimote-core.c handler_data). */
+extern bool SDL_WiiExt_ParseMemoryReply(const uint8_t *report, size_t length, uint32_t address, size_t size, uint8_t *dest);
+
+/* The remote's factory calibration in EEPROM, each block followed by a copy
+ * (Dolphin WiimoteEmu.h UsableEEPROMData): the camera's 11 bytes at 0x0000
+ * and the accelerometer's 10 bytes at 0x0016. */
+#define SDL_WII_EXT_EEPROM_IR_CALIBRATION         0x0000
+#define SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE    11
+#define SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION      0x0016
+#define SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE 10
+
+/* The serial of a remote whose device has none from the system, as through
+ * the Mayflash DolphinBar: "wiical-" and the 21 calibration bytes in
+ * lowercase hex, the camera's first. */
+#define SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX     "wiical-"
+#define SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX_LEN 7
+#define SDL_WII_EXT_CALIBRATION_SERIAL_SIZE \
+    (SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX_LEN + 2 * (SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE + SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE) + 1)
+extern void SDL_WiiExt_FormatCalibrationSerial(char out[SDL_WII_EXT_CALIBRATION_SERIAL_SIZE],
+                                               const uint8_t ir[SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE],
+                                               const uint8_t accel[SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE]);
 
 typedef enum SDL_WiiExtReply
 {

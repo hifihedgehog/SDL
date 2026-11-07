@@ -231,8 +231,16 @@ extern const char *WIN_CheckDefaultArgcArgv(int *pargc, char ***pargv, void **pa
 // Does all the win32 tapdancing to make GetModuleFileName work. Returns a SDL_malloc'd UTF-8 string, or NULL on failure.
 extern char *WIN_GetModulePath(HMODULE handle);
 
-// Return true if this system has a broken EZFRD64.DLL installed
+// Return true if this system has a broken EZFRD64.DLL installed that the loader patch below does not cover
 extern bool WIN_HasBrokenEZFRD64DLL(void);
+
+/* Keeps the heaps of EZFRD64.DLL and 811EZFRD64.DLL below 4 GB, where the
+   64-bit module works, from the first call until WIN_UnpatchEZFRD64DLL, which
+   SDL_Quit calls. Returns whether the patch is in place: on 64-bit Windows 10
+   and later, unless the hint SDL_PATCH_BROKEN_EZFRD64 is false. Call it before
+   DirectInput or GameInput can load the module (SDL_ezfrd64.c). */
+extern bool WIN_PatchEZFRD64DLL(void);
+extern void WIN_UnpatchEZFRD64DLL(void);
 
 // Register for device interface arrival and removal notifications for all interface classes.
 // The callback is called on a system thread. Returns NULL if notifications aren't available.

@@ -96,6 +96,29 @@
        start lands, its check is armed meanwhile, and the camera's check
        waits out the activation's settle window.
 
+   For hifihedgehog/SDL#47 the device can be a slot of the Mayflash
+   DolphinBar, which reports no serial, while a remote on Bluetooth has its
+   address. The remote answers EEPROM reads with its factory calibration
+   (Dolphin WiimoteEmu.h UsableEEPROMData), and can answer them with an
+   error, lose their replies, or send a late identify reply first.
+
+   14. An empty slot that sends input and refuses every write gets no
+       joystick in 60 s, and its input prompts one status request each 3 s.
+   15. A remote that syncs into the slot is identified, gets the standard
+       layout, and gets the serial "wiical-" with its 21 calibration bytes.
+   16. Remotes swapped between slots keep their serials.
+   17. A calibration read that fails, by an error or a lost reply, leaves
+       no serial and drops the serial of the remote before. A late identify
+       reply that comes first is passed over.
+   18. Through the bar, the Nunchuk, the Motion Plus and the Classic
+       Controller are identified as on Bluetooth.
+   19. A remote on Bluetooth keeps its address and reads no EEPROM.
+   20. A path that takes writes and answers no read gets no joystick, and
+       each identify in a row that goes unanswered doubles the wait before
+       the next, from 3 s to 48 s.
+   21. An extension hot-plug whose identify nothing answers leaves the
+       device without a joystick until the remote answers again.
+
    The driver in this file calls the fake, not SDL's HID backends. Each name
    through which it reads, writes, queues a write or adds a joystick is
    defined below before the driver source is included. This object defines
@@ -231,6 +254,11 @@ static struct
     bool hold_acks;         /* Acknowledgments wait until the test releases them */
     bool camera_silent;     /* No acknowledgment for any camera report or register write */
     bool camera_bit_clear;  /* Status reports show the camera off whatever it does */
+    Uint8 calibration[21];  /* EEPROM: the camera's 11 bytes at 0x0000, then the accelerometer's 10 at 0x0016 */
+    Uint8 eeprom_error;     /* The error code EEPROM reads answer with, 0 for none */
+    int eeprom_lost;        /* EEPROM read replies still to lose */
+    int stale_replies;      /* Late identify replies still to send ahead of an EEPROM read's reply */
+    int eeprom_reads;       /* EEPROM reads the remote took */
     Uint8 held[FAKE_MAX_REPORTS][5];
     int nheld;
     Uint8 queue[FAKE_MAX_REPORTS][FAKE_REPORT_SIZE];
@@ -420,12 +448,40 @@ static void Fake_QueueRead(Uint32 address, const Uint8 *bytes, int size, Uint8 e
     Fake_Queue(report, sizeof(report));
 }
 
+/* The remote's EEPROM, which a read with 0x04 clear in byte 1 reaches
+   (Linux hid-wiimote-core.c wiiproto_req_rmem): the camera's calibration at
+   0x0000 and the accelerometer's at 0x0016 (Dolphin WiimoteEmu.h
+   UsableEEPROMData). The test can have the remote answer with an error,
+   lose replies, or send a late identify reply first. */
+static void Fake_ReadEeprom(Uint32 address, int size)
+{
+    ++fake.eeprom_reads;
+    if (fake.stale_replies > 0) {
+        --fake.stale_replies;
+        Fake_QueueRead(0xA400FA, NULL, 6, 7);
+    }
+    if (fake.eeprom_lost > 0) {
+        --fake.eeprom_lost;
+        return;
+    }
+    if (fake.eeprom_error) {
+        Fake_QueueRead(address, NULL, size, fake.eeprom_error);
+    } else if (address == 0x0000 && size == 11) {
+        Fake_QueueRead(address, fake.calibration, size, 0);
+    } else if (address == 0x0016 && size == 10) {
+        Fake_QueueRead(address, fake.calibration + 11, size, 0);
+    } else {
+        Fake_Unexpected("EEPROM read");
+        Fake_QueueRead(address, NULL, size, 8);
+    }
+}
+
 static void Fake_Read(const Uint8 *data, int length)
 {
     Uint32 address;
     int size;
 
-    if (length != SDL_WII_EXT_READ_REQUEST_SIZE || !(data[1] & 0x04)) {
+    if (length != SDL_WII_EXT_READ_REQUEST_SIZE || (data[1] & ~0x05) != 0) {
         Fake_Unexpected("read request");
         return;
     }
@@ -433,6 +489,10 @@ static void Fake_Read(const Uint8 *data, int length)
     size = (data[5] << 8) | data[6];
     if (size < 1 || size > 16) {
         Fake_Unexpected("read size");
+        return;
+    }
+    if (!(data[1] & 0x04)) {
+        Fake_ReadEeprom(address, size);
         return;
     }
 
@@ -786,15 +846,31 @@ static bool CountingSetSensorsEnabled(SDL_Joystick *record, bool enabled)
     return TestSetSensorsEnabled(record, enabled);
 }
 
+/* Factory calibration as two remotes store it in EEPROM: the camera's 11
+   bytes, then the accelerometer's 10, the accelerometer's zero points near
+   0x80 and its one-g points near 0x9C (Dolphin WiimoteEmu.h) */
+static const Uint8 calibration_a[21] = { 0x6E, 0x4D, 0x97, 0x41, 0x8F, 0x5C, 0x2D, 0x63, 0xC0, 0x8A, 0x2B,
+                                         0x82, 0x81, 0x7F, 0x00, 0x9C, 0x9E, 0x9B, 0x00, 0x40, 0xE3 };
+static const Uint8 calibration_b[21] = { 0x71, 0x52, 0x98, 0x3E, 0x91, 0x58, 0x30, 0x60, 0xC4, 0x85, 0x27,
+                                         0x7E, 0x83, 0x80, 0x00, 0x9A, 0x9F, 0x9D, 0x00, 0x40, 0xE8 };
+
 static void ResetFake(FakeExtension extension, bool motion_plus)
 {
     SDL_zero(fake);
     fake.extension = extension;
     fake.motion_plus = motion_plus;
+    SDL_memcpy(fake.calibration, calibration_a, sizeof(fake.calibration));
 }
 
 /* Whether the next StartDevice finds the remote powered off */
 static bool start_off;
+
+/* The serial the system gives the next StartDevice's device: a remote on
+   Windows Bluetooth has its address, as in the reporter's log of
+   hifihedgehog/SDL#47. NULL is a slot of the Mayflash DolphinBar, which
+   reports none. */
+#define BLUETOOTH_SERIAL "0024f388d985"
+static const char *start_serial = BLUETOOTH_SERIAL;
 
 /* As the HIDAPI layer sets a device up: InitDevice under the joystick lock */
 static bool StartDevice(FakeExtension extension, bool motion_plus, Uint16 product_id)
@@ -808,10 +884,12 @@ static bool StartDevice(FakeExtension extension, bool motion_plus, Uint16 produc
     device.dev = FakeHandle();
     device.name = SDL_strdup("Nintendo Wii Remote");
     device.path = SDL_strdup("fake");
+    device.serial = start_serial ? SDL_strdup(start_serial) : NULL;
     device.vendor_id = USB_VENDOR_NINTENDO;
     device.product_id = product_id;
-    device.is_bluetooth = true;
-    device.guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, USB_VENDOR_NINTENDO, product_id, 0, NULL, device.name, 'h', 0);
+    device.is_bluetooth = (start_serial != NULL);
+    device.guid = SDL_CreateJoystickGUID(start_serial ? SDL_HARDWARE_BUS_BLUETOOTH : SDL_HARDWARE_BUS_USB, USB_VENDOR_NINTENDO,
+                                         product_id, 0, NULL, device.name, 'h', 0);
     device.driver = &SDL_HIDAPI_DriverWii;
     connections = 0;
     disconnections = 0;
@@ -830,6 +908,7 @@ static void StopDevice(void)
     SDL_free(device.joysticks);
     SDL_free(device.name);
     SDL_free(device.path);
+    SDL_free(device.serial);
     SDL_zero(device);
 }
 
@@ -1022,6 +1101,33 @@ static int CountReport(int from, Uint8 report)
 
     for (i = from; i < fake.noutputs; ++i) {
         if (fake.outputs[i].data[0] == report) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* The outputs of a report since from that the driver sent on its own
+   thread, not through the rumble thread */
+static int CountDirect(int from, Uint8 report)
+{
+    int i, count = 0;
+
+    for (i = from; i < fake.noutputs; ++i) {
+        if (fake.outputs[i].data[0] == report && !fake.outputs[i].async) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* The EEPROM reads since from: report 0x17 with 0x04 clear in byte 1 */
+static int CountEepromReads(int from)
+{
+    int i, count = 0;
+
+    for (i = from; i < fake.noutputs; ++i) {
+        if (fake.outputs[i].data[0] == 0x17 && !(fake.outputs[i].data[1] & 0x04)) {
             ++count;
         }
     }
@@ -2805,6 +2911,267 @@ static void TestMotionPlusBehindCamera(void)
     StopDevice();
 }
 
+/* hifihedgehog/SDL#47: the serials calibration_a and calibration_b make,
+   "wiical-" and the 21 bytes in lowercase hex, the camera's first */
+#define SERIAL_A "wiical-6e4d97418f5c2d63c08a2b82817f009c9e9b0040e3"
+#define SERIAL_B "wiical-7152983e91583060c485277e8380009a9f9d0040e8"
+
+static bool SerialIs(const char *expected)
+{
+    if (!expected) {
+        return device.serial == NULL;
+    }
+    return device.serial && SDL_strcmp(device.serial, expected) == 0;
+}
+
+static const char *SerialText(void)
+{
+    return device.serial ? device.serial : "none";
+}
+
+/* A report nobody asked for, as an empty DolphinBar slot can send */
+static void QueueInput(void)
+{
+    Uint8 report[FAKE_REPORT_SIZE];
+
+    Fake_Queue(report, Report30(report));
+}
+
+/* The remote in the slot leaves: its writes fail, 3 s pass without input,
+   and the status request the driver sends then fails */
+static void RemoteLeaves(void)
+{
+    fake.off = true;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+}
+
+/* A remote syncs into the slot, as fresh as after its power-on, and
+   answers the next periodic status request. Its status report prompts the
+   request on the driver's thread, which it takes. */
+static void RemoteArrives(const Uint8 calibration[21])
+{
+    fake.off = false;
+    fake.camera = false;
+    fake.camera_logic = false;
+    fake.camera_mode = 0;
+    fake.report_mode = 0;
+    fake.motion_plus_mode = 0;
+    SDL_memcpy(fake.calibration, calibration, sizeof(fake.calibration));
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    Update();
+}
+
+/* 14 to 21 */
+static void TestDolphinBar(void)
+{
+    static const struct
+    {
+        const char *name;
+        FakeExtension extension;
+        bool motion_plus;
+        Uint16 product_id;
+        EWiiExtensionControllerType type;
+    } attached[] = {
+        { "Nunchuk through a DolphinBar", FAKE_EXT_NUNCHUK, false, USB_PRODUCT_NINTENDO_WII_REMOTE, k_eWiiExtensionControllerType_Nunchuk },
+        { "Wii Remote Plus through a DolphinBar", FAKE_EXT_NONE, true, USB_PRODUCT_NINTENDO_WII_REMOTE2, k_eWiiExtensionControllerType_None },
+        { "Nunchuk and Motion Plus through a DolphinBar", FAKE_EXT_NUNCHUK, true, USB_PRODUCT_NINTENDO_WII_REMOTE2, k_eWiiExtensionControllerType_Nunchuk },
+        { "Classic Controller through a DolphinBar", FAKE_EXT_CLASSIC, false, USB_PRODUCT_NINTENDO_WII_REMOTE, k_eWiiExtensionControllerType_Gamepad }
+    };
+    static const Uint32 waits[] = { 6000, 12000, 24000, 48000, 48000 };
+    int i, mark, logmark;
+    bool started;
+
+    /* 14 */
+    scenario = "empty DolphinBar slot";
+    start_off = true;
+    start_serial = NULL;
+    started = StartDevice(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE);
+    start_off = false;
+    start_serial = BLUETOOTH_SERIAL;
+    CHECK(started && connections == 0 && device.num_joysticks == 0 && !device.reads_ended,
+          "the empty slot: started %d, %d connections, reads_ended %d", started, connections, device.reads_ended);
+    CHECK(Logged(0, "No Wii Remote answers at fake: Couldn't write output report 0x15"), "no log line for the empty slot");
+    /* For 60 s the slot sends a report every 100 ms and refuses every write.
+       Input in the 3 s after InitDevice's refused request prompts none. */
+    for (i = 0; i < 600; ++i) {
+        Skip(100);
+        QueueInput();
+        Update();
+        if (i == 28) {
+            CHECK(CountDirect(0, 0x15) == 1, "input within 3 s of the refused request prompted %d more", CountDirect(0, 0x15) - 1);
+        }
+    }
+    CHECK(connections == 0 && device.num_joysticks == 0, "the empty slot got a joystick: %d connections", connections);
+    /* InitDevice's request, then one each 3 s, which the input prompted */
+    CHECK(CountDirect(0, 0x15) == 21, "%d status requests on the driver's thread, not 21", CountDirect(0, 0x15));
+    CHECK(CountLogged(0, "Input from fake, and the status request failed: Couldn't write output report 0x15") == 20,
+          "%d log lines for a refused request, not 20", CountLogged(0, "Input from fake, and the status request failed"));
+    CHECK(CountReport(0, 0x17) == 0 && !Logged(0, "answers again") && !Logged(0, "Nothing answered"),
+          "the empty slot was taken for a remote");
+
+    /* 15 */
+    scenario = "remote synced into a DolphinBar slot";
+    logmark = nlog;
+    mark = fake.noutputs;
+    RemoteArrives(calibration_a);
+    CHECK(connections == 1 && device.num_joysticks == 1 && DriverType() == k_eWiiExtensionControllerType_None,
+          "the remote: %d connections, type %d", connections, DriverType());
+    CHECK(Logged(logmark, "The Wii Remote at fake answers again"), "no log line for the remote");
+    CHECK(SDL_strcmp(device.name, "Nintendo Wii Remote") == 0, "named %s", device.name);
+    CHECK(SerialIs(SERIAL_A), "serial %s, not %s", SerialText(), SERIAL_A);
+    CHECK(CountEepromReads(mark) == 2 && fake.eeprom_reads == 2, "%d EEPROM reads, not 2", CountEepromReads(mark));
+    if (OpenRecord()) {
+        Settle();
+        CHECK(joystick->nbuttons == 15 && joystick->nhats == 1 && joystick->naxes == 10,
+              "the remote's layout: %d buttons, %d hats, %d axes", joystick->nbuttons, joystick->nhats, joystick->naxes);
+    } else {
+        CHECK(false, "the remote's joystick did not open");
+    }
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    CloseRecord();
+
+    /* 16 */
+    scenario = "remotes swapped between DolphinBar slots";
+    RemoteLeaves();
+    CHECK(disconnections == 1 && device.num_joysticks == 0, "the remote that left: %d disconnections", disconnections);
+    /* Input in the 3 s after the refused request prompts none */
+    mark = fake.noutputs;
+    Skip(100);
+    QueueInput();
+    Update();
+    CHECK(CountDirect(mark, 0x15) == 0, "input 100 ms after the refused request prompted a request");
+    RemoteArrives(calibration_b);
+    CHECK(connections == 2 && SerialIs(SERIAL_B), "the second remote: %d connections, serial %s", connections, SerialText());
+    RemoteLeaves();
+    RemoteArrives(calibration_a);
+    CHECK(connections == 3 && SerialIs(SERIAL_A), "the first remote again: %d connections, serial %s", connections, SerialText());
+
+    /* 17 */
+    scenario = "calibration read that fails";
+    RemoteLeaves();
+    fake.eeprom_error = 8;
+    logmark = nlog;
+    RemoteArrives(calibration_b);
+    CHECK(connections == 4 && device.num_joysticks == 1 && SerialIs(NULL),
+          "an EEPROM error: %d connections, serial %s", connections, SerialText());
+    CHECK(Logged(logmark, "The Wii Remote at fake gave no calibration, so it has no serial"), "no log line for the failed read");
+    fake.eeprom_error = 0;
+    RemoteLeaves();
+    fake.eeprom_lost = 1;
+    RemoteArrives(calibration_b);
+    CHECK(connections == 5 && device.num_joysticks == 1 && SerialIs(NULL) && fake.eeprom_lost == 0,
+          "a lost reply: %d connections, serial %s", connections, SerialText());
+    RemoteLeaves();
+    fake.stale_replies = 2;
+    RemoteArrives(calibration_b);
+    CHECK(connections == 6 && SerialIs(SERIAL_B) && fake.stale_replies == 0,
+          "late identify replies first: %d connections, serial %s", connections, SerialText());
+    CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+    StopDevice();
+
+    /* 18 */
+    for (i = 0; i < (int)SDL_arraysize(attached); ++i) {
+        scenario = attached[i].name;
+        start_serial = NULL;
+        started = StartDevice(attached[i].extension, attached[i].motion_plus, attached[i].product_id);
+        start_serial = BLUETOOTH_SERIAL;
+        if (!started || !OpenRecord()) {
+            CHECK(false, "the device did not start and open");
+            CloseRecord();
+            StopDevice();
+            continue;
+        }
+        Settle();
+        CHECK(DriverType() == attached[i].type && Ctx()->m_bMotionPlusPresent == attached[i].motion_plus,
+              "type %d, Motion Plus %d", DriverType(), Ctx()->m_bMotionPlusPresent);
+        CHECK(SerialIs(SERIAL_A), "serial %s", SerialText());
+        CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+        CloseRecord();
+        StopDevice();
+    }
+
+    /* 19 */
+    scenario = "Bluetooth remote's address";
+    if (StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        CHECK(SerialIs(BLUETOOTH_SERIAL) && fake.eeprom_reads == 0, "serial %s, %d EEPROM reads", SerialText(), fake.eeprom_reads);
+        CloseRecord();
+        RemoteLeaves();
+        RemoteArrives(calibration_b);
+        CHECK(connections == 2 && SerialIs(BLUETOOTH_SERIAL) && fake.eeprom_reads == 0,
+              "the remote again: %d connections, serial %s, %d EEPROM reads", connections, SerialText(), fake.eeprom_reads);
+        StopDevice();
+    }
+
+    /* 20 */
+    scenario = "slot that answers no read";
+    start_off = true;
+    start_serial = NULL;
+    started = StartDevice(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE);
+    start_off = false;
+    start_serial = BLUETOOTH_SERIAL;
+    fake.off = false;
+    fake.lost_replies = 1000000;
+    Skip(INPUT_WAIT_TIMEOUT_MS);
+    Update();
+    Update();
+    CHECK(started && connections == 0 && device.num_joysticks == 0 && Ctx()->m_nUnansweredIdentifies == 1 &&
+              Ctx()->m_ulNextConnect == Fake_GetTicks() + 3000,
+          "the first identify: %d connections, %d unanswered, next in %d ms", connections, Ctx()->m_nUnansweredIdentifies,
+          (int)(Ctx()->m_ulNextConnect - Fake_GetTicks()));
+    CHECK(Logged(0, "Nothing answered the extension identify at fake") && fake.eeprom_reads == 0,
+          "no log line, or %d EEPROM reads", fake.eeprom_reads);
+    for (i = 0; i < (int)SDL_arraysize(waits); ++i) {
+        const Uint64 due = Ctx()->m_ulNextConnect;
+
+        mark = fake.noutputs;
+        Skip(due - Fake_GetTicks() - 1);
+        QueueInput();
+        Update();
+        CHECK(CountDirect(mark, 0x15) == 0 && CountReport(mark, 0x17) == 0, "input 1 ms before the wait ended prompted a request");
+        Skip(1);
+        QueueInput();
+        Update();
+        CHECK(CountDirect(mark, 0x15) == 1 && connections == 0, "input when the wait ended: %d requests, %d connections",
+              CountDirect(mark, 0x15), connections);
+        CHECK(Ctx()->m_nUnansweredIdentifies == SDL_min(i + 2, 5) && Ctx()->m_ulNextConnect == Fake_GetTicks() + waits[i],
+              "identify %d: %d unanswered, next in %d ms, not %u", i + 2, Ctx()->m_nUnansweredIdentifies,
+              (int)(Ctx()->m_ulNextConnect - Fake_GetTicks()), (unsigned int)waits[i]);
+    }
+    /* The remote answers, and the count starts over */
+    fake.lost_replies = 0;
+    Skip(Ctx()->m_ulNextConnect - Fake_GetTicks());
+    QueueInput();
+    Update();
+    CHECK(connections == 1 && device.num_joysticks == 1 && Ctx()->m_nUnansweredIdentifies == 0 && Ctx()->m_ulNextConnect == 0 &&
+              SerialIs(SERIAL_A),
+          "the remote that answered: %d connections, %d unanswered, serial %s", connections, Ctx()->m_nUnansweredIdentifies, SerialText());
+    StopDevice();
+
+    /* 21 */
+    scenario = "hot-plug identify with no answer";
+    if (StartAndOpen(FAKE_EXT_NONE, false, USB_PRODUCT_NINTENDO_WII_REMOTE)) {
+        fake.extension = FAKE_EXT_NUNCHUK;
+        fake.lost_replies = 1000000;
+        Fake_QueueStatus();
+        Update();
+        CHECK(disconnections == 1 && connections == 1 && device.num_joysticks == 0 && Ctx()->m_nUnansweredIdentifies == 1,
+              "the unanswered identify: %d disconnections, %d connections, %d unanswered", disconnections, connections,
+              Ctx()->m_nUnansweredIdentifies);
+        CloseRecord();
+        fake.lost_replies = 0;
+        Skip(INPUT_WAIT_TIMEOUT_MS);
+        Update();
+        Update();
+        CHECK(connections == 2 && device.num_joysticks == 1 && DriverType() == k_eWiiExtensionControllerType_Nunchuk &&
+                  Ctx()->m_nUnansweredIdentifies == 0,
+              "the remote that answered: %d connections, type %d", connections, DriverType());
+        CHECK(fake.unexpected == 0, "%d requests the remote does not answer", fake.unexpected);
+        StopDevice();
+    }
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -2834,6 +3201,7 @@ int main(int argc, char *argv[])
     TestSensorCallsWaitOnNothing();
     TestStartStops();
     TestMotionPlusBehindCamera();
+    TestDolphinBar();
 
     SDL_Quit();
 

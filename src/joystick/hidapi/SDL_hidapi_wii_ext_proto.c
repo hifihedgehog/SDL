@@ -127,6 +127,52 @@ void SDL_WiiExt_BuildStatusRequest(uint8_t out[SDL_WII_EXT_STATUS_REQUEST_SIZE],
     out[1] = (uint8_t)(rumble ? 0x01 : 0x00);
 }
 
+void SDL_WiiExt_BuildEepromReadRequest(uint8_t out[SDL_WII_EXT_READ_REQUEST_SIZE], bool rumble, uint32_t address, uint16_t size)
+{
+    out[0] = WII_REPORT_READ_REQUEST;
+    out[1] = (uint8_t)(rumble ? 0x01 : 0x00);
+    out[2] = (uint8_t)(address >> 16);
+    out[3] = (uint8_t)(address >> 8);
+    out[4] = (uint8_t)address;
+    out[5] = (uint8_t)(size >> 8);
+    out[6] = (uint8_t)size;
+}
+
+bool SDL_WiiExt_ParseMemoryReply(const uint8_t *report, size_t length, uint32_t address, size_t size, uint8_t *dest)
+{
+    if (!report || !dest || size < 1 || size > 16 || length < 6 + size || report[0] != WII_REPORT_READ_MEMORY) {
+        return false;
+    }
+    if (report[3] != (uint8_t)((size - 1) << 4)) {
+        return false;
+    }
+    if (report[4] != (uint8_t)(address >> 8) || report[5] != (uint8_t)address) {
+        return false;
+    }
+    memcpy(dest, &report[6], size);
+    return true;
+}
+
+void SDL_WiiExt_FormatCalibrationSerial(char out[SDL_WII_EXT_CALIBRATION_SERIAL_SIZE],
+                                        const uint8_t ir[SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE],
+                                        const uint8_t accel[SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE])
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t n = SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX_LEN;
+    size_t i;
+
+    memcpy(out, SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX, SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX_LEN);
+    for (i = 0; i < SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE; ++i) {
+        out[n++] = hex[ir[i] >> 4];
+        out[n++] = hex[ir[i] & 0x0F];
+    }
+    for (i = 0; i < SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE; ++i) {
+        out[n++] = hex[accel[i] >> 4];
+        out[n++] = hex[accel[i] & 0x0F];
+    }
+    out[n] = '\0';
+}
+
 SDL_WiiExtReply SDL_WiiExt_ParseIdentifyReply(const uint8_t *report, size_t length, uint32_t address, uint8_t id[6])
 {
     if (!report || length < 6 || report[0] != WII_REPORT_READ_MEMORY) {

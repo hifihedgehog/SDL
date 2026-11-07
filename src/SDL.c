@@ -728,6 +728,10 @@ void SDL_Quit(void)
     SDL_HelperWindowDestroy();
 #endif
     SDL_QuitSubSystem(SDL_ALL_SUBSYSTEM_FLAGS);
+#ifdef SDL_PLATFORM_WINDOWS
+    // No module calls into SDL after this (hifihedgehog/SDL#47)
+    WIN_UnpatchEZFRD64DLL();
+#endif
     SDL_CleanupTrays();
     SDL_CleanupNotifications();
 
