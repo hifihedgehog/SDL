@@ -273,6 +273,8 @@ typedef struct
     Uint64 m_ulLastStatus;
     Uint64 m_ulNextMotionPlusCheck;
     bool m_bDisconnected;
+    Uint64 m_ulNextConnect;      // without a joystick, input prompts no status request before this (hifihedgehog/SDL#47)
+    int m_nUnansweredIdentifies; // identifies in a row that no reply answered, which lengthen that wait
 
     StickCalibrationData m_StickCalibrationData[6];
     SDL_WiiExtState m_ExtState; // The extensions SDL_hidapi_wii_ext_proto.c decodes
@@ -636,34 +638,83 @@ static void StartCameraStep(SDL_DriverWii_Context *ctx, EWiiWriteStep step, Uint
     SendCameraStep(ctx, now);
 }
 
-/* Read the 24-byte Balance Board calibration (Kg0/Kg17/Kg34 x 4 corners x int16
-   big-endian) from register 0x04a40024 (WiimoteLib-Trihy Wiimote.cs:65,531-547).
-   ReadRegister waits on one ReadMemory packet of <= 16 bytes, so the 24 bytes are
-   read in two passes (16 + 8). Stored raw; PadForge does its own kg interpolation. */
-static bool ReadCalibrationBlock(SDL_DriverWii_Context *ctx, Uint32 address, int size, Uint8 *dest)
+/* Reads size bytes, 1 to 16, at address in the registers or in EEPROM and
+   waits for the reply. Only a clean ReadMemory reply counts: type 0x21, SE
+   naming the size and no error, and the echoed address (bytes 4-5) matching
+   the low 16 bits of the request (SDL_WiiExt_ParseMemoryReply), so an error
+   packet is never published as data. ReadInputSync matches on report ID
+   only, and a late reply to an earlier read can come first: a reply that
+   echoes another address is passed over, up to four of them. */
+static bool ReadMemoryBlock(SDL_DriverWii_Context *ctx, bool eeprom, Uint32 address, int size, Uint8 *dest)
 {
-    if (!ReadRegister(ctx, address, size, true)) {
+    Uint8 request[SDL_WII_EXT_READ_REQUEST_SIZE];
+    int replies;
+
+    SDL_assert(size > 0 && size <= 16);
+    if (eeprom) {
+        SDL_WiiExt_BuildEepromReadRequest(request, ctx->m_bRumbleActive, address, (Uint16)size);
+    } else {
+        SDL_WiiExt_BuildReadRequest(request, ctx->m_bRumbleActive, address, (Uint16)size);
+    }
+    if (!WriteOutput(ctx, request, sizeof(request), true)) {
         return false;
     }
-    /* Accept only a clean ReadMemory reply: type 0x21, the low nibble of byte 3
-       (the error code) clear, and the echoed address (bytes 4-5) matching the low
-       16 bits of the request. This rejects ReadMemory error packets and a stale
-       reply from an earlier request, which ReadInputSync would otherwise hand back
-       (it matches on report id only), so garbage is never published as calibration. */
-    if (ctx->m_rgucReadBuffer[0] != k_eWiiInputReportIDs_ReadMemory ||
-        (ctx->m_rgucReadBuffer[3] & 0x0F) != 0 ||
-        (Uint16)((ctx->m_rgucReadBuffer[4] << 8) | ctx->m_rgucReadBuffer[5]) != (Uint16)(address & 0xFFFF)) {
-        return false;
+    for (replies = 0; replies < 4; ++replies) {
+        if (!ReadInputSync(ctx, k_eWiiInputReportIDs_ReadMemory, NULL)) {
+            return false;
+        }
+        if (ctx->m_nReadSize >= 6 &&
+            ctx->m_rgucReadBuffer[4] == (Uint8)(address >> 8) && ctx->m_rgucReadBuffer[5] == (Uint8)address) {
+            return SDL_WiiExt_ParseMemoryReply(ctx->m_rgucReadBuffer, (size_t)ctx->m_nReadSize, address, (size_t)size, dest);
+        }
     }
-    SDL_memcpy(dest, ctx->m_rgucReadBuffer + 6, size);
-    return true;
+    return false;
 }
 
+/* Read the 24-byte Balance Board calibration (Kg0/Kg17/Kg34 x 4 corners x int16
+   big-endian) from register 0x04a40024 (WiimoteLib-Trihy Wiimote.cs:65,531-547).
+   A read waits on one ReadMemory packet of <= 16 bytes, so the 24 bytes are
+   read in two passes (16 + 8). Stored raw; PadForge does its own kg interpolation. */
 static void ReadBalanceBoardCalibration(SDL_DriverWii_Context *ctx)
 {
     ctx->m_bBalanceBoardCalibrationValid =
-        ReadCalibrationBlock(ctx, WII_BALANCE_CALIBRATION_ADDR, 16, ctx->m_rgucBalanceBoardCalibration) &&
-        ReadCalibrationBlock(ctx, WII_BALANCE_CALIBRATION_ADDR + 16, 8, ctx->m_rgucBalanceBoardCalibration + 16);
+        ReadMemoryBlock(ctx, false, WII_BALANCE_CALIBRATION_ADDR, 16, ctx->m_rgucBalanceBoardCalibration) &&
+        ReadMemoryBlock(ctx, false, WII_BALANCE_CALIBRATION_ADDR + 16, 8, ctx->m_rgucBalanceBoardCalibration + 16);
+}
+
+/* A remote through the Mayflash DolphinBar has no serial: the bar reports
+   none for any slot and hands out its slots in no fixed order. The factory
+   calibration in the remote's EEPROM, the camera's and the accelerometer's,
+   is the only per-unit data a remote gives over HID (Dolphin WiimoteEmu.h
+   UsableEEPROMData), so it becomes the serial, as the PS4, PS5 and Switch
+   drivers pass HIDAPI_SetDeviceSerial what the controller reports. It is
+   read at each connection, since another remote can sync into the
+   slot. A device whose serial came from the system, the Bluetooth address,
+   keeps it, and a read that fails leaves the device with no serial
+   (hifihedgehog/SDL#47). */
+static void UpdateCalibrationSerial(SDL_DriverWii_Context *ctx)
+{
+    SDL_HIDAPI_Device *device = ctx->device;
+    Uint8 ir[SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE];
+    Uint8 accel[SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE];
+    char serial[SDL_WII_EXT_CALIBRATION_SERIAL_SIZE];
+
+    if (device->serial && *device->serial &&
+        SDL_strncmp(device->serial, SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX, SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX_LEN) != 0) {
+        return;
+    }
+    if (device->serial) {
+        // The serial of the remote that was in the slot before
+        SDL_free(device->serial);
+        device->serial = NULL;
+    }
+    if (!ReadMemoryBlock(ctx, true, SDL_WII_EXT_EEPROM_IR_CALIBRATION, (int)sizeof(ir), ir) ||
+        !ReadMemoryBlock(ctx, true, SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION, (int)sizeof(accel), accel)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: The Wii Remote at %s gave no calibration, so it has no serial", device->path);
+        return;
+    }
+    SDL_WiiExt_FormatCalibrationSerial(serial, ir, accel);
+    HIDAPI_SetDeviceSerial(device, serial);
 }
 
 static bool GetMotionPlusState(SDL_DriverWii_Context *ctx, bool *connected, Uint8 *mode)
@@ -1246,19 +1297,27 @@ static void SDLCALL SDL_PlayerLEDHintChanged(void *userdata, const char *name, c
     }
 }
 
-static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device *device)
+/* Identifies the extension into *type. Returns false when no attempt got a
+   reply: no remote answers at the path, as at an empty Mayflash DolphinBar
+   slot. A remote that replies with an ID the driver does not know is
+   Unknown (hifihedgehog/SDL#47). */
+static bool ReadExtensionControllerType(SDL_HIDAPI_Device *device, EWiiExtensionControllerType *type)
 {
     SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
     EWiiExtensionControllerType eExtensionControllerType = k_eWiiExtensionControllerType_Unknown;
     const int MAX_ATTEMPTS = 20;
     int attempts = 0;
+    bool replied = false;
 
     // Create enough of a context to read the controller type from the device
     for (attempts = 0; attempts < MAX_ATTEMPTS; ++attempts) {
         Uint16 extension;
         Uint8 id0 = 0;
-        if (SendExtensionIdentify(ctx, true) &&
-            ParseExtensionIdentifyResponse(ctx, &extension, &id0)) {
+        if (!SendExtensionIdentify(ctx, true)) {
+            continue;
+        }
+        replied = true;
+        if (ParseExtensionIdentifyResponse(ctx, &extension, &id0)) {
             Uint8 motion_plus_mode = 0;
             if ((extension & WII_EXTENSION_MOTIONPLUS_MASK) == WII_EXTENSION_MOTIONPLUS_ID) {
                 motion_plus_mode = (Uint8)(extension >> 8);
@@ -1363,7 +1422,21 @@ static EWiiExtensionControllerType ReadExtensionControllerType(SDL_HIDAPI_Device
             break;
         }
     }
-    return eExtensionControllerType;
+    *type = eExtensionControllerType;
+    return replied;
+}
+
+/* No identify got a reply, so the path has no remote. Input from it prompts
+   no status request for 3 s, twice that for each further identify in a row
+   that goes unanswered, up to 48 s, so a path that takes writes and answers
+   no read rarely costs the update the 20 waits of an identify
+   (hifihedgehog/SDL#47). */
+static void WaitAfterUnansweredIdentify(SDL_DriverWii_Context *ctx, int unanswered)
+{
+    unanswered = SDL_min(unanswered, 5);
+    ctx->m_nUnansweredIdentifies = unanswered;
+    ctx->m_ulNextConnect = SDL_GetTicks() + ((Uint64)INPUT_WAIT_TIMEOUT_MS << (unanswered - 1));
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Nothing answered the extension identify at %s", ctx->device->path);
 }
 
 static void UpdateDeviceIdentity(SDL_HIDAPI_Device *device)
@@ -1381,10 +1454,15 @@ static void UpdateDeviceIdentity(SDL_HIDAPI_Device *device)
 /* Identifies the remote and adds its joystick, from a fresh context. A
    remote that answers again after it refused a write has connected again,
    which starts its camera, Motion Plus and data report over, and the
-   joystick that had its sensors enabled is gone (hifihedgehog/SDL#39). */
+   joystick that had its sensors enabled is gone (hifihedgehog/SDL#39). A
+   path where no identify gets a reply gets no joystick and waits in
+   UpdateWithoutJoystick, and a remote with no system serial gets one from
+   its calibration before its joystick is added (hifihedgehog/SDL#47). */
 static bool ConnectRemote(SDL_HIDAPI_Device *device)
 {
     SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
+    const int unanswered = ctx->m_nUnansweredIdentifies;
+    EWiiExtensionControllerType type;
 
     SDL_zerop(ctx);
     ctx->device = device;
@@ -1392,9 +1470,14 @@ static bool ConnectRemote(SDL_HIDAPI_Device *device)
     ctx->m_ulLastInput = SDL_GetTicks();
 
     if (device->vendor_id == USB_VENDOR_NINTENDO) {
-        ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
+        if (!ReadExtensionControllerType(device, &type)) {
+            WaitAfterUnansweredIdentify(ctx, unanswered + 1);
+            return true;
+        }
+        ctx->m_eExtensionControllerType = type;
 
         UpdateDeviceIdentity(device);
+        UpdateCalibrationSerial(ctx);
     }
     return HIDAPI_JoystickConnected(device, NULL);
 }
@@ -1424,9 +1507,11 @@ static bool HIDAPI_DriverWii_InitDevice(SDL_HIDAPI_Device *device)
        DolphinBar lists its empty slots. Only a write tells either from a
        remote, since it fails (Dolphin IOWin.cpp:428-449, :724-727). A path
        that refuses a status request gets no joystick until its remote
-       answers (UpdateWithoutJoystick, hifihedgehog/SDL#39). */
+       answers (UpdateWithoutJoystick, hifihedgehog/SDL#39), and input from
+       it prompts no request for 3 s (hifihedgehog/SDL#47). */
     if (!RequestStatus(ctx, true)) {
         SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: No Wii Remote answers at %s: %s", device->path, SDL_GetError());
+        ctx->m_ulNextConnect = ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS;
         return true;
     }
     return ConnectRemote(device);
@@ -2633,35 +2718,47 @@ static void HandleInput(SDL_DriverWii_Context *ctx, SDL_Joystick *joystick)
     }
 }
 
-/* A device without a joystick, whose remote refused a status request at
-   InitDevice or after 3 s without input. The device keeps its path and
-   handle, so no other joystick backend lists the remote as its own: they ask
-   HIDAPI_IsDevicePresent, which counts a device that has a driver
-   (SDL_JoystickHandledByAnotherDriver). It gets a status request every 3 s,
-   as Dolphin's scanner writes to every listed interface (IOWin.cpp:703-741,
-   WiimoteReal.cpp:672-674), and the remote's first input, such as the status
-   report a remote that came back sends, brings its joystick back. The
-   request goes through the rumble thread, since only the answer counts, so a
-   write that waits out the HID layer's timeout does not hold the update. A
-   read error means the handle broke: the core releases the device and opens
-   its path again at the next device change (hifihedgehog/SDL#39). */
+/* A device without a joystick: its path refused a status request at
+   InitDevice or after 3 s without input, or no identify got a reply. The
+   device keeps its path and handle, so no other joystick backend lists the
+   remote as its own: they ask HIDAPI_IsDevicePresent, which counts a device
+   that has a driver (SDL_JoystickHandledByAnotherDriver). It gets a status
+   request every 3 s, as Dolphin's scanner writes to every listed interface
+   (IOWin.cpp:703-741, WiimoteReal.cpp:672-674). That request goes through
+   the rumble thread, so a write that waits out the HID layer's timeout does
+   not hold the update (hifihedgehog/SDL#39).
+
+   Input from the path is no proof of a remote: an empty Mayflash DolphinBar
+   slot can send some, and fails every write (Dolphin IOWin.cpp:428-438,
+   :599). Input prompts a status request on this thread, and only a request
+   the path takes brings the joystick back, as at InitDevice and in Dolphin's
+   scanner (IOWin.cpp:440-449). Input that arrives while a refused request or
+   an unanswered identify holds the path back is dropped
+   (hifihedgehog/SDL#47). A read error means the handle broke: the core
+   releases the device and opens its path again at the next device change
+   (hifihedgehog/SDL#39). */
 static bool UpdateWithoutJoystick(SDL_HIDAPI_Device *device)
 {
     SDL_DriverWii_Context *ctx = (SDL_DriverWii_Context *)device->context;
     Uint64 now = SDL_GetTicks();
-    bool answered = false;
+    bool input = false;
     int size;
 
     while ((size = ReadInput(ctx)) > 0) {
-        answered = true;
+        input = true;
     }
     if (size < 0) {
         device->reads_ended = true;
         return false;
     }
-    if (answered) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: The Wii Remote at %s answers again", device->path);
-        return ConnectRemote(device);
+    if (input && now >= ctx->m_ulNextConnect && SDL_GetAtomicInt(&device->rumble_pending) == 0) {
+        if (RequestStatus(ctx, true)) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: The Wii Remote at %s answers again", device->path);
+            return ConnectRemote(device);
+        }
+        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: Input from %s, and the status request failed: %s", device->path, SDL_GetError());
+        ctx->m_ulNextConnect = now + INPUT_WAIT_TIMEOUT_MS;
+        ctx->m_ulLastInput = now;
     }
     if (now >= (ctx->m_ulLastInput + INPUT_WAIT_TIMEOUT_MS) &&
         SDL_GetAtomicInt(&device->rumble_pending) == 0) {
@@ -2714,6 +2811,7 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "HIDAPI Wii: No input for %d ms, and the status request failed: %s", INPUT_WAIT_TIMEOUT_MS, SDL_GetError());
             refused = true;
             size = -1;
+            ctx->m_ulNextConnect = now + INPUT_WAIT_TIMEOUT_MS;
         }
         ctx->m_ulLastInput = now;
     }
@@ -2787,9 +2885,11 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
         // place: drop the old joystick, re-read the extension type, refresh the
         // name/GUID, then re-add with the new capabilities. OpenJoystick re-applies
         // nbuttons/naxes and per-extension sensors when the app reopens it.
+        EWiiExtensionControllerType type;
+        bool replied;
+
         HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
-        ctx->m_eExtensionControllerType = ReadExtensionControllerType(device);
-        UpdateDeviceIdentity(device);
+        replied = ReadExtensionControllerType(device, &type);
         ctx->m_bDisconnected = false;
         /* The extension churn reset the IR camera, so the active flag is now stale.
          * Clear it; OpenJoystick re-powers IR on reopen if sensors stay enabled. */
@@ -2800,7 +2900,15 @@ static bool HIDAPI_DriverWii_UpdateDevice(SDL_HIDAPI_Device *device)
          * open joystick, so a stale m_ulLastInput would disconnect the re-added
          * joystick before the app can reopen it. */
         ctx->m_ulLastInput = SDL_GetTicks();
-        HIDAPI_JoystickConnected(device, NULL);
+        if (replied) {
+            ctx->m_eExtensionControllerType = type;
+            UpdateDeviceIdentity(device);
+            HIDAPI_JoystickConnected(device, NULL);
+        } else {
+            /* The remote left during the identify: no joystick, and the
+               device waits in UpdateWithoutJoystick (hifihedgehog/SDL#47) */
+            WaitAfterUnansweredIdentify(ctx, ctx->m_nUnansweredIdentifies + 1);
+        }
     }
     return (size >= 0);
 }

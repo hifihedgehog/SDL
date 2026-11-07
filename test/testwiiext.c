@@ -435,6 +435,22 @@ static void TestRequests(void)
     SDL_WiiExt_BuildStatusRequest(status, true);
     CHECK(status[1] == 0x01);
 
+    /* An EEPROM read leaves 0x04, the register space, clear in byte 1, and a
+       register read sets it (hifihedgehog/SDL#47) */
+    {
+        uint8_t read[SDL_WII_EXT_READ_REQUEST_SIZE];
+        static const uint8_t camera[] = { 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0B };
+        static const uint8_t accel_rumble[] = { 0x17, 0x01, 0x00, 0x00, 0x16, 0x00, 0x0A };
+        static const uint8_t identify[] = { 0x17, 0x04, 0xA4, 0x00, 0xFA, 0x00, 0x06 };
+
+        SDL_WiiExt_BuildEepromReadRequest(read, false, SDL_WII_EXT_EEPROM_IR_CALIBRATION, SDL_WII_EXT_EEPROM_IR_CALIBRATION_SIZE);
+        CHECK(Bytes(read, camera, sizeof(camera)));
+        SDL_WiiExt_BuildEepromReadRequest(read, true, SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION, SDL_WII_EXT_EEPROM_ACCEL_CALIBRATION_SIZE);
+        CHECK(Bytes(read, accel_rumble, sizeof(accel_rumble)));
+        SDL_WiiExt_BuildReadRequest(read, false, SDL_WII_EXT_REG_IDENTIFY, 6);
+        CHECK(Bytes(read, identify, sizeof(identify)));
+    }
+
     /* The data report per type. Only the guitar with sensors on uses 0x35 */
     CHECK(SDL_WiiExt_ReportMode(SDL_WII_EXT_GUITAR, false) == 0x32);
     CHECK(SDL_WiiExt_ReportMode(SDL_WII_EXT_GUITAR, true) == 0x35);
@@ -456,6 +472,100 @@ static void TestRequests(void)
         CHECK(SDL_WiiExt_StartupWrites(SDL_WII_EXT_SHINKANSEN, writes) == 0);
         CHECK(SDL_WiiExt_StartupWrites(SDL_WII_EXT_NUNCHUK, writes) == 0);
     }
+}
+
+/* The reply to a memory read, from an exact-size heap copy */
+static bool ParseMemoryCopy(const uint8_t *report, size_t length, uint32_t address, size_t size, uint8_t *dest)
+{
+    uint8_t *copy = (uint8_t *)malloc(length ? length : 1);
+    bool result;
+
+    if (length) {
+        memcpy(copy, report, length);
+    }
+    result = SDL_WiiExt_ParseMemoryReply(copy, length, address, size, dest);
+    free(copy);
+    return result;
+}
+
+/* hifihedgehog/SDL#47: the reply to a calibration read, 21 BB BB SE AA AA
+   DD*16, and the serial made from the calibration */
+static void TestMemoryReply(void)
+{
+    uint8_t reply[22], dest[16];
+    size_t i;
+
+    memset(reply, 0, sizeof(reply));
+    reply[0] = 0x21;
+    reply[3] = 0xA0; /* 11 bytes, no error */
+    for (i = 0; i < 16; ++i) {
+        reply[6 + i] = (uint8_t)(0x40 + i);
+    }
+    memset(dest, 0xEE, sizeof(dest));
+    CHECK(ParseMemoryCopy(reply, 22, 0x0000, 11, dest));
+    CHECK(dest[0] == 0x40 && dest[10] == 0x4A && dest[11] == 0xEE);
+    /* Long enough for the 11 bytes, and one byte short */
+    CHECK(ParseMemoryCopy(reply, 17, 0x0000, 11, dest));
+    CHECK(!ParseMemoryCopy(reply, 16, 0x0000, 11, dest));
+    /* The size the reply names must be the size asked for */
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0000, 10, dest));
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0000, 12, dest));
+    /* Error 7, nothing at the address, and 8, an address out of range */
+    reply[3] = 0xA7;
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0000, 11, dest));
+    reply[3] = 0xA8;
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0000, 11, dest));
+    reply[3] = 0xA0;
+    /* A late reply to the extension identify echoes 00 FA */
+    reply[5] = 0xFA;
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0000, 11, dest));
+    reply[4] = 0x01;
+    reply[5] = 0x00;
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0000, 11, dest));
+    /* The reply echoes the low 16 bits of the address only */
+    reply[3] = 0x90;
+    reply[4] = 0x00;
+    reply[5] = 0x16;
+    CHECK(ParseMemoryCopy(reply, 22, 0x0016, 10, dest));
+    CHECK(ParseMemoryCopy(reply, 22, 0xA40016, 10, dest));
+    /* Another report: an acknowledgment */
+    reply[0] = 0x22;
+    CHECK(!ParseMemoryCopy(reply, 22, 0x0016, 10, dest));
+    reply[0] = 0x21;
+    /* Sizes no single reply carries, and missing buffers */
+    CHECK(!SDL_WiiExt_ParseMemoryReply(reply, 22, 0x0016, 0, dest));
+    CHECK(!SDL_WiiExt_ParseMemoryReply(reply, 22, 0x0016, 17, dest));
+    CHECK(!SDL_WiiExt_ParseMemoryReply(NULL, 22, 0x0016, 10, dest));
+    CHECK(!SDL_WiiExt_ParseMemoryReply(reply, 22, 0x0016, 10, NULL));
+    /* 16 bytes, the most one reply carries */
+    reply[3] = 0xF0;
+    CHECK(ParseMemoryCopy(reply, 22, 0x0016, 16, dest) && dest[15] == 0x4F);
+    CHECK(!ParseMemoryCopy(reply, 21, 0x0016, 16, dest));
+}
+
+static void TestCalibrationSerial(void)
+{
+    static const uint8_t camera[11] = { 0x00, 0x01, 0x0A, 0x10, 0x7F, 0x80, 0x9C, 0xAB, 0xCD, 0xEF, 0xFF };
+    static const uint8_t accel[10] = { 0x82, 0x81, 0x7F, 0x00, 0x9C, 0x9E, 0xA0, 0x40, 0x12, 0x34 };
+    const uint8_t zero[11] = { 0 };
+    char *serial = (char *)malloc(SDL_WII_EXT_CALIBRATION_SERIAL_SIZE);
+    size_t i;
+
+    CHECK(SDL_WII_EXT_CALIBRATION_SERIAL_SIZE == 50);
+    CHECK(strlen(SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX) == SDL_WII_EXT_CALIBRATION_SERIAL_PREFIX_LEN);
+    /* An exact-size heap buffer, so AddressSanitizer catches a write past it */
+    memset(serial, 'X', SDL_WII_EXT_CALIBRATION_SERIAL_SIZE);
+    SDL_WiiExt_FormatCalibrationSerial(serial, camera, accel);
+    CHECK(strcmp(serial, "wiical-00010a107f809cabcdefff82817f009c9ea0401234") == 0);
+    SDL_WiiExt_FormatCalibrationSerial(serial, zero, zero);
+    CHECK(strlen(serial) == 49 && strncmp(serial, "wiical-", 7) == 0);
+    for (i = 7; i < 49; ++i) {
+        CHECK(serial[i] == '0');
+    }
+    /* The camera's bytes come first */
+    SDL_WiiExt_FormatCalibrationSerial(serial, camera, zero);
+    CHECK(strncmp(serial, "wiical-00010a", 13) == 0 && strcmp(serial + 29, "00000000000000000000") == 0);
+    free(serial);
 }
 
 /* Spans per report, full length only */
@@ -1623,6 +1733,8 @@ int main(void)
     TestClassification();
     TestStoredId();
     TestRequests();
+    TestMemoryReply();
+    TestCalibrationSerial();
     TestSpans();
     TestGuitar();
     TestDrums();

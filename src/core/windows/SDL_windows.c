@@ -777,6 +777,8 @@ bool WIN_HasBrokenEZFRD64DLL(void)
 {
     static bool checked = false;
     static bool has_broken_EZFRD64_DLL = false;
+    // With the loader patch in place the module gets heaps below 4 GB and works (hifihedgehog/SDL#47)
+    const bool patched = WIN_PatchEZFRD64DLL();
 
     if (!checked) {
 #ifdef _WIN64
@@ -792,7 +794,11 @@ bool WIN_HasBrokenEZFRD64DLL(void)
                 int count = 0;
                 char **files = SDL_GlobDirectory(directories[i], "*/EZFRD64.DLL", SDL_GLOB_CASEINSENSITIVE, &count);
                 if (count > 0) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Broken EZFRD64.DLL detected, disabling GameInput and DirectInput force feedback");
+                    if (patched) {
+                        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "EZFRD64.DLL detected, keeping its heaps below 4 GB");
+                    } else {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Broken EZFRD64.DLL detected, disabling GameInput and DirectInput force feedback");
+                    }
                     has_broken_EZFRD64_DLL = true;
                 }
                 SDL_free(files);
@@ -801,7 +807,7 @@ bool WIN_HasBrokenEZFRD64DLL(void)
 #endif
         checked = true;
     }
-    return has_broken_EZFRD64_DLL;
+    return has_broken_EZFRD64_DLL && !patched;
 }
 
 #endif // defined(SDL_PLATFORM_WINDOWS)

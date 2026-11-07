@@ -971,6 +971,9 @@ static void DINPUT_JoystickInitUpdates(void)
     }
     coinitialized = true;
 
+    // DirectInput can load the broken EZFRD64.DLL, so it is patched first (hifihedgehog/SDL#47)
+    (void)WIN_PatchEZFRD64DLL();
+
     result = CoCreateInstance(&CLSID_DirectInput8, NULL, CLSCTX_INPROC_SERVER,
                               &IID_IDirectInput8, (LPVOID *)&dinput);
     if (FAILED(result)) {

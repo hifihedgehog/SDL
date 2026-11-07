@@ -79,6 +79,9 @@ bool SDL_DINPUT_HapticInit(void)
 
     coinitialized = true;
 
+    // DirectInput can load the broken EZFRD64.DLL, so it is patched first (hifihedgehog/SDL#47)
+    (void)WIN_PatchEZFRD64DLL();
+
     ret = CoCreateInstance(&CLSID_DirectInput8, NULL, CLSCTX_INPROC_SERVER,
                            &IID_IDirectInput8, (LPVOID *)&dinput);
     if (FAILED(ret)) {
@@ -138,6 +141,14 @@ bool SDL_DINPUT_HapticMaybeAddDevice(const DIDEVICEINSTANCE *pdidInstance)
         if (SDL_memcmp(&item->instance, pdidInstance, sizeof(*pdidInstance)) == 0) {
             return false; // Already added
         }
+    }
+
+    /* The capability query below loads the device's force feedback driver,
+       which can be the broken EZFRD64.DLL. Where that DLL is installed and
+       the loader patch is not in place, no device is listed, as the
+       joystick open skips the query for every device (hifihedgehog/SDL#47). */
+    if (WIN_HasBrokenEZFRD64DLL()) {
+        return false;
     }
 
     // Open the device
