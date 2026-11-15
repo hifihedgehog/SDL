@@ -835,9 +835,9 @@ static bool SDL_SYS_ToFFEFFECT(SDL_Haptic *haptic, FFEFFECT *dest, const SDL_Hap
         dest->lpvTypeSpecificParams = constant;
 
         // Generics
-        dest->dwDuration = hap_constant->length * 1000; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_constant->length, FF_INFINITE); // In microseconds.
         dest->dwTriggerButton = FFGetTriggerButton(hap_constant->button);
-        dest->dwTriggerRepeatInterval = hap_constant->interval;
+        dest->dwTriggerRepeatInterval = hap_constant->interval * 1000; // In microseconds.
         dest->dwStartDelay = hap_constant->delay * 1000; // In microseconds.
 
         // Direction.
@@ -879,9 +879,9 @@ static bool SDL_SYS_ToFFEFFECT(SDL_Haptic *haptic, FFEFFECT *dest, const SDL_Hap
         dest->lpvTypeSpecificParams = periodic;
 
         // Generics
-        dest->dwDuration = hap_periodic->length * 1000; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_periodic->length, FF_INFINITE); // In microseconds.
         dest->dwTriggerButton = FFGetTriggerButton(hap_periodic->button);
-        dest->dwTriggerRepeatInterval = hap_periodic->interval;
+        dest->dwTriggerRepeatInterval = hap_periodic->interval * 1000; // In microseconds.
         dest->dwStartDelay = hap_periodic->delay * 1000; // In microseconds.
 
         // Direction.
@@ -932,9 +932,9 @@ static bool SDL_SYS_ToFFEFFECT(SDL_Haptic *haptic, FFEFFECT *dest, const SDL_Hap
         dest->lpvTypeSpecificParams = condition;
 
         // Generics
-        dest->dwDuration = hap_condition->length * 1000; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_condition->length, FF_INFINITE); // In microseconds.
         dest->dwTriggerButton = FFGetTriggerButton(hap_condition->button);
-        dest->dwTriggerRepeatInterval = hap_condition->interval;
+        dest->dwTriggerRepeatInterval = hap_condition->interval * 1000; // In microseconds.
         dest->dwStartDelay = hap_condition->delay * 1000; // In microseconds.
 
         // Direction.
@@ -962,9 +962,10 @@ static bool SDL_SYS_ToFFEFFECT(SDL_Haptic *haptic, FFEFFECT *dest, const SDL_Hap
         dest->lpvTypeSpecificParams = ramp;
 
         // Generics
-        dest->dwDuration = hap_ramp->length * 1000; // In microseconds.
+        // SDL_HAPTIC_INFINITY is not a ramp length (SDL_haptic.h)
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_ramp->length, 0); // In microseconds.
         dest->dwTriggerButton = FFGetTriggerButton(hap_ramp->button);
-        dest->dwTriggerRepeatInterval = hap_ramp->interval;
+        dest->dwTriggerRepeatInterval = hap_ramp->interval * 1000; // In microseconds.
         dest->dwStartDelay = hap_ramp->delay * 1000; // In microseconds.
 
         // Direction.
@@ -1005,9 +1006,9 @@ static bool SDL_SYS_ToFFEFFECT(SDL_Haptic *haptic, FFEFFECT *dest, const SDL_Hap
         dest->lpvTypeSpecificParams = custom;
 
         // Generics
-        dest->dwDuration = hap_custom->length * 1000; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_custom->length, FF_INFINITE); // In microseconds.
         dest->dwTriggerButton = FFGetTriggerButton(hap_custom->button);
-        dest->dwTriggerRepeatInterval = hap_custom->interval;
+        dest->dwTriggerRepeatInterval = hap_custom->interval * 1000; // In microseconds.
         dest->dwStartDelay = hap_custom->delay * 1000; // In microseconds.
 
         // Direction.

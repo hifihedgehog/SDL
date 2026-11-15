@@ -614,6 +614,9 @@ static Uint32 initial_wheel_devices[] = {
     MAKE_VIDPID(0x046d, 0xc26d), // Logitech G923 (Xbox)
     MAKE_VIDPID(0x046d, 0xc26e), // Logitech G923
     MAKE_VIDPID(0x046d, 0xc272), // Logitech PRO Racing Wheel for Xbox (PC mode)
+    MAKE_VIDPID(0x046d, 0xc274), // Logitech RS50 (PlayStation mode)
+    MAKE_VIDPID(0x046d, 0xc275), // Logitech RS50 (Xbox mode)
+    MAKE_VIDPID(0x046d, 0xc276), // Logitech RS50 (PC mode)
     MAKE_VIDPID(0x046d, 0xc291), // Logitech WingMan Formula Force (I-Force)
     MAKE_VIDPID(0x046d, 0xc294), // Logitech generic wheel
     MAKE_VIDPID(0x046d, 0xc295), // Logitech Momo Force

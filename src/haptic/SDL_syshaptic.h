@@ -186,6 +186,16 @@ extern bool SDL_SYS_HapticResume(SDL_Haptic *haptic);
  */
 extern bool SDL_SYS_HapticStopAll(SDL_Haptic *haptic);
 
+/*
+ * An effect's length in milliseconds as the 32-bit count of microseconds
+ * that DirectInput's DIEFFECT and the macOS ForceFeedback framework's
+ * FFEFFECT carry as their duration. SDL_HAPTIC_INFINITY becomes infinite,
+ * the field's value for no end, unless infinite is 0 for an effect that
+ * cannot be infinite. A length too long for the field gets the longest one
+ * that fits, so the product never wraps (hifihedgehog/SDL#48).
+ */
+extern Uint32 SDL_HapticLengthToMicroseconds(Uint32 length, Uint32 infinite);
+
 // Ends C function definitions when using C++
 #ifdef __cplusplus
 }

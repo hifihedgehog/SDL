@@ -949,3 +949,17 @@ bool SDL_StopHapticRumble(SDL_Haptic *haptic)
 
     return SDL_StopHapticEffect(haptic, haptic->rumble_id);
 }
+
+Uint32 SDL_HapticLengthToMicroseconds(Uint32 length, Uint32 infinite)
+{
+    // 4294967 ms, whose 4294967000 us is the longest a 32-bit field holds in whole milliseconds
+    const Uint32 longest = SDL_MAX_UINT32 / 1000;
+
+    if (length == SDL_HAPTIC_INFINITY && infinite) {
+        return infinite;
+    }
+    if (length > longest) {
+        length = longest;
+    }
+    return length * 1000;
+}

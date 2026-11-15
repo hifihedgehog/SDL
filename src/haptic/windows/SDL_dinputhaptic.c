@@ -673,9 +673,9 @@ static bool SDL_SYS_ToDIEFFECT(SDL_Haptic *haptic, DIEFFECT *dest,
         dest->lpvTypeSpecificParams = constant;
 
         // Generics
-        dest->dwDuration = hap_constant->length * 1000UL; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_constant->length, INFINITE); // In microseconds.
         dest->dwTriggerButton = DIGetTriggerButton(hap_constant->button);
-        dest->dwTriggerRepeatInterval = hap_constant->interval;
+        dest->dwTriggerRepeatInterval = hap_constant->interval * 1000UL; // In microseconds.
         dest->dwStartDelay = hap_constant->delay * 1000UL; // In microseconds.
 
         // Direction.
@@ -717,9 +717,9 @@ static bool SDL_SYS_ToDIEFFECT(SDL_Haptic *haptic, DIEFFECT *dest,
         dest->lpvTypeSpecificParams = periodic;
 
         // Generics
-        dest->dwDuration = hap_periodic->length * 1000UL; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_periodic->length, INFINITE); // In microseconds.
         dest->dwTriggerButton = DIGetTriggerButton(hap_periodic->button);
-        dest->dwTriggerRepeatInterval = hap_periodic->interval;
+        dest->dwTriggerRepeatInterval = hap_periodic->interval * 1000UL; // In microseconds.
         dest->dwStartDelay = hap_periodic->delay * 1000UL; // In microseconds.
 
         // Direction.
@@ -767,9 +767,9 @@ static bool SDL_SYS_ToDIEFFECT(SDL_Haptic *haptic, DIEFFECT *dest,
         dest->lpvTypeSpecificParams = condition;
 
         // Generics
-        dest->dwDuration = hap_condition->length * 1000UL; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_condition->length, INFINITE); // In microseconds.
         dest->dwTriggerButton = DIGetTriggerButton(hap_condition->button);
-        dest->dwTriggerRepeatInterval = hap_condition->interval;
+        dest->dwTriggerRepeatInterval = hap_condition->interval * 1000UL; // In microseconds.
         dest->dwStartDelay = hap_condition->delay * 1000UL; // In microseconds.
 
         // Direction.
@@ -797,9 +797,10 @@ static bool SDL_SYS_ToDIEFFECT(SDL_Haptic *haptic, DIEFFECT *dest,
         dest->lpvTypeSpecificParams = ramp;
 
         // Generics
-        dest->dwDuration = hap_ramp->length * 1000UL; // In microseconds.
+        // A ramp force cannot run with an INFINITE duration (DIRAMPFORCE)
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_ramp->length, 0); // In microseconds.
         dest->dwTriggerButton = DIGetTriggerButton(hap_ramp->button);
-        dest->dwTriggerRepeatInterval = hap_ramp->interval;
+        dest->dwTriggerRepeatInterval = hap_ramp->interval * 1000UL; // In microseconds.
         dest->dwStartDelay = hap_ramp->delay * 1000UL; // In microseconds.
 
         // Direction.
@@ -839,9 +840,9 @@ static bool SDL_SYS_ToDIEFFECT(SDL_Haptic *haptic, DIEFFECT *dest,
         dest->lpvTypeSpecificParams = custom;
 
         // Generics
-        dest->dwDuration = hap_custom->length * 1000UL; // In microseconds.
+        dest->dwDuration = SDL_HapticLengthToMicroseconds(hap_custom->length, INFINITE); // In microseconds.
         dest->dwTriggerButton = DIGetTriggerButton(hap_custom->button);
-        dest->dwTriggerRepeatInterval = hap_custom->interval;
+        dest->dwTriggerRepeatInterval = hap_custom->interval * 1000UL; // In microseconds.
         dest->dwStartDelay = hap_custom->delay * 1000UL; // In microseconds.
 
         // Direction.
