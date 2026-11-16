@@ -200,10 +200,16 @@ static void TestRules(void)
     CHECK(!SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
     CHECK(SDL_VendorUSB_IsVendorDevice(USB_VENDOR_IN2GAMES, USB_PRODUCT_IN2GAMES_GAMETRAK));
     CHECK(!SDL_VendorUSB_RuleApplies(NULL, SDL_VENDORUSB_PLATFORM_WINDOWS));
-    /* The GameCube adapter's and the Intel base station's rules serve every
-       platform */
+    /* The GameCube adapter's rule serves every platform but macOS, where the
+       HID backend reads it (libsdl-org/SDL f881e74d67), and the Intel base
+       station's serves every platform */
     rule = SDL_VendorUSB_FindRule(USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, 0, 3, 0, 0);
-    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+    CHECK(rule && (rule->flags & SDL_VENDORUSB_NOT_MACOS));
+    CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
+    CHECK(!SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_MACOS));
+    CHECK(SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_OTHER, USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, false, false));
+    CHECK(SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_WINDOWS, USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, false, false));
+    CHECK(!SDL_VendorUSB_RequiresLibUSB(SDL_VENDORUSB_PLATFORM_MACOS, USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, false, false));
     rule = SDL_VendorUSB_FindRule(USB_VENDOR_INTEL, USB_PRODUCT_INTEL_WIRELESS_SERIES, 0, 3, 1, 1);
     CHECK(SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_OTHER) && SDL_VendorUSB_RuleApplies(rule, SDL_VENDORUSB_PLATFORM_WINDOWS));
 
@@ -1072,7 +1078,9 @@ static void TestInTimeout(void)
 /* The routing rules as they stood at 5df5eff539 (src/hidapi/SDL_hidapi.c
  * RequiresLibUSB and SDL_HIDAPI_ShouldIgnoreDevice, and
  * should_enumerate_interface in src/hidapi/libusb/hid.c), restated so the new
- * rules can be compared with them case by case. */
+ * rules can be compared with them case by case. Upstream f881e74d67 later put
+ * the GameCube adapter's entry under #ifndef SDL_PLATFORM_MACOS, and the
+ * restatement follows. */
 static bool OldRequired(SDL_VendorUSBPlatform platform, uint16_t vendor, uint16_t product, bool xbox)
 {
     static const uint16_t list[][2] = {
@@ -1086,6 +1094,9 @@ static bool OldRequired(SDL_VendorUSBPlatform platform, uint16_t vendor, uint16_
     size_t i;
     for (i = 0; i < sizeof(list) / sizeof(list[0]); ++i) {
         if (list[i][0] == vendor && list[i][1] == product) {
+            if (platform == SDL_VENDORUSB_PLATFORM_MACOS && i == 0) {
+                return false;
+            }
             return true;
         }
     }

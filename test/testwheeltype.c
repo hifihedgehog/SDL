@@ -104,7 +104,7 @@ int main(int argc, char *argv[])
     SDL_SetHint(SDL_HINT_JOYSTICK_SERIAL_AUTO, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_RFCOMM, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_ICADE, "0");
-    SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ASYNC, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_ROG_CHAKRAM, "0");
     SDL_SetHint("SDL_JOYSTICK_WINMM", "0");
     /* The serial port and DJI remote hints are lists, so they are set empty */

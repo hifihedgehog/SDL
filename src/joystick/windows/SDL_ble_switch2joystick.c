@@ -25,8 +25,9 @@
  * and hifihedgehog/SDL#5. The Switch 2 advertises a custom 128-bit GATT
  * service over Bluetooth LE (not HID-over-GATT), so hidapi never sees it and
  * the upstream SDL_hidapi_switch2.c Bluetooth path stays a stub. This driver
- * owns a WinRT BLE connection, modeled on the WGI driver's WinRT-from-C
- * mechanics (SDL_windows_gaming_input.c). The WinRT transport it shares with
+ * owns a WinRT BLE connection, modeled on the WinRT-from-C mechanics of SDL's
+ * Windows.Gaming.Input driver (SDL_windows_gaming_input.c, which upstream
+ * 81b4769b0e removed). The WinRT transport it shares with
  * the generic BLE GATT driver lives in SDL_ble_gatt.c (hifihedgehog/SDL#33
  * Part 12): the runtime, the awaits, the delegates, the advertisement watcher,
  * the open, the uncached discovery and the writes.
@@ -77,7 +78,8 @@ typedef __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattChar
 
 // ---------------------------------------------------------------------------
 // IIDs. The WinRT C headers ship only declarations, so we define the GUIDs
-// ourselves (same approach as SDL_windows_gaming_input.c). The transport's
+// ourselves (the approach of SDL_windows_gaming_input.c, which upstream
+// 81b4769b0e removed). The transport's
 // IIDs live in SDL_ble_gatt.c.
 // ---------------------------------------------------------------------------
 DEFINE_GUID(IID_BleDevice3,       0xaee9e493, 0x44ac, 0x40dc, 0xaf, 0x33, 0xb2, 0xc1, 0x3c, 0x01, 0xca, 0x46);
@@ -470,6 +472,25 @@ static BLE_Controller *BLE_GetControllerByAddress(Uint64 address)
         }
     }
     return NULL;
+}
+
+// Publishes a controller's joystick under its own instance ID, under the
+// joystick lock. A controller has no path.
+static bool BLE_PublishController(BLE_Controller *ctrl)
+{
+    SDL_JoystickDevice *device = SDL_CreateJoystickDevice(&SDL_BLE_JoystickDriver, 0);
+
+    if (!device) {
+        return false;
+    }
+    device->name = SDL_strdup(ctrl->name);
+    if (!device->name) {
+        SDL_DestroyJoystickDevice(device);
+        return false;
+    }
+    device->guid = ctrl->guid;
+    device->instance_id = ctrl->instance_id;
+    return SDL_AddJoystickDevice(device) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,8 +1255,8 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     // (the SendEffect shutdown, a dead battery, out of range) stays registered
     // forever, and its address stays claimed in ble.controllers so every
     // reconnection advertisement is dropped by BLE_TryReserveConnect. The
-    // callback only sets link_lost; BLE_JoystickDetect runs the teardown. If
-    // the append below is skipped (duplicate/teardown race), BLE_FreeController
+    // callback only sets link_lost, and BLE_JoystickDetectDevices runs the
+    // teardown. If the append below is skipped (duplicate/teardown race), BLE_FreeController
     // removes this subscription on the cleanup path like the others.
     // SDL_BLEGATT_AddStatusHandler polls the status once after registering.
     ctrl->status_handler = SDL_BLEGATT_AddStatusHandler(ctrl->device, &ctrl->link_lost, &ctrl->status_token);
@@ -1243,12 +1264,13 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     SDL_LockJoysticks();
     {
         // Bail if a teardown ran while this connect was in WinRT discovery.
-        // SDL_QuitJoysticks holds SDL_LockJoysticks across driver->Quit(), and
-        // BLE_JoystickQuit clears ble.initialized last under that same lock
-        // (SDL_joystick.c:2275-2294). A connect callback that was blocked here
-        // during shutdown must not re-grow the freed ble.controllers array or
-        // register a joystick after SDL_joysticks_quitting is set. ctrl stays
-        // non-NULL and is torn down via the cleanup path below.
+        // SDL_QuitJoysticks holds SDL_LockJoysticks from setting
+        // SDL_joysticks_quitting through every driver->Quit(), and
+        // BLE_JoystickQuit clears ble.initialized last under that same lock.
+        // A connect callback that was blocked here during shutdown must not
+        // re-grow the freed ble.controllers array or publish a joystick after
+        // the quit. ctrl stays non-NULL and is torn down via the cleanup path
+        // below.
         BLE_Controller **grown = ble.initialized
             ? (BLE_Controller **)SDL_realloc(ble.controllers, sizeof(ble.controllers[0]) * (ble.controller_count + 1))
             : NULL;
@@ -1260,15 +1282,19 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
                 int c;
                 ctrl->connected_ms = SDL_GetTicks();
                 ble.controllers[ble.controller_count++] = ctrl;
-                SDL_PrivateJoystickAdded(ctrl->instance_id);
-                ctrl = NULL; // owned by the array now
-                // Genuine connect: clear any backoff so a later wireless reconnect
-                // is immediate. (Already under SDL_LockJoysticks here.)
-                for (c = 0; c < ble.cooldown_count; ++c) {
-                    if (ble.cooldowns[c].address == bluetooth_address) {
-                        ble.cooldowns[c] = ble.cooldowns[--ble.cooldown_count];
-                        break;
+                if (BLE_PublishController(ctrl)) {
+                    ctrl = NULL; // owned by the array now
+                    // Genuine connect: clear any backoff so a later wireless reconnect
+                    // is immediate. (Already under SDL_LockJoysticks here.)
+                    for (c = 0; c < ble.cooldown_count; ++c) {
+                        if (ble.cooldowns[c].address == bluetooth_address) {
+                            ble.cooldowns[c] = ble.cooldowns[--ble.cooldown_count];
+                            break;
+                        }
                     }
+                } else {
+                    // No joystick, so the cleanup path below tears the controller down
+                    --ble.controller_count;
                 }
             }
         }
@@ -1799,18 +1825,13 @@ static bool BLE_JoystickInit(void)
     return true;
 }
 
-static int BLE_JoystickGetCount(void)
-{
-    return ble.controller_count;
-}
-
-static void BLE_JoystickDetect(void)
+static void BLE_JoystickDetectDevices(void)
 {
     // Drain link-loss flags set by ConnectionStatusChanged (MTA callback) and
-    // tear the dead controllers down on the joystick thread. Detect runs under
-    // SDL_LockJoysticks (SDL_joystick.c:2867-2869, after the per-joystick update
-    // walk, the documented place to free removed-device data), the same lock the
-    // connect append and Quit hold, so the array walk is safe. Removing the
+    // tear the dead controllers down on the joystick thread. DetectDevices runs
+    // under SDL_LockJoysticks (SDL_UpdateJoystickDevices, after
+    // RunJoystickUpdates' per-joystick update walk), the same lock the connect
+    // append and Quit hold, so the array walk is safe. Removing the
     // controller posts the removal to the app (fixes the stale registration) and
     // makes BLE_GetControllerByAddress return NULL for the address, so
     // BLE_TryReserveConnect accepts the pad's next advertisement and it can
@@ -1838,7 +1859,7 @@ static void BLE_JoystickDetect(void)
             // JoyConBLE.swift maybeBeginInit, hifihedgehog/SDL#38).
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link lost %" SDL_PRIu64 " ms after the joystick was added (%s path)",
                          SDL_GetTicks() - ctrl->connected_ms, ctrl->console ? "console" : "unified");
-            SDL_PrivateJoystickRemoved(ctrl->instance_id);
+            SDL_RemoveJoystickDevice(ctrl->instance_id);
             ble.controllers[i] = ble.controllers[--ble.controller_count];
             BLE_FreeController(ctrl);
         } else {
@@ -1847,79 +1868,21 @@ static void BLE_JoystickDetect(void)
     }
 }
 
-static bool BLE_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
+static void BLE_JoystickSetPlayerIndex(SDL_Joystick *joystick, int player_index)
 {
-    (void)version;
-    (void)name;
-    int i;
-    for (i = 0; i < ble.controller_count; ++i) {
-        if (ble.controllers[i]->vendor_id == vendor_id && ble.controllers[i]->product_id == product_id) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static const char *BLE_JoystickGetDeviceName(int device_index)
-{
-    if (device_index >= 0 && device_index < ble.controller_count) {
-        return ble.controllers[device_index]->name;
-    }
-    return NULL;
-}
-
-static const char *BLE_JoystickGetDevicePath(int device_index)
-{
-    (void)device_index;
-    return NULL;
-}
-
-static int BLE_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static int BLE_JoystickGetDevicePlayerIndex(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static void BLE_JoystickSetDevicePlayerIndex(int device_index, int player_index)
-{
-    if (device_index >= 0 && device_index < ble.controller_count) {
-        BLE_Controller *ctrl = ble.controllers[device_index];
+    BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
+    if (ctrl) {
         ctrl->player_index = player_index;
         BLE_SetPlayerLED(ctrl, player_index);
     }
 }
 
-static SDL_GUID BLE_JoystickGetDeviceGUID(int device_index)
+static bool BLE_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *device)
 {
-    SDL_GUID guid;
-    if (device_index >= 0 && device_index < ble.controller_count) {
-        return ble.controllers[device_index]->guid;
+    BLE_Controller *ctrl = BLE_GetControllerByInstance(device->instance_id);
+    if (!ctrl) {
+        return SDL_SetError("BLE joystick disconnected");
     }
-    SDL_zero(guid);
-    return guid;
-}
-
-static SDL_JoystickID BLE_JoystickGetDeviceInstanceID(int device_index)
-{
-    if (device_index >= 0 && device_index < ble.controller_count) {
-        return ble.controllers[device_index]->instance_id;
-    }
-    return 0;
-}
-
-static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
-{
-    BLE_Controller *ctrl;
-    if (device_index < 0 || device_index >= ble.controller_count) {
-        return SDL_SetError("BLE joystick index out of range");
-    }
-    ctrl = ble.controllers[device_index];
     ctrl->joystick = joystick;
 
     /* Stable identity across reconnects (SDL#9 follow-up): expose the pad's
@@ -1927,8 +1890,8 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
        digits, the same shape hidapi reports for Bluetooth pads. Without it
        every consumer identity falls back to the SDL instance ID, which mints
        a new identity on every power-cycle and orphans per-device settings.
-       Core owns and frees the string (SDL_joystick.c:2254), matching the
-       hidapi open's SDL_strdup assignment (SDL_hidapijoystick.c:1587). */
+       Core owns and frees the string (SDL_CloseJoystick), matching the
+       hidapi open's SDL_strdup assignment (HIDAPI_JoystickOpen). */
     {
         char serial[13];
         (void)SDL_snprintf(serial, sizeof(serial), "%012llx", (unsigned long long)ctrl->bluetooth_address);
@@ -1981,9 +1944,14 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, int device_index)
         }
     }
 
-    // Light the player LED for this slot.
+    // SDL_OpenJoystick calls SetPlayerIndex right after Open for a joystick
+    // with a player index, and that call lights the slot's LED. Open turns
+    // the LEDs off only for a joystick without one, so the LED command, which
+    // waits for its response, goes out once.
     ctrl->player_index = SDL_GetJoystickPlayerIndex(joystick);
-    BLE_SetPlayerLED(ctrl, ctrl->player_index);
+    if (ctrl->player_index < 0) {
+        BLE_SetPlayerLED(ctrl, ctrl->player_index);
+    }
     return true;
 }
 
@@ -2251,35 +2219,29 @@ static void BLE_JoystickQuit(void)
     ble.initialized = false;
 }
 
-static bool BLE_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+static bool BLE_JoystickGetGamepadMapping(SDL_JoystickDevice *device, SDL_GamepadMapping *out)
 {
-    (void)device_index;
+    (void)device;
     (void)out;
     return false; // resolved by the 'h'+VID/PID fabricated mapping
 }
 
+// A controller is published with SDL_AddJoystickDevice by its connect
+// worker, so the driver has no QueryDevices or PrepareDevice
 SDL_JoystickDriver SDL_BLE_JoystickDriver = {
-    BLE_JoystickInit,
-    BLE_JoystickGetCount,
-    BLE_JoystickDetect,
-    BLE_JoystickIsDevicePresent,
-    BLE_JoystickGetDeviceName,
-    BLE_JoystickGetDevicePath,
-    BLE_JoystickGetDeviceSteamVirtualGamepadSlot,
-    BLE_JoystickGetDevicePlayerIndex,
-    BLE_JoystickSetDevicePlayerIndex,
-    BLE_JoystickGetDeviceGUID,
-    BLE_JoystickGetDeviceInstanceID,
-    BLE_JoystickOpen,
-    BLE_JoystickRumble,
-    BLE_JoystickRumbleTriggers,
-    BLE_JoystickSetLED,
-    BLE_JoystickSendEffect,
-    BLE_JoystickSetSensorsEnabled,
-    BLE_JoystickUpdate,
-    BLE_JoystickClose,
-    BLE_JoystickQuit,
-    BLE_JoystickGetGamepadMapping
+    .Init = BLE_JoystickInit,
+    .DetectDevices = BLE_JoystickDetectDevices,
+    .GetGamepadMapping = BLE_JoystickGetGamepadMapping,
+    .Open = BLE_JoystickOpen,
+    .Rumble = BLE_JoystickRumble,
+    .RumbleTriggers = BLE_JoystickRumbleTriggers,
+    .SetLED = BLE_JoystickSetLED,
+    .SendEffect = BLE_JoystickSendEffect,
+    .SetSensorsEnabled = BLE_JoystickSetSensorsEnabled,
+    .SetPlayerIndex = BLE_JoystickSetPlayerIndex,
+    .Update = BLE_JoystickUpdate,
+    .Close = BLE_JoystickClose,
+    .Quit = BLE_JoystickQuit
 };
 
 #endif // SDL_JOYSTICK_BLE

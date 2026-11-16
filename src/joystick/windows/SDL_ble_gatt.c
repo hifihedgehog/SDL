@@ -110,7 +110,8 @@ typedef __x_ABI_CWindows_CFoundation_CIClosable                                 
 
 // ---------------------------------------------------------------------------
 // IIDs. The WinRT C headers ship only declarations, so we define the GUIDs
-// ourselves (same approach as SDL_windows_gaming_input.c). The file:line after
+// ourselves, as SDL's Windows.Gaming.Input driver did (SDL_windows_gaming_input.c,
+// which upstream 81b4769b0e removed). The file:line after
 // each is where the Windows SDK 10.0.26100.0 header declares it (bt.h is
 // windows.devices.bluetooth.h, adv.h the advertisement header, gatt.h the
 // genericattributeprofile header, enum.h windows.devices.enumeration.h).
@@ -144,7 +145,8 @@ DEFINE_GUID(IID_BleAsyncInfo,     0x00000036, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 
 DEFINE_GUID(IID_Closable,         0x30d5a829, 0x7fa4, 0x4026, 0x83, 0xbb, 0xd7, 0x5b, 0xae, 0x4e, 0xa9, 0x9e); // windows.foundation.h:1291
 // Parameterized IAsyncOperationCompletedHandler<T> IIDs (PIIDs). The shared
 // awaiter must QI-accept exactly the handler IID put_Completed asks for, like the
-// WGI driver's per-delegate QI (SDL_windows_gaming_input.c:340-342). These are the
+// Windows.Gaming.Input driver's per-delegate QI (SDL_windows_gaming_input.c:340-342
+// before upstream 81b4769b0e removed it). These are the
 // CompletedHandler IIDs, NOT the IAsyncOperation<T> IIDs that sit on the adjacent
 // near-identically-named struct in the SDK headers (using the operation IID makes
 // put_Completed return E_NOINTERFACE).
@@ -189,7 +191,8 @@ struct IBufferByteAccess
 };
 
 // ---------------------------------------------------------------------------
-// combase entrypoints, resolved at runtime (same as WGI).
+// combase entrypoints, resolved at runtime, as SDL's Windows.Gaming.Input
+// driver resolved them before upstream 81b4769b0e removed it.
 // ---------------------------------------------------------------------------
 typedef HRESULT(WINAPI *CoIncrementMTAUsage_t)(HANDLE *pCookie);
 typedef HRESULT(WINAPI *RoGetActivationFactory_t)(HSTRING activatableClassId, REFIID iid, void **factory);
@@ -379,7 +382,8 @@ typedef struct SDL_BLEGATTAwaiter
 
 static ULONG STDMETHODCALLTYPE SDL_BLEGATT_Awaiter_AddRef(void *This);
 
-// Strict QI, matching the WGI handler (SDL_windows_gaming_input.c:340-342): accept
+// Strict QI, matching the Windows.Gaming.Input driver's handler
+// (SDL_windows_gaming_input.c:340-342 before upstream 81b4769b0e removed it): accept
 // only IUnknown, IAgileObject, and this awaiter's specific completed-handler IID,
 // AddRef on success, E_NOINTERFACE for everything else. The previous permissive
 // version handed back self (and skipped AddRef) for every IID except IMarshal,

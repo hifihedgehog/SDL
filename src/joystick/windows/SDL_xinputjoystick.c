@@ -152,8 +152,9 @@ static SDL_JoystickDevice *CreateXInputDevice(Uint8 userid, BYTE SubType)
         return NULL;
     }
 
-    char name[32];
-    GetXInputName(userid, SubType, name, sizeof(name));
+    char name_buffer[32];
+    // PadForge fork: a Rock Band 3 Pro name comes back as its own string, not in the buffer
+    const char *name = GetXInputName(userid, SubType, name_buffer, sizeof(name_buffer));
     GetXInputDeviceInfo(userid, &vendor, &product, &version, &steam_virtual_gamepad_slot);
 
     SDL_JoystickDevice *device = SDL_CreateJoystickDevice(&SDL_XINPUT_JoystickDriver, sizeof(SDL_JoystickDeviceData));
@@ -398,7 +399,7 @@ static bool XINPUT_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *devi
     // The paddle reader reads the enumerated GUID here, before SDL_OpenJoystick sets joystick->guid
     joystick->hwdata->guid = device->guid;
 
-    joystick->hwdata->rb3pro_variant = SDL_RB3Pro_VariantForXInputSubtype(device->SubType);
+    joystick->hwdata->rb3pro_variant = SDL_RB3Pro_VariantForXInputSubtype(device->internal->SubType);
     if (joystick->hwdata->rb3pro_variant) {
         // The Rock Band 3 Pro instruments take the layout of their PS3 models
         int nbuttons, naxes, nhats;

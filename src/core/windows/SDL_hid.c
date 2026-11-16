@@ -196,18 +196,7 @@ typedef DWORD (WINAPI *CM_Get_Device_Interface_PropertyWFunc)(LPCWSTR pszDeviceI
 typedef DWORD (WINAPI *CM_Locate_DevNodeWFunc)(PDWORD pdnDevInst, WCHAR *pDeviceID, ULONG ulFlags);
 typedef DWORD (WINAPI *CM_Get_DevNode_PropertyWFunc)(DWORD dnDevInst, const DEVPROPKEY *PropertyKey, DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
 
-/* PadForge fork: CM_Get_Device_Interface_PropertyW and the one property
-   WIN_GetDeviceInterfaceInstanceId reads, as devpropdef.h and devpkey.h define
-   them (hifihedgehog/SDL#44) */
-typedef struct
-{
-    GUID fmtid;
-    ULONG pid;
-} SDL_DEVPROPKEY;
-
-typedef DWORD (WINAPI *CM_Get_Device_Interface_PropertyWFunc)(LPCWSTR pszDeviceInterface, const SDL_DEVPROPKEY *PropertyKey, ULONG *PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
-
-static const SDL_DEVPROPKEY SDL_DEVPKEY_Device_InstanceId = { { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } }, 256 };
+// PadForge fork: the property type WIN_GetDeviceInterfaceInstanceId accepts, as devpropdef.h defines it (hifihedgehog/SDL#44)
 #define SDL_DEVPROP_TYPE_STRING 0x00000012
 
 #define CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES 0x00000001

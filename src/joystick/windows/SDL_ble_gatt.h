@@ -42,8 +42,9 @@
    the SDL_BLEGATT_Quit that drops the last reference runs WIN_RoUninitialize
    on its own. A driver therefore calls them only from its Init and its Quit,
    which SDL runs on the thread that initializes and quits the joystick
-   subsystem, as the WGI driver pairs its own
-   (SDL_windows_gaming_input.c:595-598 and :1007-1009). */
+   subsystem, as SDL's Windows.Gaming.Input driver paired its own
+   (SDL_windows_gaming_input.c:595-598 and :1007-1009 before upstream
+   81b4769b0e removed it). */
 extern bool SDL_BLEGATT_Init(void);
 extern void SDL_BLEGATT_Quit(void);
 

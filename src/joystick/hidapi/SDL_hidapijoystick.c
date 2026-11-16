@@ -1371,8 +1371,9 @@ static void HIDAPI_UpdateDeviceList(void)
                     }
 
                     // A device whose open failed, or whose driver's reads
-                    // ended, is set up again once per device change. A count
-                    // of 0 asks for a rescan, which is no device change.
+                    // ended, is set up again once per device change. The
+                    // count is 0 only when HIDAPI could not start, which is
+                    // no device change.
                     if (device->reopen && SDL_HIDAPI_change_count != 0 &&
                         device->reopen_change_count != SDL_HIDAPI_change_count) {
                         bool removed;
@@ -1549,10 +1550,9 @@ void HIDAPI_UpdateDevices(void)
                 // device change. The release closes device->dev, which a
                 // request still queued on the rumble thread writes to, so it
                 // waits for a later update once that queue is empty. The
-                // count stored is the system's: a driver that disconnected its
-                // joystick in this update has set SDL_HIDAPI_change_count to 0
-                // to ask for a rescan, and a stored 0 would reopen the path at
-                // that rescan (hifihedgehog/SDL#39).
+                // count stored is the system's, the one the rescan that a
+                // driver's disconnect asks for will see, so that rescan leaves
+                // the path released (hifihedgehog/SDL#39).
                 HIDAPI_CleanupDeviceDriver(device);
                 device->reopen = true;
                 device->reopen_change_count = SDL_hid_device_change_count();

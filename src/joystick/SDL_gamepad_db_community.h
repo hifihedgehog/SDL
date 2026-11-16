@@ -29,10 +29,10 @@
    License: zlib, in build-scripts/gamecontrollerdb/LICENSE.txt
 
    Windows rows: 869. In the USB form with a vendor and product: 862.
-   Left out because SDL_gamepad_db.h maps the device on some platform: 359,
-   because controller_list.h lists it: 110, because a HIDAPI driver
-   supports it: 101, because SDL types it as a flight stick or a wheel: 2,
-   because it is vJoy's shared ID: 1. Kept: 289.
+   Left out because SDL_gamepad_db.h maps the device on some platform: 362,
+   because controller_list.h lists it: 111, because a HIDAPI driver
+   supports it: 100, because SDL types it as a flight stick or a wheel: 2,
+   because it is vJoy's shared ID: 1. Kept: 286.
 */
     "03000000000f00000100000000000000,NES Controller,a:b1,b:b0,back:b2,dpdown:+a1,dpleft:-a0,dpright:+a0,dpup:-a1,start:b3,",
     "03000000008000000210000000000000,8BitDo F30,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b6,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,righttrigger:b9,rightx:a2,righty:a5,start:b11,x:b3,y:b4,",
@@ -95,7 +95,6 @@
     "03000000373500000410000000000000,GameSir T4 Kaleid,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b4,leftstick:b8,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b9,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,",
     "03000000373500000710000000000000,Anbernic RG P01,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",
     "03000000373500001611000000000000,GameSir X5 Lite,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",
-    "03000000373500002210000000000000,GameSir G7 Pro,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",
     "03000000373500004610000000000000,Anbernic RG P01,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,misc1:b15,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",
     "03000000373500009410000000000000,GameSir Tegenaria Lite,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",
     "03000000380800001889000000000000,AtGames Legends Gamer Pro,a:b1,b:b2,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b13,lefttrigger:b14,rightshoulder:b5,righttrigger:b7,start:b9,x:b0,y:b3,",
@@ -213,7 +212,6 @@
     "03000000a30600000701000000000000,Saitek P220,a:b2,b:b3,dpdown:+a1,dpleft:-a0,dpright:+a0,dpup:-a1,leftshoulder:b6,lefttrigger:b7,rightshoulder:b4,righttrigger:b5,x:b0,y:b1,",
     "03000000a30600000d5f000000000000,Saitek P2600,a:b1,b:b2,back:b9,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b4,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,righttrigger:b7,rightx:a3,righty:a2,start:b8,x:b0,y:b3,",
     "03000000a30600000dff000000000000,Saitek P2600,a:b1,b:b2,back:b9,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b4,leftstick:b10,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:b7,rightx:a5,righty:a2,start:b8,x:b0,y:b3,",
-    "03000000a30c00002400000000000000,Sega Mega Drive Mini 6B Controller,a:b2,b:b1,back:b8,dpdown:+a4,dpleft:-a3,dpright:+a3,dpup:-a4,leftshoulder:b6,lefttrigger:b7,rightshoulder:b4,righttrigger:b5,start:b9,x:b3,y:b0,",
     "03000000a30c00002500000000000000,Sega Genesis Mini 3B Controller,a:b2,b:b1,dpdown:+a4,dpleft:-a3,dpright:+a3,dpup:-a4,righttrigger:b5,start:b9,",
     "03000000a30c00002700000000000000,Astro City Mini,a:b2,b:b1,back:b8,dpdown:+a4,dpleft:-a3,dpright:+a3,dpup:-a4,rightshoulder:b4,righttrigger:b5,start:b9,x:b3,y:b0,",
     "03000000a30c00002800000000000000,Astro City Mini,a:b2,b:b1,back:b8,leftx:a3,lefty:a4,rightshoulder:b4,righttrigger:b5,start:b9,x:b3,y:b0,",
@@ -267,7 +265,6 @@
     "03000000c82d00001028000000000000,8BitDo F30 Arcade Joystick,a:b0,b:b1,back:b10,leftshoulder:b6,leftx:a0,lefty:a1,rightshoulder:b7,start:b11,x:b3,y:b4,",
     "03000000c82d00001151000000000000,8BitDo Lite SE,a:b1,b:b0,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b4,y:b3,",
     "03000000c82d000011ab000000000000,8BitDo F30 Arcade Joystick,a:b1,b:b0,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b2,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b4,y:b3,",
-    "03000000c82d00001230000000000000,8BitDo Ultimate,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,paddle1:b2,paddle2:b5,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",
     "03000000c82d00001251000000000000,8BitDo Lite 2,a:b1,b:b0,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b4,y:b3,",
     "03000000c82d000012ab000000000000,8BitDo NES30,a:b1,b:b0,back:b10,leftshoulder:b6,leftx:a0,lefty:a1,rightshoulder:b7,start:b11,x:b4,y:b3,",
     "03000000c82d00001530000000000000,8BitDo Ultimate C,a:b0,b:b1,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a3,righty:a4,start:b11,x:b3,y:b4,",

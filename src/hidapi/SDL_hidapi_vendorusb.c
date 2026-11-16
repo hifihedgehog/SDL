@@ -30,8 +30,9 @@
  */
 static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
     /* The Wii U GameCube adapter. Its interface is HID class, but Windows
-     * gives no usable input through it, and the driver uses libusb. */
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+     * gives no usable input through it, and the driver uses libusb. On macOS
+     * the HID backend reads it (libsdl-org/SDL f881e74d67). */
+    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, SDL_VENDORUSB_NOT_MACOS, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 
     /* The Xbox 360 Big Button receiver has no HID interface. Its one vendor
      * interface is class 0xFF, subclass 0x5D, protocol 4. */
@@ -190,15 +191,17 @@ static const SDL_VendorUSBRule SDL_vendorusb_rules[] = {
 #undef SDL_VENDORUSB_TACX
 };
 
-/* Devices that need libusb on every platform. The Switch 2 devices carry
- * their input on a HID interface, so on Windows the platform backend reads
- * them and their drivers open WinUSB separately for bulk I/O. */
+/* Devices that need libusb on every platform, or on every platform but
+ * macOS with SDL_VENDORUSB_NOT_MACOS. The Switch 2 devices carry their input
+ * on a HID interface, so on Windows the platform backend reads them and their
+ * drivers open WinUSB separately for bulk I/O. */
 static const struct
 {
     uint16_t vendor;
     uint16_t product;
+    uint8_t flags;
 } SDL_vendorusb_libusb_required[] = {
-    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER },
+    { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_GAMECUBE_ADAPTER, SDL_VENDORUSB_NOT_MACOS },
     { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER },
     { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT },
     { USB_VENDOR_NINTENDO, USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT },
@@ -251,7 +254,8 @@ bool SDL_VendorUSB_IsVendorDevice(uint16_t vendor, uint16_t product)
 
 bool SDL_VendorUSB_RuleApplies(const SDL_VendorUSBRule *rule, SDL_VendorUSBPlatform platform)
 {
-    return rule && (!(rule->flags & SDL_VENDORUSB_WINDOWS_ONLY) || platform == SDL_VENDORUSB_PLATFORM_WINDOWS);
+    return rule && (!(rule->flags & SDL_VENDORUSB_WINDOWS_ONLY) || platform == SDL_VENDORUSB_PLATFORM_WINDOWS) &&
+           (!(rule->flags & SDL_VENDORUSB_NOT_MACOS) || platform != SDL_VENDORUSB_PLATFORM_MACOS);
 }
 
 bool SDL_VendorUSB_RequiresLibUSB(SDL_VendorUSBPlatform platform, uint16_t vendor, uint16_t product,
@@ -261,7 +265,8 @@ bool SDL_VendorUSB_RequiresLibUSB(SDL_VendorUSBPlatform platform, uint16_t vendo
 
     for (i = 0; i < VENDORUSB_ARRAYSIZE(SDL_vendorusb_libusb_required); ++i) {
         if (SDL_vendorusb_libusb_required[i].vendor == vendor &&
-            SDL_vendorusb_libusb_required[i].product == product) {
+            SDL_vendorusb_libusb_required[i].product == product &&
+            !(platform == SDL_VENDORUSB_PLATFORM_MACOS && (SDL_vendorusb_libusb_required[i].flags & SDL_VENDORUSB_NOT_MACOS))) {
             return true;
         }
     }

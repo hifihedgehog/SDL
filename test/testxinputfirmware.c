@@ -305,23 +305,68 @@ static void Stop(void)
     SDL_UnlockJoysticks();
 }
 
+/* The driver's device records for the connected slots, in slot order, as
+   SDL's joystick core queries them. The caller frees them with Release. */
+static SDL_JoystickDevice *Query(void)
+{
+    SDL_JoystickDevice *devices;
+
+    SDL_LockJoysticks();
+    devices = SDL_XINPUT_JoystickDriver.QueryDevices();
+    SDL_UnlockJoysticks();
+    return devices;
+}
+
+static void Release(SDL_JoystickDevice *devices)
+{
+    SDL_LockJoysticks();
+    while (devices) {
+        SDL_JoystickDevice *next = devices->next;
+        SDL_DestroyJoystickDevice(devices);
+        devices = next;
+    }
+    SDL_UnlockJoysticks();
+}
+
+static SDL_JoystickDevice *Nth(SDL_JoystickDevice *devices, int device_index)
+{
+    while (devices && device_index-- > 0) {
+        devices = devices->next;
+    }
+    return devices;
+}
+
+/* Opens the joystick of the device_index-th listed slot, as SDL_OpenJoystick
+   opens a published device: the core sets the name, path and GUID after the
+   driver's open */
 static SDL_Joystick *Open(int device_index)
 {
-    SDL_Joystick *joystick = (SDL_Joystick *)SDL_calloc(1, sizeof(*joystick));
+    SDL_JoystickDevice *devices = Query();
+    SDL_JoystickDevice *device = Nth(devices, device_index);
+    SDL_Joystick *joystick;
     bool opened;
 
-    if (!joystick) {
+    if (!device) {
+        Release(devices);
+        SDL_SetError("no slot %d is listed", device_index);
         return NULL;
     }
-    joystick->instance_id = SDL_XINPUT_JoystickDriver.GetDeviceInstanceID(device_index);
-    joystick->guid = SDL_XINPUT_JoystickDriver.GetDeviceGUID(device_index);
+    joystick = (SDL_Joystick *)SDL_calloc(1, sizeof(*joystick));
+    if (!joystick) {
+        Release(devices);
+        return NULL;
+    }
+    device->instance_id = SDL_GetNextObjectID();
+    joystick->instance_id = device->instance_id;
     joystick->attached = true;
     joystick->ref_count = 1;
     SDL_SetObjectValid(joystick, SDL_OBJECT_TYPE_JOYSTICK, true);
 
     SDL_LockJoysticks();
-    opened = SDL_XINPUT_JoystickDriver.Open(joystick, device_index);
+    opened = SDL_XINPUT_JoystickDriver.Open(joystick, device);
     SDL_UnlockJoysticks();
+    joystick->guid = device->guid;
+    Release(devices);
     if (opened) {
         // The arrays SDL_OpenJoystick allocates after the driver's open
         joystick->axes = (SDL_JoystickAxisInfo *)SDL_calloc((size_t)joystick->naxes, sizeof(*joystick->axes));
@@ -411,17 +456,19 @@ typedef struct Listing
 
 static void ReadListing(Listing *listing)
 {
-    int i;
+    SDL_JoystickDevice *devices = Query();
+    SDL_JoystickDevice *device;
 
     SDL_zerop(listing);
-    SDL_LockJoysticks();
-    listing->count = SDL_XINPUT_JoystickDriver.GetCount();
-    for (i = 0; i < listing->count && i < XUSER_MAX_COUNT; ++i) {
-        SDL_strlcpy(listing->names[i], SDL_XINPUT_JoystickDriver.GetDeviceName(i), sizeof(listing->names[i]));
-        SDL_strlcpy(listing->paths[i], SDL_XINPUT_JoystickDriver.GetDevicePath(i), sizeof(listing->paths[i]));
-        listing->guids[i] = SDL_XINPUT_JoystickDriver.GetDeviceGUID(i);
+    for (device = devices; device; device = device->next) {
+        if (listing->count < XUSER_MAX_COUNT) {
+            SDL_strlcpy(listing->names[listing->count], device->name, sizeof(listing->names[listing->count]));
+            SDL_strlcpy(listing->paths[listing->count], device->path, sizeof(listing->paths[listing->count]));
+            listing->guids[listing->count] = device->guid;
+        }
+        ++listing->count;
     }
-    SDL_UnlockJoysticks();
+    Release(devices);
 }
 
 /* The two pads in slots 0 and 1, GameInput listing them and a HIDMaestro
@@ -465,7 +512,8 @@ static void RunListing(const char *name, bool gameinput, bool register_fails, bo
         Update(joysticks[i]);
         versions[i] = Reported(joysticks[i]);
     }
-    *added = joysticks_added;
+    /* The driver lists each joystick SDL's joystick core would publish */
+    *added = listing->count;
     for (i = 0; i < 2; ++i) {
         Close(joysticks[i]);
     }
@@ -751,11 +799,8 @@ static void TestThreads(void)
     Close(joystick);
 
     xf_scenario = "a flood of callbacks during updates";
+    /* The connected slot shows in the next query */
     ScriptSlot(1, XUSB_B, 0x0B00);
-    notification++;
-    SDL_LockJoysticks();
-    SDL_XINPUT_JoystickDriver.Detect();
-    SDL_UnlockJoysticks();
     joystick = Open(1);
     CHECK(Reported(joystick) == 0, "the open reported 0x%04x", Reported(joystick));
     FakeGI_StartFlood(a, 2000);

@@ -290,17 +290,16 @@ static bool SupportedGameInputDevice(IGameInputDevice *pDevice)
 #endif
 
     if (GAMEINPUT_InternalIsGamepad(pDevice)) {
-        // PadForge fork: a raw instrument that is also a gamepad stays while the gamepad hint is off
-        if (SDL_GameInputLeavesGamepad(SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT), raw_type)) {
-            return false;
-        }
+        bool directinput_takes_it = false;
 #if defined(SDL_JOYSTICK_DINPUT)
         // DirectInput sees devices sooner and has more mappings, so let it handle everything except XInput controllers
-        if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_DIRECTINPUT, true) &&
-            !IsXInputGameInputDevice(pDevice, vendor, product)) {
+        directinput_takes_it = SDL_GetHintBoolean(SDL_HINT_JOYSTICK_DIRECTINPUT, true) &&
+                               !IsXInputGameInputDevice(pDevice, vendor, product);
+#endif
+        // PadForge fork: a raw instrument that is also a gamepad stays on the raw report path
+        if (SDL_GameInputLeavesGamepad(SDL_GetHintBoolean(SDL_HINT_JOYSTICK_GAMEINPUT, SDL_GAMEINPUT_DEFAULT), directinput_takes_it, raw_type)) {
             return false;
         }
-#endif
     } else if (raw_type == SDL_GAMEINPUT_RAWTYPE_NONE) {
 #if defined(SDL_JOYSTICK_DINPUT)
         // Let other backends handle non-gamepad controllers to possibly avoid bugs and/or regressions.

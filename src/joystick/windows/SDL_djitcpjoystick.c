@@ -596,7 +596,7 @@ static void DJITCP_StopHost(DJITCP_Host *host, bool notify)
             joystick->hwdata->host = NULL;
         }
         if (notify) {
-            SDL_PrivateJoystickRemoved(host->instance_id);
+            SDL_RemoveJoystickDevice(host->instance_id);
         }
         host->registered = 0;
     }
@@ -671,6 +671,32 @@ static void DJITCP_ApplyHint(void)
     }
 }
 
+/* Publishes the joystick of a host, under the joystick lock, or leaves the
+   host unregistered when the record cannot be made. The core asks
+   for the gamepad mapping inside SDL_AddJoystickDevice (SDL_IsGamepad in
+   SDL_PrivateJoystickAdded) and keeps the answer for the instance ID, so the
+   host holds its instance ID and generation before the add, for
+   DJITCP_FindHost. */
+static void DJITCP_PublishDevice(DJITCP_Host *host, uint32_t generation)
+{
+    SDL_JoystickDevice *device = SDL_CreateJoystickDevice(&SDL_DJITCP_JoystickDriver, 0);
+
+    if (!device) {
+        return;
+    }
+    device->name = SDL_strdup(host->joystick_identity.name);
+    device->path = SDL_strdup(host->address.key);
+    if (!device->name || !device->path) {
+        SDL_DestroyJoystickDevice(device);
+        return;
+    }
+    device->guid = host->guid;
+    device->instance_id = SDL_GetNextObjectID();
+    host->instance_id = device->instance_id;
+    host->registered = generation;
+    SDL_AddJoystickDevice(device);
+}
+
 static void DJITCP_CheckPresence(DJITCP_Host *host)
 {
     SDL_SerialIdentity identity;
@@ -687,40 +713,35 @@ static void DJITCP_CheckPresence(DJITCP_Host *host)
         if (joystick && joystick->hwdata) {
             joystick->hwdata->host = NULL;
         }
-        SDL_PrivateJoystickRemoved(host->instance_id);
+        SDL_RemoveJoystickDevice(host->instance_id);
         host->registered = 0;
     }
     if (!host->registered && generation) {
         /* SDL's device lists, SDL_HINT_JOYSTICK_BLACKLIST_DEVICES and
            SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES with its _EXCEPT allow
-           list, read here in Detect under the joystick lock, which the WGI
-           driver also holds when it reads them. A remote carries no VID or
-           PID, so it is checked as 0000:0000 with its joystick name, and an
-           allow list leaves out every remote. A remote left out keeps its
-           links, since the hint names it, and gets no joystick. Each
-           presence is checked anew. */
+           list, read here in DetectDevices under the joystick lock. A
+           remote carries no VID or PID, so it is checked as 0000:0000 with
+           its joystick name, and an allow list leaves out every remote. A
+           remote left out keeps its links, since the hint names it, and gets
+           no joystick. Each presence is checked anew. */
         if (SDL_ShouldIgnoreJoystick(0, 0, 0, identity.name)) {
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "DJI remote %s (%s): ignored by SDL's device lists", host->address.key, identity.name);
             return;
         }
-        host->registered = generation;
         host->joystick_identity = identity;
-        host->instance_id = SDL_GetNextObjectID();
         /* Vendor 0 puts the name in the GUID. 'd' is this driver's. */
         host->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_UNKNOWN, 0, 0, 0, NULL, identity.name, 'd', 0);
-        SDL_PrivateJoystickAdded(host->instance_id);
+        DJITCP_PublishDevice(host, generation);
     }
 }
 
-static DJITCP_Host *DJITCP_GetDevice(int device_index)
+/* The registered host with the joystick, or NULL */
+static DJITCP_Host *DJITCP_FindHost(SDL_JoystickID instance_id)
 {
     DJITCP_Host *host;
 
-    if (device_index < 0) {
-        return NULL;
-    }
     for (host = djitcp_hosts; host; host = host->next) {
-        if (host->registered && device_index-- == 0) {
+        if (host->registered && host->instance_id == instance_id) {
             return host;
         }
     }
@@ -749,20 +770,7 @@ static bool DJITCP_JoystickInit(void)
     return true;
 }
 
-static int DJITCP_JoystickGetCount(void)
-{
-    DJITCP_Host *host;
-    int count = 0;
-
-    for (host = djitcp_hosts; host; host = host->next) {
-        if (host->registered) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-static void DJITCP_JoystickDetect(void)
+static void DJITCP_JoystickDetectDevices(void)
 {
     DJITCP_Host *host;
 
@@ -777,67 +785,6 @@ static void DJITCP_JoystickDetect(void)
         }
         DJITCP_FlushNotes(host);
     }
-}
-
-/* A remote on the network is no other driver's device */
-static bool DJITCP_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
-{
-    (void)vendor_id;
-    (void)product_id;
-    (void)version;
-    (void)name;
-    return false;
-}
-
-static const char *DJITCP_JoystickGetDeviceName(int device_index)
-{
-    DJITCP_Host *host = DJITCP_GetDevice(device_index);
-
-    return host ? host->joystick_identity.name : NULL;
-}
-
-static const char *DJITCP_JoystickGetDevicePath(int device_index)
-{
-    DJITCP_Host *host = DJITCP_GetDevice(device_index);
-
-    return host ? host->address.key : NULL;
-}
-
-static int DJITCP_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static int DJITCP_JoystickGetDevicePlayerIndex(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static void DJITCP_JoystickSetDevicePlayerIndex(int device_index, int player_index)
-{
-    (void)device_index;
-    (void)player_index;
-}
-
-static SDL_GUID DJITCP_JoystickGetDeviceGUID(int device_index)
-{
-    DJITCP_Host *host = DJITCP_GetDevice(device_index);
-    SDL_GUID guid;
-
-    if (!host) {
-        SDL_zero(guid);
-        return guid;
-    }
-    return host->guid;
-}
-
-static SDL_JoystickID DJITCP_JoystickGetDeviceInstanceID(int device_index)
-{
-    DJITCP_Host *host = DJITCP_GetDevice(device_index);
-
-    return host ? host->instance_id : 0;
 }
 
 static void DJITCP_SendControls(SDL_Joystick *joystick, const SDL_SerialControls *controls, Uint64 timestamp)
@@ -863,13 +810,13 @@ static void DJITCP_SendBattery(SDL_Joystick *joystick, int battery)
     }
 }
 
-static bool DJITCP_JoystickOpen(SDL_Joystick *joystick, int device_index)
+static bool DJITCP_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *device)
 {
-    DJITCP_Host *host = DJITCP_GetDevice(device_index);
+    DJITCP_Host *host = DJITCP_FindHost(device->instance_id);
     struct joystick_hwdata *hwdata;
 
     if (!host) {
-        return SDL_SetError("DJI remote index out of range");
+        return SDL_SetError("DJI remote disconnected");
     }
     hwdata = (struct joystick_hwdata *)SDL_calloc(1, sizeof(*hwdata));
     if (!hwdata) {
@@ -1026,9 +973,9 @@ static void DJITCP_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
     out->target = in->target;
 }
 
-static bool DJITCP_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+static bool DJITCP_JoystickGetGamepadMapping(SDL_JoystickDevice *device, SDL_GamepadMapping *out)
 {
-    DJITCP_Host *host = DJITCP_GetDevice(device_index);
+    DJITCP_Host *host = DJITCP_FindHost(device->instance_id);
     const SDL_SerialGamepadMap *map;
 
     if (!host || !host->joystick_identity.has_mapping) {
@@ -1061,28 +1008,21 @@ static bool DJITCP_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappin
     return true;
 }
 
+/* A remote is published with SDL_AddJoystickDevice when it appears, so the
+   driver has no QueryDevices or PrepareDevice */
 SDL_JoystickDriver SDL_DJITCP_JoystickDriver = {
-    DJITCP_JoystickInit,
-    DJITCP_JoystickGetCount,
-    DJITCP_JoystickDetect,
-    DJITCP_JoystickIsDevicePresent,
-    DJITCP_JoystickGetDeviceName,
-    DJITCP_JoystickGetDevicePath,
-    DJITCP_JoystickGetDeviceSteamVirtualGamepadSlot,
-    DJITCP_JoystickGetDevicePlayerIndex,
-    DJITCP_JoystickSetDevicePlayerIndex,
-    DJITCP_JoystickGetDeviceGUID,
-    DJITCP_JoystickGetDeviceInstanceID,
-    DJITCP_JoystickOpen,
-    DJITCP_JoystickRumble,
-    DJITCP_JoystickRumbleTriggers,
-    DJITCP_JoystickSetLED,
-    DJITCP_JoystickSendEffect,
-    DJITCP_JoystickSetSensorsEnabled,
-    DJITCP_JoystickUpdate,
-    DJITCP_JoystickClose,
-    DJITCP_JoystickQuit,
-    DJITCP_JoystickGetGamepadMapping
+    .Init = DJITCP_JoystickInit,
+    .DetectDevices = DJITCP_JoystickDetectDevices,
+    .GetGamepadMapping = DJITCP_JoystickGetGamepadMapping,
+    .Open = DJITCP_JoystickOpen,
+    .Rumble = DJITCP_JoystickRumble,
+    .RumbleTriggers = DJITCP_JoystickRumbleTriggers,
+    .SetLED = DJITCP_JoystickSetLED,
+    .SendEffect = DJITCP_JoystickSendEffect,
+    .SetSensorsEnabled = DJITCP_JoystickSetSensorsEnabled,
+    .Update = DJITCP_JoystickUpdate,
+    .Close = DJITCP_JoystickClose,
+    .Quit = DJITCP_JoystickQuit
 };
 
 #endif /* SDL_JOYSTICK_DJI_TCP */

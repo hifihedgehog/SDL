@@ -1055,7 +1055,7 @@ static void BLEGATT_RemoveJoystick(BLEGATT_Connection *connection, bool notify)
             joystick->hwdata->connection = NULL;
         }
         if (notify) {
-            SDL_PrivateJoystickRemoved(connection->instance_id);
+            SDL_RemoveJoystickDevice(connection->instance_id);
         }
         connection->registered = 0;
     }
@@ -1297,6 +1297,32 @@ static SDL_GUID BLEGATT_CreateGUID(int family, Uint8 variant, const SDL_BLEIdent
                                   identity->type);
 }
 
+/* Publishes the joystick of a connection, under the joystick lock, or leaves
+   the connection unregistered when the record cannot be made. The core asks
+   for the gamepad mapping inside SDL_AddJoystickDevice (SDL_IsGamepad in
+   SDL_PrivateJoystickAdded) and keeps the answer for the instance ID, so the
+   connection holds its instance ID and generation before the add, for
+   BLEGATT_FindConnection. */
+static void BLEGATT_PublishDevice(BLEGATT_Connection *connection, Uint32 generation)
+{
+    SDL_JoystickDevice *device = SDL_CreateJoystickDevice(&SDL_BLEGATT_JoystickDriver, 0);
+
+    if (!device) {
+        return;
+    }
+    device->name = SDL_strdup(connection->joystick_identity.name);
+    device->path = SDL_strdup(connection->path);
+    if (!device->name || !device->path) {
+        SDL_DestroyJoystickDevice(device);
+        return;
+    }
+    device->guid = connection->guid;
+    device->instance_id = SDL_GetNextObjectID();
+    connection->instance_id = device->instance_id;
+    connection->registered = generation;
+    SDL_AddJoystickDevice(device);
+}
+
 static void BLEGATT_CheckPresence(BLEGATT_Connection *connection)
 {
     SDL_BLEIdentity identity;
@@ -1313,35 +1339,30 @@ static void BLEGATT_CheckPresence(BLEGATT_Connection *connection)
     if (!connection->registered && generation) {
         /* SDL's ignore lists, SDL_HINT_JOYSTICK_BLACKLIST_DEVICES and
            SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES and its _EXCEPT, by the
-           identity's vendor, product and name, checked here in Detect under
-           the joystick lock, as the WGI driver checks them
-           (SDL_windows_gaming_input.c:457). Only the Daydream reports IDs,
-           so a list of IDs names no other family, and an allow list leaves
-           out every family it does not name. An ignored device keeps its
-           connection and gets no joystick. Presence changes only with a
-           publish or a removal, so the lists are read once per publish. */
+           identity's vendor, product and name, checked here in DetectDevices
+           under the joystick lock. Only the Daydream reports IDs, so a list
+           of IDs names no other family, and an allow list leaves out every
+           family it does not name. An ignored device keeps its connection
+           and gets no joystick. Presence changes only with a publish or a
+           removal, so the lists are read once per publish. */
         if (SDL_ShouldIgnoreJoystick(identity.vendor, identity.product, 0, identity.name)) {
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE GATT %s (%s): ignored by SDL's device lists", connection->path,
                          BLEGATT_Family(connection)->name);
             return;
         }
-        connection->registered = generation;
         connection->joystick_identity = identity;
-        connection->instance_id = SDL_GetNextObjectID();
         connection->guid = BLEGATT_CreateGUID(connection->family, connection->variant, &identity);
-        SDL_PrivateJoystickAdded(connection->instance_id);
+        BLEGATT_PublishDevice(connection, generation);
     }
 }
 
-static BLEGATT_Connection *BLEGATT_GetConnection(int device_index)
+/* The registered connection with the joystick, or NULL */
+static BLEGATT_Connection *BLEGATT_FindConnection(SDL_JoystickID instance_id)
 {
     BLEGATT_Connection *connection;
 
-    if (device_index < 0) {
-        return NULL;
-    }
     for (connection = blegatt_connections; connection; connection = connection->next) {
-        if (connection->registered && device_index-- == 0) {
+        if (connection->registered && connection->instance_id == instance_id) {
             return connection;
         }
     }
@@ -1373,8 +1394,9 @@ static void SDLCALL BLEGATT_HintChanged(void *userdata, const char *name, const 
    any time. The advertisement watcher starts only when a family is on, so
    no BLE scan runs unless the app opts in. The transport's runtime starts
    here and ends in Quit, so its RoInitialize and RoUninitialize run on the
-   thread that initializes and quits the joystick subsystem, as the WGI
-   driver's do (SDL_windows_gaming_input.c:595-598 and :1007-1009). */
+   thread that initializes and quits the joystick subsystem, as SDL's
+   Windows.Gaming.Input driver's did (SDL_windows_gaming_input.c:595-598 and
+   :1007-1009 before upstream 81b4769b0e removed it). */
 static bool BLEGATT_JoystickInit(void)
 {
     int family;
@@ -1403,25 +1425,12 @@ static bool BLEGATT_JoystickInit(void)
         SDL_AddHintCallback(blegatt_family_hints[family], BLEGATT_HintChanged, NULL);
     }
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_BLE_PAIRING, BLEGATT_HintChanged, NULL);
-    /* The callbacks run at once, so Detect applies the hints first */
+    /* The callbacks run at once, so DetectDevices applies the hints first */
     SDL_SetAtomicInt(&blegatt_hints_changed, 1);
     return true;
 }
 
-static int BLEGATT_JoystickGetCount(void)
-{
-    BLEGATT_Connection *connection;
-    int count = 0;
-
-    for (connection = blegatt_connections; connection; connection = connection->next) {
-        if (connection->registered) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-static void BLEGATT_JoystickDetect(void)
+static void BLEGATT_JoystickDetectDevices(void)
 {
     BLEGATT_Connection *connection;
 
@@ -1445,67 +1454,6 @@ static void BLEGATT_JoystickDetect(void)
         }
     }
     BLEGATT_ReapConnections(false);
-}
-
-/* A vendor GATT service is no other driver's device */
-static bool BLEGATT_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
-{
-    (void)vendor_id;
-    (void)product_id;
-    (void)version;
-    (void)name;
-    return false;
-}
-
-static const char *BLEGATT_JoystickGetDeviceName(int device_index)
-{
-    BLEGATT_Connection *connection = BLEGATT_GetConnection(device_index);
-
-    return connection ? connection->joystick_identity.name : NULL;
-}
-
-static const char *BLEGATT_JoystickGetDevicePath(int device_index)
-{
-    BLEGATT_Connection *connection = BLEGATT_GetConnection(device_index);
-
-    return connection ? connection->path : NULL;
-}
-
-static int BLEGATT_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static int BLEGATT_JoystickGetDevicePlayerIndex(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static void BLEGATT_JoystickSetDevicePlayerIndex(int device_index, int player_index)
-{
-    (void)device_index;
-    (void)player_index;
-}
-
-static SDL_GUID BLEGATT_JoystickGetDeviceGUID(int device_index)
-{
-    BLEGATT_Connection *connection = BLEGATT_GetConnection(device_index);
-    SDL_GUID guid;
-
-    if (!connection) {
-        SDL_zero(guid);
-        return guid;
-    }
-    return connection->guid;
-}
-
-static SDL_JoystickID BLEGATT_JoystickGetDeviceInstanceID(int device_index)
-{
-    BLEGATT_Connection *connection = BLEGATT_GetConnection(device_index);
-
-    return connection ? connection->instance_id : 0;
 }
 
 static void BLEGATT_SendControls(SDL_Joystick *joystick, struct joystick_hwdata *hwdata, const SDL_BLEControls *controls,
@@ -1561,15 +1509,15 @@ static Uint64 BLEGATT_Stamp(struct joystick_hwdata *hwdata, Uint64 time)
     return time;
 }
 
-static bool BLEGATT_JoystickOpen(SDL_Joystick *joystick, int device_index)
+static bool BLEGATT_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *device)
 {
-    BLEGATT_Connection *connection = BLEGATT_GetConnection(device_index);
+    BLEGATT_Connection *connection = BLEGATT_FindConnection(device->instance_id);
     const SDL_BLEIdentity *identity;
     struct joystick_hwdata *hwdata;
     char serial[13];
 
     if (!connection) {
-        return SDL_SetError("BLE GATT device index out of range");
+        return SDL_SetError("BLE GATT device disconnected");
     }
     hwdata = (struct joystick_hwdata *)SDL_calloc(1, sizeof(*hwdata));
     if (!hwdata) {
@@ -1684,13 +1632,11 @@ static void BLEGATT_JoystickUpdate(SDL_Joystick *joystick)
         hwdata->send_initial = false;
         /* Every axis rests where the module contract puts it: 0, and -32768
            for a gamepad trigger (SDL_BLE_RestControls). SDL's core presets
-           rest values only for its HIDAPI, XInput, RawInput and WGI GUIDs
-           (SDL_joystick.c:1484-1510). Without them SDL_SendJoystickAxis takes
-           a trigger's first reading near the middle for its rest
-           (SDL_joystick.c:2801-2806). Seeding the rest values keeps them, and
-           SDL then passes every later value on, as it does for the fork's
-           data axes (SDL_hidapi_ps3.c:1204-1206, SDL_xinputjoystick.c:426-427,
-           SDL_ble_switch2joystick.c:1117-1120). */
+           rest values only for its HIDAPI and XInput GUIDs (SDL_OpenJoystick).
+           Without them SDL_SendJoystickAxis takes a trigger's first reading
+           near the middle for its rest. Seeding the rest values keeps them,
+           and SDL then passes every later value on, as it does for the fork's
+           data axes (SDL_SeedJoystickDataAxis). */
         SDL_BLE_RestControls(&connection->joystick_identity, &rest);
         for (i = 0; i < joystick->naxes; ++i) {
             SDL_SeedJoystickDataAxis(joystick, (Uint8)i, rest.axes[i]);
@@ -1834,9 +1780,9 @@ static void BLEGATT_MapAxis(SDL_InputMapping *mapping, const SDL_BLEIdentity *id
 /* The identity mapping the GameInput driver fills, for the buttons and axes
    the device has. The D-pad is buttons instead of a hat, and each trigger is
    a full axis that rests at -32768. The Myo is a plain joystick. */
-static bool BLEGATT_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+static bool BLEGATT_JoystickGetGamepadMapping(SDL_JoystickDevice *device, SDL_GamepadMapping *out)
 {
-    BLEGATT_Connection *connection = BLEGATT_GetConnection(device_index);
+    BLEGATT_Connection *connection = BLEGATT_FindConnection(device->instance_id);
     const SDL_BLEIdentity *identity;
 
     if (!connection || !connection->joystick_identity.gamepad) {
@@ -1868,28 +1814,21 @@ static bool BLEGATT_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappi
     return true;
 }
 
+/* A connection is published with SDL_AddJoystickDevice when its session
+   publishes an identity, so the driver has no QueryDevices or PrepareDevice */
 SDL_JoystickDriver SDL_BLEGATT_JoystickDriver = {
-    BLEGATT_JoystickInit,
-    BLEGATT_JoystickGetCount,
-    BLEGATT_JoystickDetect,
-    BLEGATT_JoystickIsDevicePresent,
-    BLEGATT_JoystickGetDeviceName,
-    BLEGATT_JoystickGetDevicePath,
-    BLEGATT_JoystickGetDeviceSteamVirtualGamepadSlot,
-    BLEGATT_JoystickGetDevicePlayerIndex,
-    BLEGATT_JoystickSetDevicePlayerIndex,
-    BLEGATT_JoystickGetDeviceGUID,
-    BLEGATT_JoystickGetDeviceInstanceID,
-    BLEGATT_JoystickOpen,
-    BLEGATT_JoystickRumble,
-    BLEGATT_JoystickRumbleTriggers,
-    BLEGATT_JoystickSetLED,
-    BLEGATT_JoystickSendEffect,
-    BLEGATT_JoystickSetSensorsEnabled,
-    BLEGATT_JoystickUpdate,
-    BLEGATT_JoystickClose,
-    BLEGATT_JoystickQuit,
-    BLEGATT_JoystickGetGamepadMapping
+    .Init = BLEGATT_JoystickInit,
+    .DetectDevices = BLEGATT_JoystickDetectDevices,
+    .GetGamepadMapping = BLEGATT_JoystickGetGamepadMapping,
+    .Open = BLEGATT_JoystickOpen,
+    .Rumble = BLEGATT_JoystickRumble,
+    .RumbleTriggers = BLEGATT_JoystickRumbleTriggers,
+    .SetLED = BLEGATT_JoystickSetLED,
+    .SendEffect = BLEGATT_JoystickSendEffect,
+    .SetSensorsEnabled = BLEGATT_JoystickSetSensorsEnabled,
+    .Update = BLEGATT_JoystickUpdate,
+    .Close = BLEGATT_JoystickClose,
+    .Quit = BLEGATT_JoystickQuit
 };
 
 #endif /* SDL_JOYSTICK_BLE */

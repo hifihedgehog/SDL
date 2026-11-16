@@ -755,7 +755,7 @@ static void RFCOMM_RemoveJoystick(RFCOMM_Device *device, bool notify)
             joystick->hwdata->device = NULL;
         }
         if (notify) {
-            SDL_PrivateJoystickRemoved(device->instance_id);
+            SDL_RemoveJoystickDevice(device->instance_id);
         }
         device->registered = 0;
     }
@@ -822,10 +822,9 @@ static bool RFCOMM_GetEnabled(bool *enabled)
 
 /* SDL's device lists, SDL_HINT_JOYSTICK_BLACKLIST_DEVICES and
    SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES with its _EXCEPT allow list, read in
-   Detect under the joystick lock, which the WGI driver also holds when it
-   reads them. An RFCOMM device carries no VID or PID, so it is checked as
-   0000:0000 with its paired name, and an allow list leaves out every such
-   device. */
+   DetectDevices under the joystick lock. An RFCOMM device carries no VID or
+   PID, so it is checked as 0000:0000 with its paired name, and an allow list
+   leaves out every such device. */
 static bool RFCOMM_IsIgnored(void *userdata, const SDL_RFCOMMDevice *device)
 {
     (void)userdata;
@@ -882,6 +881,32 @@ static void RFCOMM_ApplyDevices(void)
     }
 }
 
+/* Publishes the joystick of a device, under the joystick lock, or leaves the
+   device unregistered when the record cannot be made. The core asks
+   for the gamepad mapping inside SDL_AddJoystickDevice (SDL_IsGamepad in
+   SDL_PrivateJoystickAdded) and keeps the answer for the instance ID, so the
+   device holds its instance ID and generation before the add, for
+   RFCOMM_FindDevice. */
+static void RFCOMM_PublishDevice(RFCOMM_Device *device, uint32_t generation)
+{
+    SDL_JoystickDevice *joystick_device = SDL_CreateJoystickDevice(&SDL_RFCOMM_JoystickDriver, 0);
+
+    if (!joystick_device) {
+        return;
+    }
+    joystick_device->name = SDL_strdup(device->joystick_identity.name);
+    joystick_device->path = SDL_strdup(device->path);
+    if (!joystick_device->name || !joystick_device->path) {
+        SDL_DestroyJoystickDevice(joystick_device);
+        return;
+    }
+    joystick_device->guid = device->guid;
+    joystick_device->instance_id = SDL_GetNextObjectID();
+    device->instance_id = joystick_device->instance_id;
+    device->registered = generation;
+    SDL_AddJoystickDevice(joystick_device);
+}
+
 static void RFCOMM_CheckPresence(RFCOMM_Device *device)
 {
     SDL_SerialIdentity identity;
@@ -898,27 +923,23 @@ static void RFCOMM_CheckPresence(RFCOMM_Device *device)
     if (!device->registered && generation) {
         char key[SDL_RFCOMM_GUID_KEY_LENGTH];
 
-        device->registered = generation;
         device->joystick_identity = identity;
-        device->instance_id = SDL_GetNextObjectID();
         /* Vendor 0 puts a product name in the GUID, of which SDL keeps 9
            bytes, so the name is the family's key (SDL_RFCOMM_GUIDKey). The
            joystick's name stays identity.name. 'b' is this driver's. */
         SDL_RFCOMM_GUIDKey(key, sizeof(key), device->info.family, SDL_crc16(0, identity.name, SDL_strlen(identity.name)), identity.name);
         device->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, 0, 0, 0, NULL, key, 'b', 0);
-        SDL_PrivateJoystickAdded(device->instance_id);
+        RFCOMM_PublishDevice(device, generation);
     }
 }
 
-static RFCOMM_Device *RFCOMM_GetDevice(int device_index)
+/* The registered device with the joystick, or NULL */
+static RFCOMM_Device *RFCOMM_FindDevice(SDL_JoystickID instance_id)
 {
     RFCOMM_Device *device;
 
-    if (device_index < 0) {
-        return NULL;
-    }
     for (device = rfcomm_devices; device; device = device->next) {
-        if (device->registered && device_index-- == 0) {
+        if (device->registered && device->instance_id == instance_id) {
             return device;
         }
     }
@@ -969,25 +990,12 @@ static bool RFCOMM_JoystickInit(void)
     for (family = 1; family < SDL_RFCOMM_FAMILY_COUNT; ++family) {
         SDL_AddHintCallback(rfcomm_family_hints[family], RFCOMM_HintChanged, NULL);
     }
-    /* The callbacks run at once, so Detect applies the hints first */
+    /* The callbacks run at once, so DetectDevices applies the hints first */
     SDL_SetAtomicInt(&rfcomm_hints_changed, 1);
     return true;
 }
 
-static int RFCOMM_JoystickGetCount(void)
-{
-    RFCOMM_Device *device;
-    int count = 0;
-
-    for (device = rfcomm_devices; device; device = device->next) {
-        if (device->registered) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-static void RFCOMM_JoystickDetect(void)
+static void RFCOMM_JoystickDetectDevices(void)
 {
     RFCOMM_Device *device;
     bool apply = false;
@@ -1024,46 +1032,10 @@ static void RFCOMM_JoystickDetect(void)
     RFCOMM_ReapDevices(false);
 }
 
-/* A Bluetooth serial device is no other driver's device */
-static bool RFCOMM_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
-{
-    (void)vendor_id;
-    (void)product_id;
-    (void)version;
-    (void)name;
-    return false;
-}
-
-static const char *RFCOMM_JoystickGetDeviceName(int device_index)
-{
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
-
-    return device ? device->joystick_identity.name : NULL;
-}
-
-static const char *RFCOMM_JoystickGetDevicePath(int device_index)
-{
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
-
-    return device ? device->path : NULL;
-}
-
-static int RFCOMM_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static int RFCOMM_JoystickGetDevicePlayerIndex(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
 /* The MOGA lights the LED of the new id */
-static void RFCOMM_JoystickSetDevicePlayerIndex(int device_index, int player_index)
+static void RFCOMM_JoystickSetPlayerIndex(SDL_Joystick *joystick, int player_index)
 {
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
+    RFCOMM_Device *device = joystick->hwdata ? joystick->hwdata->device : NULL;
 
     if (!device) {
         return;
@@ -1073,25 +1045,6 @@ static void RFCOMM_JoystickSetDevicePlayerIndex(int device_index, int player_ind
     device->player_pending = true;
     SDL_UnlockMutex(device->mutex);
     SetEvent(device->wake_event);
-}
-
-static SDL_GUID RFCOMM_JoystickGetDeviceGUID(int device_index)
-{
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
-    SDL_GUID guid;
-
-    if (!device) {
-        SDL_zero(guid);
-        return guid;
-    }
-    return device->guid;
-}
-
-static SDL_JoystickID RFCOMM_JoystickGetDeviceInstanceID(int device_index)
-{
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
-
-    return device ? device->instance_id : 0;
 }
 
 static void RFCOMM_SendControls(SDL_Joystick *joystick, const SDL_SerialControls *controls, Uint64 timestamp)
@@ -1109,13 +1062,13 @@ static void RFCOMM_SendControls(SDL_Joystick *joystick, const SDL_SerialControls
     }
 }
 
-static bool RFCOMM_JoystickOpen(SDL_Joystick *joystick, int device_index)
+static bool RFCOMM_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *joystick_device)
 {
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
+    RFCOMM_Device *device = RFCOMM_FindDevice(joystick_device->instance_id);
     struct joystick_hwdata *hwdata;
 
     if (!device) {
-        return SDL_SetError("RFCOMM device index out of range");
+        return SDL_SetError("RFCOMM device disconnected");
     }
     hwdata = (struct joystick_hwdata *)SDL_calloc(1, sizeof(*hwdata));
     if (!hwdata) {
@@ -1294,9 +1247,9 @@ static void RFCOMM_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
     out->target = in->target;
 }
 
-static bool RFCOMM_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+static bool RFCOMM_JoystickGetGamepadMapping(SDL_JoystickDevice *joystick_device, SDL_GamepadMapping *out)
 {
-    RFCOMM_Device *device = RFCOMM_GetDevice(device_index);
+    RFCOMM_Device *device = RFCOMM_FindDevice(joystick_device->instance_id);
     const SDL_SerialGamepadMap *map;
 
     if (!device || !device->joystick_identity.has_mapping) {
@@ -1329,28 +1282,22 @@ static bool RFCOMM_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappin
     return true;
 }
 
+/* A device is published with SDL_AddJoystickDevice when its link connects,
+   so the driver has no QueryDevices or PrepareDevice */
 SDL_JoystickDriver SDL_RFCOMM_JoystickDriver = {
-    RFCOMM_JoystickInit,
-    RFCOMM_JoystickGetCount,
-    RFCOMM_JoystickDetect,
-    RFCOMM_JoystickIsDevicePresent,
-    RFCOMM_JoystickGetDeviceName,
-    RFCOMM_JoystickGetDevicePath,
-    RFCOMM_JoystickGetDeviceSteamVirtualGamepadSlot,
-    RFCOMM_JoystickGetDevicePlayerIndex,
-    RFCOMM_JoystickSetDevicePlayerIndex,
-    RFCOMM_JoystickGetDeviceGUID,
-    RFCOMM_JoystickGetDeviceInstanceID,
-    RFCOMM_JoystickOpen,
-    RFCOMM_JoystickRumble,
-    RFCOMM_JoystickRumbleTriggers,
-    RFCOMM_JoystickSetLED,
-    RFCOMM_JoystickSendEffect,
-    RFCOMM_JoystickSetSensorsEnabled,
-    RFCOMM_JoystickUpdate,
-    RFCOMM_JoystickClose,
-    RFCOMM_JoystickQuit,
-    RFCOMM_JoystickGetGamepadMapping
+    .Init = RFCOMM_JoystickInit,
+    .DetectDevices = RFCOMM_JoystickDetectDevices,
+    .GetGamepadMapping = RFCOMM_JoystickGetGamepadMapping,
+    .Open = RFCOMM_JoystickOpen,
+    .Rumble = RFCOMM_JoystickRumble,
+    .RumbleTriggers = RFCOMM_JoystickRumbleTriggers,
+    .SetLED = RFCOMM_JoystickSetLED,
+    .SendEffect = RFCOMM_JoystickSendEffect,
+    .SetSensorsEnabled = RFCOMM_JoystickSetSensorsEnabled,
+    .SetPlayerIndex = RFCOMM_JoystickSetPlayerIndex,
+    .Update = RFCOMM_JoystickUpdate,
+    .Close = RFCOMM_JoystickClose,
+    .Quit = RFCOMM_JoystickQuit
 };
 
 #endif /* SDL_JOYSTICK_RFCOMM */

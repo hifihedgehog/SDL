@@ -13,31 +13,37 @@
 /* Runs SDL's GameInput joystick driver against a scripted GameInput, for
    hifihedgehog/SDL#45. SDL_QuitJoysticks holds the joystick lock across each
    driver's quit, and GameInput 4.0.302 makes UnregisterCallback wait for a
-   running callback, as the hifihedgehog/SDL#44 bench measured. The driver's
-   device callback therefore queues each event under a lock of its own, and
-   the driver's detect applies the queue under the joystick lock.
+   running callback, as the hifihedgehog/SDL#44 bench measured. A device
+   callback that waited on the joystick lock could therefore hold the quit
+   forever. The driver's callback takes only a spinlock around its device
+   list and asks SDL's joystick core for a device update.
 
-   The driver starts, detects and quits under the joystick lock, as
-   SDL_InitJoysticks, SDL_UpdateJoysticks and SDL_QuitJoysticks call it. SDL's
-   joystick subsystem never starts, so no other driver runs and no device
-   opens. The scripted devices are the raw-report instruments PadForge's
-   build lists by default: GameInput's gamepads stay off and raw reports on.
+   The driver starts, is queried and quits under the joystick lock, as
+   SDL_InitJoysticks, SDL_UpdateJoystickDevices and SDL_QuitJoysticks call
+   it. The test keeps the device records each query returns as SDL's joystick
+   core keeps them (SDL_ProcessPendingJoystickDevices): a record stays while
+   the queries list its device, a record whose device a query no longer lists
+   is removed, and a new record is prepared and added. SDL's joystick
+   subsystem never starts, so no other driver runs and no device opens. The
+   scripted devices are the raw-report instruments PadForge's build lists by
+   default: GameInput's gamepads stay off and raw reports on.
 
    1. A quit while a device callback runs: the quit returns, and the callback
       finishes inside UnregisterCallback.
    2. Callbacks delivered while another thread holds the joystick lock finish
       without it.
    3. Devices connected before the start, connected and removed while the
-      driver runs, removed and connected again before a detect, connected and
-      removed before a detect, and gone without a callback: each detect adds
-      and removes the same joysticks as the driver did before the change.
+      driver runs, removed and connected again before a query, connected and
+      removed before a query, and gone without a callback: each query lists
+      the connected devices, and a device that comes and goes between two
+      queries is never added.
    4. A registration failure at the start: no hang, and GameInput released.
-   5. Devices reported during a quit, or reported and never detected, are
+   5. Devices reported during a quit, or reported and never queried, are
       dropped with their references.
-   6. A flood of callbacks while detects run.
+   6. A flood of callbacks while queries run.
 
-   --hotplug runs only the scenarios the earlier driver also completes (3, 4,
-   the second half of 5, and 6), so the same checks run against both. */
+   --hotplug runs only scenarios 3, 4, the second half of 5, and 6, which
+   never hold a callback inside GameInput's dispatch. */
 
 #define SDL_MAIN_HANDLED
 #include "SDL_internal.h"
@@ -48,21 +54,12 @@
 #include "core/windows/SDL_windows.h"
 #include "core/windows/SDL_gameinput.h"
 
-/* The names through which the driver would start or quit GameInput, change
-   SDL's joystick list, or ask the other drivers */
-extern "C" {
-void Fake_JoystickAdded(SDL_JoystickID instance_id);
-void Fake_JoystickRemoved(SDL_JoystickID instance_id);
-bool Fake_HandledByAnotherDriver(struct SDL_JoystickDriver *driver, Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name);
-}
+/* The names through which the driver would start or quit GameInput */
 bool Fake_InitGameInput(IGameInput **ppGameInput);
 void Fake_QuitGameInput(void);
 
 #define SDL_InitGameInput Fake_InitGameInput
 #define SDL_QuitGameInput Fake_QuitGameInput
-#define SDL_PrivateJoystickAdded Fake_JoystickAdded
-#define SDL_PrivateJoystickRemoved Fake_JoystickRemoved
-#define SDL_JoystickHandledByAnotherDriver Fake_HandledByAnotherDriver
 
 #include "../src/joystick/gdk/SDL_gameinputjoystick.cpp"
 
@@ -181,8 +178,10 @@ public:
     IFACEMETHODIMP_(GameInputSystemButtons) GetSupportedSystemButtons() override { Unexpected(); return (GameInputSystemButtons)0; }
     IFACEMETHODIMP_(GameInputLightingGroups) GetSupportedLightingGroups() override { Unexpected(); return (GameInputLightingGroups)0; }
     IFACEMETHODIMP_(uint32_t) GetSupportedLightingGroupSize(GameInputLightingGroups group) override { Unexpected(); return 0; }
-    IFACEMETHODIMP_(void) GetContainerId(GUID *containerId) override { Unexpected(); SDL_zerop(containerId); }
-    IFACEMETHODIMP_(bool) GetXInputDeviceIndex(uint32_t *index) override { Unexpected(); *index = 0; return false; }
+    // A record's container ID, read when it is prepared
+    IFACEMETHODIMP_(void) GetContainerId(GUID *containerId) override { SDL_zerop(containerId); }
+    // A raw instrument has no XInput slot, so its record has no XInput match
+    IFACEMETHODIMP_(bool) GetXInputDeviceIndex(uint32_t *index) override { *index = 0; return false; }
     IFACEMETHODIMP_(bool) GetKeyboardInfo(GameInputKeyboardInfo *info) override { Unexpected(); return false; }
     IFACEMETHODIMP_(bool) GetMouseInfo(GameInputMouseInfo *info) override { Unexpected(); return false; }
     IFACEMETHODIMP_(bool) GetSensorsInfo(GameInputSensorsInfo *info) override { Unexpected(); return false; }
@@ -466,35 +465,92 @@ static char Letter(IGameInputDevice *device)
     return (index >= 0 && index < FakeMaxDevices) ? (char)('A' + index) : '?';
 }
 
-static char LetterOf(SDL_JoystickID instance_id)
+/* The records the joystick core keeps, at most one per scripted device */
+static SDL_JoystickDevice *s_published[FakeMaxDevices];
+static int s_published_count;
+
+static char RecordLetter(SDL_JoystickDevice *record)
+{
+    return record->internal ? Letter(record->internal->device) : '?';
+}
+
+static void Log(char action, SDL_JoystickDevice *record)
+{
+    char entry[4] = { action, RecordLetter(record), ' ', '\0' };
+
+    SDL_strlcat(s_log, entry, sizeof(s_log));
+}
+
+static bool SameRecord(const SDL_JoystickDevice *a, const SDL_JoystickDevice *b)
+{
+    return a->driver == b->driver && a->unique_id_len > 0 && a->unique_id_len == b->unique_id_len &&
+           SDL_memcmp(a->unique_id, b->unique_id, a->unique_id_len) == 0;
+}
+
+/* Under the joystick lock, as SDL_ProcessPendingJoystickDevices keeps the
+   records of a query: the kept record of a device the query lists again
+   stays and the query's copy goes, a kept record the query does not list is
+   removed, and the query's other records are prepared and added */
+static void Reconcile(SDL_JoystickDevice *pending)
+{
+    SDL_JoystickDevice *kept[FakeMaxDevices];
+    int nkept = 0;
+    int i;
+
+    for (i = 0; i < s_published_count; ++i) {
+        SDL_JoystickDevice *old = s_published[i];
+        SDL_JoystickDevice **link = &pending;
+        bool listed = false;
+
+        while (*link) {
+            if (SameRecord(*link, old)) {
+                SDL_JoystickDevice *copy = *link;
+
+                *link = copy->next;
+                copy->next = NULL;
+                SDL_DestroyJoystickDevice(copy);
+                listed = true;
+                break;
+            }
+            link = &(*link)->next;
+        }
+        if (listed) {
+            kept[nkept++] = old;
+        } else {
+            Log('-', old);
+            SDL_DestroyJoystickDevice(old);
+        }
+    }
+    while (pending) {
+        SDL_JoystickDevice *record = pending;
+
+        pending = record->next;
+        record->next = NULL;
+        if (nkept < FakeMaxDevices && SDL_GAMEINPUT_JoystickDriver.PrepareDevice(record)) {
+            record->prepared = true;
+            record->published = true;
+            Log('+', record);
+            kept[nkept++] = record;
+        } else {
+            Unexpected();
+            SDL_DestroyJoystickDevice(record);
+        }
+    }
+    for (i = 0; i < nkept; ++i) {
+        s_published[i] = kept[i];
+    }
+    s_published_count = nkept;
+}
+
+/* As SDL_QuitJoysticks destroys every record before the drivers quit */
+static void DropRecords(void)
 {
     int i;
 
-    for (i = 0; i < g_GameInputList.count; ++i) {
-        if (g_GameInputList.devices[i] && g_GameInputList.devices[i]->device_instance == instance_id) {
-            return Letter(g_GameInputList.devices[i]->device);
-        }
+    for (i = 0; i < s_published_count; ++i) {
+        SDL_DestroyJoystickDevice(s_published[i]);
     }
-    return '?';
-}
-
-extern "C" void Fake_JoystickAdded(SDL_JoystickID instance_id)
-{
-    char entry[4] = { '+', LetterOf(instance_id), ' ', '\0' };
-
-    SDL_strlcat(s_log, entry, sizeof(s_log));
-}
-
-extern "C" void Fake_JoystickRemoved(SDL_JoystickID instance_id)
-{
-    char entry[4] = { '-', LetterOf(instance_id), ' ', '\0' };
-
-    SDL_strlcat(s_log, entry, sizeof(s_log));
-}
-
-extern "C" bool Fake_HandledByAnotherDriver(struct SDL_JoystickDriver *driver, Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
-{
-    return false;
+    s_published_count = 0;
 }
 
 static void Begin(const char *name, bool available, bool register_fails)
@@ -602,38 +658,47 @@ static bool Start(void)
     return result;
 }
 
-static void Detect(void)
+/* A rescan of SDL_UpdateJoystickDevices, under the joystick lock: the query
+   and the records the joystick core keeps from it */
+static void Query(void)
 {
     SDL_LockJoysticks();
-    SDL_GAMEINPUT_JoystickDriver.Detect();
+    Reconcile(SDL_GAMEINPUT_JoystickDriver.QueryDevices());
     SDL_UnlockJoysticks();
 }
 
-// As SDL_QuitJoysticks calls it, under the joystick lock
+// As SDL_QuitJoysticks quits, under the joystick lock: the records, then the driver
 static void Stop(void)
 {
     SDL_LockJoysticks();
+    DropRecords();
     SDL_GAMEINPUT_JoystickDriver.Quit();
     SDL_UnlockJoysticks();
 }
 
-// The joysticks the detect added and removed, then the driver's list
+// The joysticks the queries added and removed, then the kept records, in letter order
 static void Expect(const char *log, const char *listed)
 {
-    char list[16];
-    int count;
+    char list[FakeMaxDevices + 1];
+    int count = 0;
     int i;
+    char c;
 
     SDL_LockJoysticks();
-    count = SDL_GAMEINPUT_JoystickDriver.GetCount();
-    for (i = 0; i < count && i + 1 < (int)sizeof(list); ++i) {
-        list[i] = Letter(g_GameInputList.devices[i]->device);
-        CHECK(list[i] != '?' && SDL_strcmp(SDL_GAMEINPUT_JoystickDriver.GetDeviceName(i), s_devices[list[i] - 'A'].name) == 0,
-              "joystick %d was named %s", i, SDL_GAMEINPUT_JoystickDriver.GetDeviceName(i));
+    for (c = 'A'; c < 'A' + FakeMaxDevices; ++c) {
+        for (i = 0; i < s_published_count; ++i) {
+            SDL_JoystickDevice *record = s_published[i];
+
+            if (RecordLetter(record) == c) {
+                list[count++] = c;
+                CHECK(record->name && SDL_strcmp(record->name, s_devices[c - 'A'].name) == 0,
+                      "joystick %c was named %s", c, record->name ? record->name : "(none)");
+            }
+        }
     }
-    list[i] = '\0';
+    list[count] = '\0';
     SDL_UnlockJoysticks();
-    CHECK(SDL_strcmp(s_log, log) == 0, "the detect logged \"%s\", expected \"%s\"", s_log, log);
+    CHECK(SDL_strcmp(s_log, log) == 0, "the queries logged \"%s\", expected \"%s\"", s_log, log);
     CHECK(SDL_strcmp(list, listed) == 0, "the driver listed \"%s\", expected \"%s\"", list, listed);
     s_log[0] = '\0';
 }
@@ -642,6 +707,7 @@ static void Finish(void)
 {
     int i;
 
+    CHECK(s_published_count == 0, "%d records stayed after the quit", s_published_count);
     for (i = 0; i < s_device_count; ++i) {
         CHECK(s_devices[i].refs == 1, "device %c kept %ld references", 'A' + i, s_devices[i].refs - 1);
     }
@@ -660,46 +726,48 @@ static void TestHotplug(void)
     CHECK(Start(), "the driver did not start: %s", SDL_GetError());
     CHECK(SDL_GetAtomicInt(&s_gameinput.registrations) == 1, "%d registrations", SDL_GetAtomicInt(&s_gameinput.registrations));
     // GameInput 4.0.302 lists the devices already connected after the registration returns
+    Query();
     Expect("", "");
     Deliver();
-    Detect();
+    Query();
     Expect("+A +B ", "AB");
 
     gi_scenario = "a device connected and one removed while the driver runs";
     c = AddDevice(false);
     Deliver();
-    Detect();
+    Query();
     Expect("+C ", "ABC");
     Disconnect(a);
     Deliver();
-    Detect();
+    Query();
     Expect("-A ", "BC");
     CHECK(s_devices[a].refs == 1, "the removed device kept %ld references", s_devices[a].refs - 1);
 
-    gi_scenario = "a device removed and connected again before a detect";
+    gi_scenario = "a device removed and connected again before a query";
     Disconnect(b);
     Connect(b);
     Deliver();
-    Detect();
+    Query();
     Expect("", "BC");
 
-    gi_scenario = "a device connected and removed before a detect";
+    gi_scenario = "a device connected and removed before a query";
     d = AddDevice(true);
     Disconnect(d);
     Deliver();
-    Detect();
-    Expect("+D -D ", "BC");
+    Query();
+    Expect("", "BC");
+    CHECK(s_devices[d].refs == 1, "the device that came and went kept %ld references", s_devices[d].refs - 1);
 
     gi_scenario = "a device gone without a callback";
     InterlockedExchange(&s_devices[c].connected, 0);
-    Detect();
+    Query();
     Expect("-C ", "B");
 
     gi_scenario = "a device connected again after its removal";
     Connect(a);
     Deliver();
-    Detect();
-    Expect("+A ", "BA");
+    Query();
+    Expect("+A ", "AB");
 
     Stop();
     Expect("", "");
@@ -728,7 +796,7 @@ static void TestQuitDropsQueue(void)
 {
     int a;
 
-    Begin("a device reported and never detected", true, false);
+    Begin("a device reported and never queried", true, false);
     CHECK(Start(), "the driver did not start: %s", SDL_GetError());
     a = AddDevice(false);
     Deliver();
@@ -743,12 +811,12 @@ static void TestFlood(void)
     int a, b;
     int i;
 
-    Begin("a flood of callbacks while detects run", true, false);
+    Begin("a flood of callbacks while queries run", true, false);
     a = AddDevice(false);
     b = AddDevice(true);
     CHECK(Start(), "the driver did not start: %s", SDL_GetError());
     Deliver();
-    Detect();
+    Query();
     Expect("+A +B ", "AB");
     // 2000 events for B, alternating removal and connection, ending connected
     s_flood_device = b;
@@ -756,15 +824,16 @@ static void TestFlood(void)
     s_flood = SDL_CreateThread(FloodThread, "FakeGameInputFlood", NULL);
     CHECK(s_flood != NULL, "the flood did not start");
     for (i = 0; i < 500; ++i) {
-        Detect();
+        Query();
     }
     SDL_WaitThread(s_flood, NULL);
     s_flood = NULL;
-    Detect();
+    Query();
     // B may have left and come back during the flood. A never left.
     s_log[0] = '\0';
     Expect("", "AB");
-    CHECK(s_devices[a].refs == 2 && s_devices[b].refs == 2, "the listed devices hold %ld and %ld references", s_devices[a].refs - 1, s_devices[b].refs - 1);
+    // One reference in the driver's device list and one in the kept record
+    CHECK(s_devices[a].refs == 3 && s_devices[b].refs == 3, "the listed devices hold %ld and %ld references", s_devices[a].refs - 1, s_devices[b].refs - 1);
     Stop();
     Finish();
 }
@@ -777,7 +846,7 @@ static void TestQuitDuringCallback(void)
     (void)AddDevice(false);
     CHECK(Start(), "the driver did not start: %s", SDL_GetError());
     Deliver();
-    Detect();
+    Query();
     Expect("+A ", "A");
 
     // SDL_QuitJoysticks takes the joystick lock before it quits the drivers
@@ -786,6 +855,7 @@ static void TestQuitDuringCallback(void)
     SDL_LockJoysticks();
     DeliverAsync();
     CHECK(SDL_WaitSemaphoreTimeout(s_entered, GateMilliseconds), "the callback never started");
+    DropRecords();
     SDL_GAMEINPUT_JoystickDriver.Quit();
     SDL_UnlockJoysticks();
     CHECK(FinishAsync(GateMilliseconds), "the callback never finished");
@@ -802,7 +872,7 @@ static void TestQuitDuringCallback(void)
     (void)AddDevice(false);
     CHECK(Start(), "the driver did not start again: %s", SDL_GetError());
     Deliver();
-    Detect();
+    Query();
     Expect("+A ", "A");
     Stop();
     Finish();
@@ -824,7 +894,7 @@ static void TestCallbacksUnderLock(void)
         s_async = NULL;
         SDL_WaitSemaphore(s_async_done);
     }
-    Detect();
+    Query();
     Expect("+A +B ", "AB");
     Stop();
     Finish();

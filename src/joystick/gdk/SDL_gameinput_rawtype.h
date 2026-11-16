@@ -99,14 +99,19 @@ static int SDL_GameInputRawTypeForDevice(uint16_t vendor, uint16_t product)
 }
 
 /* Whether the GameInput backend leaves a gamepad to the other backends. It
- * does while SDL_HINT_JOYSTICK_GAMEINPUT is off, except for an instrument
- * above, which stays on the raw report path that
- * SDL_HINT_JOYSTICK_GAMEINPUT_RAW governs. The Xbox One Guitar Hero Live
- * dongle declares the Xbox gamepad class next to its own (PlasticBand's
- * descriptor dump), so GameInput lists it as a gamepad as well. */
-static bool SDL_GameInputLeavesGamepad(bool gamepad_hint, int raw_type)
+ * does while SDL_HINT_JOYSTICK_GAMEINPUT is off, and, with DirectInput on, for
+ * a gamepad XInput does not serve, which DirectInput reads instead
+ * (directinput_takes_it, libsdl-org/SDL aacf8ac0c1). An instrument above stays
+ * either way, on the raw report path that SDL_HINT_JOYSTICK_GAMEINPUT_RAW
+ * governs. The Xbox One Guitar Hero Live dongle declares the Xbox gamepad
+ * class next to its own (PlasticBand's descriptor dump), so GameInput lists it
+ * as a gamepad as well, and DirectInput cannot read its raw reports. */
+static bool SDL_GameInputLeavesGamepad(bool gamepad_hint, bool directinput_takes_it, int raw_type)
 {
-    return !gamepad_hint && raw_type == SDL_GAMEINPUT_RAWTYPE_NONE;
+    if (raw_type != SDL_GAMEINPUT_RAWTYPE_NONE) {
+        return false;
+    }
+    return !gamepad_hint || directinput_takes_it;
 }
 
 #endif /* SDL_gameinput_rawtype_h_ */

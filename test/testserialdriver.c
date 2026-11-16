@@ -1047,7 +1047,7 @@ static const char *const test_hints[][2] = {
     { "SDL_JOYSTICK_RFCOMM", "0" },
     { "SDL_JOYSTICK_ICADE", "0" },
     { "SDL_JOYSTICK_WINMM", "0" },
-    { "SDL_JOYSTICK_THREAD", "0" },
+    { "SDL_JOYSTICK_ASYNC", "0" },
     { "SDL_JOYSTICK_ROG_CHAKRAM", "0" },
     /* The ports under test */
     { "SDL_JOYSTICK_SERIAL", "COM250=iforce,COM251=iforce,COM252=stinger,COM253=iforce" }

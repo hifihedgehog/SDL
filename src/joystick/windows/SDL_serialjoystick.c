@@ -1174,7 +1174,7 @@ static void SERIAL_StopPort(SERIAL_Port *port, bool notify)
                 joystick->hwdata->port = NULL;
             }
             if (notify) {
-                SDL_PrivateJoystickRemoved(s->instance_id);
+                SDL_RemoveJoystickDevice(s->instance_id);
             }
             s->registered = 0;
         }
@@ -1450,6 +1450,34 @@ static SDL_GUID SERIAL_CreateGUID(const SERIAL_Port *port, int sub, const SDL_Se
     return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_SERIAL, 0, 0, 0, NULL, key, 's', identity->type);
 }
 
+/* Publishes the joystick of a sub-device, under the joystick lock, or leaves
+   the sub-device unregistered when the record cannot be made. Its player
+   index is the one its module fixes, or -1. The core asks
+   for the gamepad mapping inside SDL_AddJoystickDevice (SDL_IsGamepad in
+   SDL_PrivateJoystickAdded) and keeps the answer for the instance ID, so the
+   sub-device holds its instance ID and generation before the add, for
+   SERIAL_FindDevice. */
+static void SERIAL_PublishDevice(SERIAL_Port *port, SERIAL_Sub *s, uint32_t generation)
+{
+    SDL_JoystickDevice *device = SDL_CreateJoystickDevice(&SDL_SERIAL_JoystickDriver, 0);
+
+    if (!device) {
+        return;
+    }
+    device->name = SDL_strdup(s->joystick_identity.name);
+    device->path = SDL_strdup(port->key);
+    if (!device->name || !device->path) {
+        SDL_DestroyJoystickDevice(device);
+        return;
+    }
+    device->guid = s->guid;
+    device->player_index = s->joystick_identity.player_index;
+    device->instance_id = SDL_GetNextObjectID();
+    s->instance_id = device->instance_id;
+    s->registered = generation;
+    SDL_AddJoystickDevice(device);
+}
+
 static void SERIAL_CheckPresence(SERIAL_Port *port)
 {
     int sub;
@@ -1470,30 +1498,26 @@ static void SERIAL_CheckPresence(SERIAL_Port *port)
             if (joystick && joystick->hwdata) {
                 joystick->hwdata->port = NULL;
             }
-            SDL_PrivateJoystickRemoved(s->instance_id);
+            SDL_RemoveJoystickDevice(s->instance_id);
             s->registered = 0;
         }
         if (!s->registered && generation) {
-            s->registered = generation;
             s->joystick_identity = identity;
-            s->instance_id = SDL_GetNextObjectID();
             s->guid = SERIAL_CreateGUID(port, sub, &identity);
-            SDL_PrivateJoystickAdded(s->instance_id);
+            SERIAL_PublishDevice(port, s, generation);
         }
     }
 }
 
-static bool SERIAL_GetDevice(int device_index, SERIAL_Port **port_out, int *sub_out)
+/* The port and registered sub-device with the joystick */
+static bool SERIAL_FindDevice(SDL_JoystickID instance_id, SERIAL_Port **port_out, int *sub_out)
 {
     SERIAL_Port *port;
     int sub;
 
-    if (device_index < 0) {
-        return false;
-    }
     for (port = serial_ports; port; port = port->next) {
         for (sub = 0; sub < SDL_SERIAL_MAX_SUBDEVICES; ++sub) {
-            if (port->subs[sub].registered && device_index-- == 0) {
+            if (port->subs[sub].registered && port->subs[sub].instance_id == instance_id) {
                 *port_out = port;
                 *sub_out = sub;
                 return true;
@@ -1567,22 +1591,7 @@ static bool SERIAL_JoystickInit(void)
     return true;
 }
 
-static int SERIAL_JoystickGetCount(void)
-{
-    SERIAL_Port *port;
-    int count = 0, sub;
-
-    for (port = serial_ports; port; port = port->next) {
-        for (sub = 0; sub < SDL_SERIAL_MAX_SUBDEVICES; ++sub) {
-            if (port->subs[sub].registered) {
-                ++count;
-            }
-        }
-    }
-    return count;
-}
-
-static void SERIAL_JoystickDetect(void)
+static void SERIAL_JoystickDetectDevices(void)
 {
     SERIAL_Port *port;
 
@@ -1613,86 +1622,6 @@ static void SERIAL_JoystickDetect(void)
         }
     }
     SERIAL_ReapPorts(false);
-}
-
-/* Connection state is wired and the port holds the device, so no other
- * driver's device is this one */
-static bool SERIAL_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
-{
-    (void)vendor_id;
-    (void)product_id;
-    (void)version;
-    (void)name;
-    return false;
-}
-
-static const char *SERIAL_JoystickGetDeviceName(int device_index)
-{
-    SERIAL_Port *port;
-    int sub;
-
-    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
-        return NULL;
-    }
-    return port->subs[sub].joystick_identity.name;
-}
-
-static const char *SERIAL_JoystickGetDevicePath(int device_index)
-{
-    SERIAL_Port *port;
-    int sub;
-
-    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
-        return NULL;
-    }
-    return port->key;
-}
-
-static int SERIAL_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static int SERIAL_JoystickGetDevicePlayerIndex(int device_index)
-{
-    SERIAL_Port *port;
-    int sub;
-
-    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
-        return -1;
-    }
-    return port->subs[sub].joystick_identity.player_index;
-}
-
-static void SERIAL_JoystickSetDevicePlayerIndex(int device_index, int player_index)
-{
-    (void)device_index;
-    (void)player_index;
-}
-
-static SDL_GUID SERIAL_JoystickGetDeviceGUID(int device_index)
-{
-    SERIAL_Port *port;
-    int sub;
-    SDL_GUID guid;
-
-    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
-        SDL_zero(guid);
-        return guid;
-    }
-    return port->subs[sub].guid;
-}
-
-static SDL_JoystickID SERIAL_JoystickGetDeviceInstanceID(int device_index)
-{
-    SERIAL_Port *port;
-    int sub;
-
-    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
-        return 0;
-    }
-    return port->subs[sub].instance_id;
 }
 
 static void SERIAL_SendControls(SDL_Joystick *joystick, const SDL_SerialControls *controls, Uint64 timestamp)
@@ -1728,7 +1657,7 @@ static void SERIAL_SendInitial(SDL_Joystick *joystick)
     }
 }
 
-static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
+static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *device)
 {
     SERIAL_Port *port;
     SERIAL_Sub *s;
@@ -1736,8 +1665,8 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
     SDL_PropertiesID props;
     int sub, i;
 
-    if (!SERIAL_GetDevice(device_index, &port, &sub)) {
-        return SDL_SetError("Serial joystick index out of range");
+    if (!SERIAL_FindDevice(device->instance_id, &port, &sub)) {
+        return SDL_SetError("Serial joystick disconnected");
     }
     s = &port->subs[sub];
     hwdata = (struct joystick_hwdata *)SDL_calloc(1, sizeof(*hwdata));
@@ -1768,7 +1697,7 @@ static bool SERIAL_JoystickOpen(SDL_Joystick *joystick, int device_index)
     }
 
     /* The state so far, sent by the first update. Queued snapshots up to it
-       are skipped. A sub-device that left and came back since Detect
+       are skipped. A sub-device that left and came back since DetectDevices
        registered this generation holds the next generation's state, which
        this joystick does not take, as the iCade driver's Open does not. */
     SDL_LockMutex(port->mutex);
@@ -1985,13 +1914,13 @@ static void SERIAL_MapInput(SDL_InputMapping *out, const SDL_SerialMapInput *in)
     out->target = in->target;
 }
 
-static bool SERIAL_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+static bool SERIAL_JoystickGetGamepadMapping(SDL_JoystickDevice *device, SDL_GamepadMapping *out)
 {
     SERIAL_Port *port;
     const SDL_SerialGamepadMap *map;
     int sub;
 
-    if (!SERIAL_GetDevice(device_index, &port, &sub) || !port->subs[sub].joystick_identity.has_mapping) {
+    if (!SERIAL_FindDevice(device->instance_id, &port, &sub) || !port->subs[sub].joystick_identity.has_mapping) {
         return false;
     }
     map = &port->subs[sub].joystick_identity.mapping;
@@ -2021,28 +1950,21 @@ static bool SERIAL_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappin
     return true;
 }
 
+/* A sub-device is published with SDL_AddJoystickDevice when its module
+   finds it, so the driver has no QueryDevices or PrepareDevice */
 SDL_JoystickDriver SDL_SERIAL_JoystickDriver = {
-    SERIAL_JoystickInit,
-    SERIAL_JoystickGetCount,
-    SERIAL_JoystickDetect,
-    SERIAL_JoystickIsDevicePresent,
-    SERIAL_JoystickGetDeviceName,
-    SERIAL_JoystickGetDevicePath,
-    SERIAL_JoystickGetDeviceSteamVirtualGamepadSlot,
-    SERIAL_JoystickGetDevicePlayerIndex,
-    SERIAL_JoystickSetDevicePlayerIndex,
-    SERIAL_JoystickGetDeviceGUID,
-    SERIAL_JoystickGetDeviceInstanceID,
-    SERIAL_JoystickOpen,
-    SERIAL_JoystickRumble,
-    SERIAL_JoystickRumbleTriggers,
-    SERIAL_JoystickSetLED,
-    SERIAL_JoystickSendEffect,
-    SERIAL_JoystickSetSensorsEnabled,
-    SERIAL_JoystickUpdate,
-    SERIAL_JoystickClose,
-    SERIAL_JoystickQuit,
-    SERIAL_JoystickGetGamepadMapping
+    .Init = SERIAL_JoystickInit,
+    .DetectDevices = SERIAL_JoystickDetectDevices,
+    .GetGamepadMapping = SERIAL_JoystickGetGamepadMapping,
+    .Open = SERIAL_JoystickOpen,
+    .Rumble = SERIAL_JoystickRumble,
+    .RumbleTriggers = SERIAL_JoystickRumbleTriggers,
+    .SetLED = SERIAL_JoystickSetLED,
+    .SendEffect = SERIAL_JoystickSendEffect,
+    .SetSensorsEnabled = SERIAL_JoystickSetSensorsEnabled,
+    .Update = SERIAL_JoystickUpdate,
+    .Close = SERIAL_JoystickClose,
+    .Quit = SERIAL_JoystickQuit
 };
 
 #endif // SDL_JOYSTICK_SERIAL

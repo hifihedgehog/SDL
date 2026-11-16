@@ -56,6 +56,10 @@ typedef enum SDL_VendorUSBPlatform
  * named in_endpoint must be an interrupt endpoint too, or nothing is
  * selected. */
 #define SDL_VENDORUSB_IN_INTERRUPT 0x10
+/* The rule serves every platform but macOS, where the platform HID backend
+   reads the device. In SDL_vendorusb_libusb_required, the device needs
+   libusb everywhere but macOS. */
+#define SDL_VENDORUSB_NOT_MACOS    0x20
 
 /* One vendor interface of one device. */
 typedef struct SDL_VendorUSBRule

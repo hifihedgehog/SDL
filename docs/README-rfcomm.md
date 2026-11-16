@@ -47,8 +47,9 @@ reports. After 2 seconds without a report SDL polls. A report after the poll
 brings the listen command again, and 2 more seconds of silence end the link.
 
 The player index lights the blue LED: players 0 to 3 are ids 1 to 4, and
-any other index is id 5, which lights none. Until the joystick has a player
-index, SDL sends id 1. A, B, X and Y are South, East, West and North, L1 and
+any other index is id 5, which lights none. SDL gives the driver the player
+index when the joystick opens and whenever it changes. Until then, SDL sends
+id 1. A, B, X and Y are South, East, West and North, L1 and
 R1 the shoulders, Select Back, Start Start, L3 and R3 the stick clicks, and
 the D-pad the D-pad. The triggers are analog in 14-byte reports and full or
 released in 12-byte ones. Mode A carries no battery level.

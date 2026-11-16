@@ -114,7 +114,7 @@ set(GAMEINPUT_OFFLINE_ENVIRONMENT
     "SDL_JOYSTICK_RFCOMM=0"
     "SDL_JOYSTICK_ICADE=0"
     "SDL_JOYSTICK_WINMM=0"
-    "SDL_JOYSTICK_THREAD=0"
+    "SDL_JOYSTICK_ASYNC=0"
     "SDL_JOYSTICK_ROG_CHAKRAM=0")
 # The serial port and DJI remote hints are lists, so they are unset
 set(GAMEINPUT_CLEARED_ENVIRONMENT
@@ -126,8 +126,8 @@ set(GAMEINPUT_CLEARED_ENVIRONMENT
     "SDL_JOYSTICK_IGNORE_DEVICES_EXCEPT=unset:"
     "SDL_GAMECONTROLLER_IGNORE_DEVICES=unset:"
     "SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=unset:")
-# gameinput-driver.hotplug runs only the scenarios the driver before #45 also
-# completes, so the same checks can run against it
+# gameinput-driver.hotplug runs only the scenarios that never hold a callback
+# inside GameInput's dispatch
 add_test(NAME gameinput-driver COMMAND testgameinputdriver)
 add_test(NAME gameinput-driver.hotplug COMMAND testgameinputdriver --hotplug)
 foreach(test IN ITEMS gameinput-driver gameinput-driver.hotplug)

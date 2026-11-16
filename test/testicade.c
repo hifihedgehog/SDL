@@ -109,7 +109,7 @@ static const char *const dt_other_drivers[][2] = {
     { "SDL_JOYSTICK_DJI_REMOTE_TCP_HOSTS", "" },
     { "SDL_JOYSTICK_RFCOMM", "0" },
     { "SDL_JOYSTICK_WINMM", "0" },
-    { "SDL_JOYSTICK_THREAD", "0" },
+    { "SDL_JOYSTICK_ASYNC", "0" },
     { "SDL_JOYSTICK_ROG_CHAKRAM", "0" },
     { SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1" }
 };

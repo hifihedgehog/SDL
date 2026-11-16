@@ -26,8 +26,9 @@
       back is a new device.
 
    The core in this file calls the fake, not SDL's HID layer: each name
-   through which it lists, opens, closes or counts devices, or adds and
-   looks up joysticks, is defined below before the core source is included.
+   through which it lists, opens, closes or counts devices, looks up
+   joysticks, or asks SDL's joystick core for a device update, is defined
+   below before the core source is included.
    This object defines the core's symbols, so SDL's own copy of the core is
    never linked, as test/testwiidriver.c does for the Wii driver. Before the
    link, test/wii-driver/CheckSystem.cmake reads this object's symbols and
@@ -52,8 +53,7 @@ static int Fake_hid_close(SDL_hid_device *dev);
 static int Fake_hid_set_nonblocking(SDL_hid_device *dev, int nonblock);
 static SDL_PropertiesID Fake_hid_get_properties(SDL_hid_device *dev);
 static SDL_Joystick *Fake_GetJoystickFromID(SDL_JoystickID instance_id);
-static void Fake_PrivateJoystickAdded(SDL_JoystickID instance_id);
-static void Fake_PrivateJoystickRemoved(SDL_JoystickID instance_id);
+static void Fake_RequestJoystickDeviceUpdate(bool immediate);
 static SDL_HIDAPI_DeviceDriver Test_DriverWii;
 
 #undef SDL_hid_init
@@ -76,8 +76,7 @@ static SDL_HIDAPI_DeviceDriver Test_DriverWii;
 #define SDL_hid_get_properties Fake_hid_get_properties
 #undef SDL_GetJoystickFromID
 #define SDL_GetJoystickFromID Fake_GetJoystickFromID
-#define SDL_PrivateJoystickAdded Fake_PrivateJoystickAdded
-#define SDL_PrivateJoystickRemoved Fake_PrivateJoystickRemoved
+#define SDL_RequestJoystickDeviceUpdate Fake_RequestJoystickDeviceUpdate
 #define SDL_HIDAPI_DriverWii Test_DriverWii
 
 #include "../src/joystick/hidapi/SDL_hidapijoystick.c"
@@ -92,8 +91,7 @@ static SDL_HIDAPI_DeviceDriver Test_DriverWii;
 #undef SDL_hid_set_nonblocking
 #undef SDL_hid_get_properties
 #undef SDL_GetJoystickFromID
-#undef SDL_PrivateJoystickAdded
-#undef SDL_PrivateJoystickRemoved
+#undef SDL_RequestJoystickDeviceUpdate
 #undef SDL_HIDAPI_DriverWii
 
 #include <stdio.h>
@@ -122,7 +120,7 @@ static bool fake_listed = true;
 static bool fake_open_fails;
 static Uint32 fake_change_count = 100;
 static int fake_handle;
-static int enumerations, opens, closes, added, removed;
+static int enumerations, opens, closes, added, removed, requests;
 
 static int Fake_hid_init(void)
 {
@@ -198,16 +196,12 @@ static SDL_Joystick *Fake_GetJoystickFromID(SDL_JoystickID instance_id)
     return NULL;
 }
 
-static void Fake_PrivateJoystickAdded(SDL_JoystickID instance_id)
+/* SDL's joystick core rescans when a connect or disconnect asks it to. This
+   test polls instead, as Poll below shows. */
+static void Fake_RequestJoystickDeviceUpdate(bool immediate)
 {
-    (void)instance_id;
-    ++added;
-}
-
-static void Fake_PrivateJoystickRemoved(SDL_JoystickID instance_id)
-{
-    (void)instance_id;
-    ++removed;
+    (void)immediate;
+    ++requests;
 }
 
 /* The driver: InitDevice adds a joystick, and an update ends its reads when
@@ -243,7 +237,11 @@ static bool Test_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, 
 static bool Test_InitDevice(SDL_HIDAPI_Device *device)
 {
     ++inits;
-    return HIDAPI_JoystickConnected(device, NULL);
+    if (!HIDAPI_JoystickConnected(device, NULL)) {
+        return false;
+    }
+    ++added;
+    return true;
 }
 
 static int Test_GetDevicePlayerIndex(SDL_HIDAPI_Device *device, SDL_JoystickID instance_id)
@@ -268,6 +266,7 @@ static bool Test_UpdateDevice(SDL_HIDAPI_Device *device)
     if (end_reads) {
         end_reads = false;
         HIDAPI_JoystickDisconnected(device, device->joysticks[0]);
+        ++removed;
         device->reads_ended = true;
         return false;
     }
@@ -371,20 +370,27 @@ static SDL_HIDAPI_DeviceDriver Test_DriverWii = {
 static bool DriverHolds(void)
 {
     return SDL_HIDAPI_devices && SDL_HIDAPI_devices->driver == &Test_DriverWii && SDL_HIDAPI_devices->dev &&
-           SDL_HIDAPI_numjoysticks == 1;
+           SDL_HIDAPI_devices->num_joysticks == 1;
 }
 
 static bool Released(void)
 {
     return SDL_HIDAPI_devices && !SDL_HIDAPI_devices->driver && !SDL_HIDAPI_devices->dev && SDL_HIDAPI_devices->reopen &&
-           SDL_HIDAPI_numjoysticks == 0;
+           SDL_HIDAPI_devices->num_joysticks == 0;
 }
 
-/* As SDL's joystick core runs the backend: detection, then the updates,
-   under the joystick lock */
+/* As SDL's joystick core runs the backend when it rescans, under the
+   joystick lock: the query, whose device records the joystick core would
+   keep and this test frees, then the updates */
 static void Poll(void)
 {
-    HIDAPI_JoystickDetect();
+    SDL_JoystickDevice *devices = HIDAPI_JoystickQueryDevices();
+
+    while (devices) {
+        SDL_JoystickDevice *next = devices->next;
+        SDL_DestroyJoystickDevice(devices);
+        devices = next;
+    }
     HIDAPI_UpdateDevices();
 }
 
@@ -399,6 +405,7 @@ static void TestReadsEnded(void)
           opens, inits, added);
 
     end_reads = true;
+    requests = 0;
     HIDAPI_UpdateDevices();
     CHECK(Released() && frees == 1 && closes == 1 && removed == 1, "the driver was not released: %d frees, %d closes, %d removed",
           frees, closes, removed);
@@ -406,16 +413,17 @@ static void TestReadsEnded(void)
           "stored device change count %u, not the system's %u", SDL_HIDAPI_devices ? SDL_HIDAPI_devices->reopen_change_count : 0,
           fake_change_count);
     /* Positive control: the disconnect asked for a rescan */
-    CHECK(SDL_HIDAPI_change_count == 0, "no rescan was asked for");
+    CHECK(requests > 0, "no rescan was asked for");
 
     scans = enumerations;
     Poll();
     CHECK(enumerations == scans + 1, "the rescan did not run");
     CHECK(Released() && opens == 1 && inits == 1, "the path opened again at the rescan, with no device change: %d opens", opens);
+    /* SDL's joystick core may rescan at any time, and each rescan without a
+       device change leaves the path released */
     Poll();
     Poll();
-    CHECK(Released() && opens == 1 && enumerations == scans + 1, "the path opened again with no device change: %d opens, %d scans",
-          opens, enumerations - scans);
+    CHECK(Released() && opens == 1, "the path opened again with no device change: %d opens", opens);
 
     ++fake_change_count;
     Poll();
@@ -476,6 +484,8 @@ int main(int argc, char *argv[])
     if (!HIDAPI_JoystickInit()) {
         CHECK(false, "the core did not start: %s", SDL_GetError());
     } else {
+        /* The first rescan, which SDL's joystick core runs at its start */
+        Poll();
         TestReadsEnded();
         TestOpenFails();
         TestPathLeaves();

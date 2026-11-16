@@ -859,17 +859,30 @@ static void TestGameInputRawType(void)
     CHECK(SDL_GameInputRawTypeForDevice(0x0000, 0x0000) == SDL_GAMEINPUT_RAWTYPE_NONE);
 }
 
-/* With SDL_HINT_JOYSTICK_GAMEINPUT off the GameInput backend leaves plain
-   gamepads to the other backends and keeps the instruments it reads through
-   raw reports, the Xbox One Guitar Hero Live dongle among them */
+/* With SDL_HINT_JOYSTICK_GAMEINPUT off, or with DirectInput taking the
+   gamepads XInput does not serve, the GameInput backend leaves plain gamepads
+   to the other backends and keeps the instruments it reads through raw
+   reports, the Xbox One Guitar Hero Live dongle among them */
 static void TestGameInputLeavesGamepad(void)
 {
-    CHECK(SDL_GameInputLeavesGamepad(false, SDL_GAMEINPUT_RAWTYPE_NONE));
-    CHECK(!SDL_GameInputLeavesGamepad(true, SDL_GAMEINPUT_RAWTYPE_NONE));
-    CHECK(!SDL_GameInputLeavesGamepad(false, SDL_GameInputRawTypeForDevice(0x1430, 0x079B)));
-    CHECK(!SDL_GameInputLeavesGamepad(true, SDL_GameInputRawTypeForDevice(0x1430, 0x079B)));
-    CHECK(!SDL_GameInputLeavesGamepad(false, SDL_GameInputRawTypeForDevice(USB_VENDOR_MADCATZ, USB_PRODUCT_MADCATZ_XB1_STRATOCASTER_GUITAR)));
-    CHECK(SDL_GameInputLeavesGamepad(false, SDL_GameInputRawTypeForDevice(0x045E, 0x02EA)));
+    const int ghl = SDL_GameInputRawTypeForDevice(0x1430, 0x079B);
+    const int stratocaster = SDL_GameInputRawTypeForDevice(USB_VENDOR_MADCATZ, USB_PRODUCT_MADCATZ_XB1_STRATOCASTER_GUITAR);
+    const int gamepad = SDL_GameInputRawTypeForDevice(0x045E, 0x02EA);
+
+    /* A gamepad: left to the other backends with the hint off, or with
+       DirectInput taking a gamepad XInput does not serve */
+    CHECK(SDL_GameInputLeavesGamepad(false, false, SDL_GAMEINPUT_RAWTYPE_NONE));
+    CHECK(SDL_GameInputLeavesGamepad(false, true, SDL_GAMEINPUT_RAWTYPE_NONE));
+    CHECK(SDL_GameInputLeavesGamepad(true, true, SDL_GAMEINPUT_RAWTYPE_NONE));
+    CHECK(!SDL_GameInputLeavesGamepad(true, false, SDL_GAMEINPUT_RAWTYPE_NONE));
+    CHECK(SDL_GameInputLeavesGamepad(false, false, gamepad));
+    CHECK(SDL_GameInputLeavesGamepad(true, true, gamepad));
+    /* A raw instrument stays on the raw report path in every case */
+    CHECK(!SDL_GameInputLeavesGamepad(false, false, ghl));
+    CHECK(!SDL_GameInputLeavesGamepad(true, false, ghl));
+    CHECK(!SDL_GameInputLeavesGamepad(false, true, ghl));
+    CHECK(!SDL_GameInputLeavesGamepad(true, true, ghl));
+    CHECK(!SDL_GameInputLeavesGamepad(false, true, stratocaster));
 }
 
 int main(void)

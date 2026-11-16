@@ -115,7 +115,7 @@ static const char *const dt_other_drivers[][2] = {
     { "SDL_JOYSTICK_RFCOMM", "0" },
     { "SDL_JOYSTICK_ICADE", "0" },
     { "SDL_JOYSTICK_WINMM", "0" },
-    { "SDL_JOYSTICK_THREAD", "0" },
+    { "SDL_JOYSTICK_ASYNC", "0" },
     { "SDL_JOYSTICK_ROG_CHAKRAM", "0" },
     { SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1" }
 };
@@ -5393,8 +5393,9 @@ static void DT_SW2CheckSensor(int line, SDL_Gamepad *gamepad, SDL_SensorType typ
 }
 
 /* The calls of a console connect: before's steps, the console's commands,
-   the report rate and the side's input, the status handler and the player
-   LED of the joystick's addition. The session starts no sooner than the
+   the report rate and the side's input, and the status handler. SDL gives
+   the driver a player index only once the joystick opens, so the player LED
+   waits for the open. The session starts no sooner than the
    fallback after the unified input's notifications, its commands take less
    than DT_SW2_SESSION_LIMIT_MS, and nothing gets the input-mode write.
    Returns the index after them, or -1. */
@@ -5404,8 +5405,7 @@ static int DT_SW2CheckConsoleConnect(int line, const DT_SW2Step *before, int nbe
         DT_SW2_RATE,
         DT_SW2_HANDLER(SW2_NATIVE_INPUT),
         DT_SW2_NOTIFY(SW2_NATIVE_INPUT),
-        DT_SW2_STATUS,
-        DT_SW2_LED(SW2_CONSOLE_COMMAND, "01")
+        DT_SW2_STATUS
     };
     DT_SW2Step sequence[DT_COUNT(dt_sw2_console_sequence)];
     int i, next, notify, start, rate;
@@ -5470,8 +5470,7 @@ static void ScenarioSwitch2Unified(void)
         DT_SW2_WRITE(SW2_COMMAND, false, "01 00 00 00 00 00 00 00 00 03 30"),
         DT_SW2_WRITE(SW2_COMMAND, false, "0C 91 01 02 00 04 00 00 80 00 00 00"),
         DT_SW2_WRITE(SW2_COMMAND, false, "0C 91 01 04 00 04 00 00 80 00 00 00"),
-        DT_SW2_STATUS,
-        DT_SW2_LED(SW2_COMMAND, "01")
+        DT_SW2_STATUS
     };
     static const DT_SW2Step open[] = {
         DT_SW2_LED(SW2_COMMAND, "01")
@@ -5589,8 +5588,7 @@ static void ScenarioSwitch2Vertical(void)
         DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
         DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
         DT_SW2_WRITE(SW2_COMMAND, false, "01 00 00 00 00 00 00 00 00 03 30"),
-        DT_SW2_STATUS,
-        DT_SW2_LED(SW2_COMMAND, "01")
+        DT_SW2_STATUS
     };
     static const DT_SW2Step later[] = {
         DT_SW2_LED(SW2_COMMAND, "01"),
@@ -6001,8 +5999,7 @@ static void ScenarioSwitch2Pro(void)
         DT_SW2_WRITE(SW2_COMMAND, true, "02 91 01 04 00 08 00 00 0B 7E 00 00 E8 30 01 00"),
         DT_SW2_HANDLER(SW2_UNIFIED_INPUT),
         DT_SW2_NOTIFY(SW2_UNIFIED_INPUT),
-        DT_SW2_STATUS,
-        DT_SW2_LED(SW2_COMMAND, "01")
+        DT_SW2_STATUS
     };
     static const DT_SW2Step later[] = {
         DT_SW2_LED(SW2_COMMAND, "01"),

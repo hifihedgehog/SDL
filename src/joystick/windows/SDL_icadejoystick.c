@@ -907,19 +907,43 @@ static int SDLCALL ICADE_Thread(void *data)
 
 /* The joystick thread's side */
 
-static int ICADE_GetSlot(int device_index)
+/* The registered slot with the joystick, or -1 */
+static int ICADE_FindSlot(SDL_JoystickID instance_id)
 {
     int i;
 
-    if (device_index < 0) {
-        return -1;
-    }
     for (i = 0; i < ICADE_MAX_DEVICES; ++i) {
-        if (icade_devices[i].registered && device_index-- == 0) {
+        if (icade_devices[i].registered && icade_devices[i].instance_id == instance_id) {
             return i;
         }
     }
     return -1;
+}
+
+/* Publishes the joystick of a slot, under the joystick lock, or leaves the
+   slot unregistered when the record cannot be made. The core asks
+   for the gamepad mapping inside SDL_AddJoystickDevice (SDL_IsGamepad in
+   SDL_PrivateJoystickAdded) and keeps the answer for the instance ID, so the
+   slot holds its instance ID and generation before the add, for
+   ICADE_FindSlot. */
+static void ICADE_PublishDevice(ICADE_Device *device, Uint32 generation)
+{
+    SDL_JoystickDevice *joystick_device = SDL_CreateJoystickDevice(&SDL_ICADE_JoystickDriver, 0);
+
+    if (!joystick_device) {
+        return;
+    }
+    joystick_device->name = SDL_strdup(device->joystick_name);
+    joystick_device->path = SDL_strdup(device->joystick_path);
+    if (!joystick_device->name || !joystick_device->path) {
+        SDL_DestroyJoystickDevice(joystick_device);
+        return;
+    }
+    joystick_device->guid = device->guid;
+    joystick_device->instance_id = SDL_GetNextObjectID();
+    device->instance_id = joystick_device->instance_id;
+    device->registered = generation;
+    SDL_AddJoystickDevice(joystick_device);
 }
 
 /* Takes the decoded devices as joysticks, or removes those that left. A
@@ -956,7 +980,7 @@ static void ICADE_CheckPresence(bool notify)
         if (device->registered && device->registered != generation) {
             /* SDL releases the controls of an open joystick it removes */
             if (notify) {
-                SDL_PrivateJoystickRemoved(device->instance_id);
+                SDL_RemoveJoystickDevice(device->instance_id);
             }
             device->registered = 0;
         }
@@ -968,9 +992,7 @@ static void ICADE_CheckPresence(bool notify)
                 (void)SDL_snprintf(device->joystick_name, sizeof(device->joystick_name), "iCade Controller (0x%.4x/0x%.4x)", vendor, product);
                 type = SDL_JOYSTICK_TYPE_GAMEPAD;
             }
-            /* SDL's ignore lists, read when a device arrives, as SDL's Raw
-               Input and Windows.Gaming.Input drivers read them
-               (SDL_rawinputjoystick.c:896, SDL_windows_gaming_input.c:457) */
+            /* SDL's ignore lists, read when a device arrives */
             if (SDL_ShouldIgnoreJoystick(vendor, product, version, device->joystick_name)) {
                 SDL_LockMutex(lock);
                 if (device->generation == generation) {
@@ -980,16 +1002,14 @@ static void ICADE_CheckPresence(bool notify)
                 SDL_UnlockMutex(lock);
                 continue;
             }
-            device->registered = generation;
             device->joystick_layout = layout;
-            device->instance_id = SDL_GetNextObjectID();
             /* 'i' is this driver's signature, and the type rides in the last
                byte. The bus is Bluetooth, and Open reports a wireless
                connection, because the iCade and pads in iCade mode pair as
                Bluetooth keyboards. A wired keyboard listed in
                SDL_HINT_JOYSTICK_ICADE_DEVICES gets the same bus and state. */
             device->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, vendor, product, version, NULL, device->joystick_name, 'i', (Uint8)type);
-            SDL_PrivateJoystickAdded(device->instance_id);
+            ICADE_PublishDevice(device, generation);
         }
     }
     /* The driver thread gives up a keyboard registration it holds only for
@@ -1157,19 +1177,7 @@ static bool ICADE_JoystickInit(void)
     return true;
 }
 
-static int ICADE_JoystickGetCount(void)
-{
-    int count = 0, i;
-
-    for (i = 0; i < ICADE_MAX_DEVICES; ++i) {
-        if (icade_devices[i].registered) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-static void ICADE_JoystickDetect(void)
+static void ICADE_JoystickDetectDevices(void)
 {
     if (!icade_initialized) {
         return;
@@ -1185,67 +1193,6 @@ static void ICADE_JoystickDetect(void)
     ICADE_FlushNotes();
 }
 
-/* A keyboard is no other driver's device */
-static bool ICADE_JoystickIsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
-{
-    (void)vendor_id;
-    (void)product_id;
-    (void)version;
-    (void)name;
-    return false;
-}
-
-static const char *ICADE_JoystickGetDeviceName(int device_index)
-{
-    const int slot = ICADE_GetSlot(device_index);
-
-    return (slot >= 0) ? icade_devices[slot].joystick_name : NULL;
-}
-
-static const char *ICADE_JoystickGetDevicePath(int device_index)
-{
-    const int slot = ICADE_GetSlot(device_index);
-
-    return (slot >= 0) ? icade_devices[slot].joystick_path : NULL;
-}
-
-static int ICADE_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static int ICADE_JoystickGetDevicePlayerIndex(int device_index)
-{
-    (void)device_index;
-    return -1;
-}
-
-static void ICADE_JoystickSetDevicePlayerIndex(int device_index, int player_index)
-{
-    (void)device_index;
-    (void)player_index;
-}
-
-static SDL_GUID ICADE_JoystickGetDeviceGUID(int device_index)
-{
-    const int slot = ICADE_GetSlot(device_index);
-    SDL_GUID guid;
-
-    if (slot < 0) {
-        SDL_zero(guid);
-        return guid;
-    }
-    return icade_devices[slot].guid;
-}
-
-static SDL_JoystickID ICADE_JoystickGetDeviceInstanceID(int device_index)
-{
-    const int slot = ICADE_GetSlot(device_index);
-
-    return (slot >= 0) ? icade_devices[slot].instance_id : 0;
-}
-
 static void ICADE_SendState(SDL_Joystick *joystick, Uint16 state, Uint64 timestamp)
 {
     int i;
@@ -1256,15 +1203,15 @@ static void ICADE_SendState(SDL_Joystick *joystick, Uint16 state, Uint64 timesta
     }
 }
 
-static bool ICADE_JoystickOpen(SDL_Joystick *joystick, int device_index)
+static bool ICADE_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *joystick_device)
 {
     SDL_Mutex *lock = ICADE_Lock();
-    const int slot = ICADE_GetSlot(device_index);
+    const int slot = ICADE_FindSlot(joystick_device->instance_id);
     struct joystick_hwdata *hwdata;
     ICADE_Device *device;
 
     if (slot < 0) {
-        return SDL_SetError("iCade device index out of range");
+        return SDL_SetError("iCade device disconnected");
     }
     hwdata = (struct joystick_hwdata *)SDL_calloc(1, sizeof(*hwdata));
     if (!hwdata) {
@@ -1410,9 +1357,9 @@ static void ICADE_MapHat(SDL_InputMapping *mapping, Uint8 direction)
 }
 
 /* The layout's buttons, and the stick's hat on the D-pad */
-static bool ICADE_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+static bool ICADE_JoystickGetGamepadMapping(SDL_JoystickDevice *joystick_device, SDL_GamepadMapping *out)
 {
-    const int slot = ICADE_GetSlot(device_index);
+    const int slot = ICADE_FindSlot(joystick_device->instance_id);
     SDL_ICadeLayout layout;
 
     if (slot < 0) {
@@ -1444,28 +1391,21 @@ bool SDL_ICadeProcessRawKeyboard(void *device_handle, Uint16 make_code, Uint16 f
     return ICADE_Key((HANDLE)device_handle, make_code, flags);
 }
 
+/* A device is published with SDL_AddJoystickDevice when it decodes, so the
+   driver has no QueryDevices or PrepareDevice */
 SDL_JoystickDriver SDL_ICADE_JoystickDriver = {
-    ICADE_JoystickInit,
-    ICADE_JoystickGetCount,
-    ICADE_JoystickDetect,
-    ICADE_JoystickIsDevicePresent,
-    ICADE_JoystickGetDeviceName,
-    ICADE_JoystickGetDevicePath,
-    ICADE_JoystickGetDeviceSteamVirtualGamepadSlot,
-    ICADE_JoystickGetDevicePlayerIndex,
-    ICADE_JoystickSetDevicePlayerIndex,
-    ICADE_JoystickGetDeviceGUID,
-    ICADE_JoystickGetDeviceInstanceID,
-    ICADE_JoystickOpen,
-    ICADE_JoystickRumble,
-    ICADE_JoystickRumbleTriggers,
-    ICADE_JoystickSetLED,
-    ICADE_JoystickSendEffect,
-    ICADE_JoystickSetSensorsEnabled,
-    ICADE_JoystickUpdate,
-    ICADE_JoystickClose,
-    ICADE_JoystickQuit,
-    ICADE_JoystickGetGamepadMapping
+    .Init = ICADE_JoystickInit,
+    .DetectDevices = ICADE_JoystickDetectDevices,
+    .GetGamepadMapping = ICADE_JoystickGetGamepadMapping,
+    .Open = ICADE_JoystickOpen,
+    .Rumble = ICADE_JoystickRumble,
+    .RumbleTriggers = ICADE_JoystickRumbleTriggers,
+    .SetLED = ICADE_JoystickSetLED,
+    .SendEffect = ICADE_JoystickSendEffect,
+    .SetSensorsEnabled = ICADE_JoystickSetSensorsEnabled,
+    .Update = ICADE_JoystickUpdate,
+    .Close = ICADE_JoystickClose,
+    .Quit = ICADE_JoystickQuit
 };
 
 #endif /* SDL_JOYSTICK_ICADE */
