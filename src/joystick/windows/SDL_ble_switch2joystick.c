@@ -167,6 +167,13 @@ DEFINE_GUID(GUID_Switch2ReportRate,         0x679d5510, 0x5a24, 0x4dee, 0x95, 0x
 // and FlexInput retries it three times (hub.rs:790-831).
 #define BLE_RECOVERY_DISCOVERY_ATTEMPTS 3
 
+// How long a controller may keep reporting after the app's shutdown command
+// (command 0x06, subcommand 0x02) and still count as having obeyed it. No
+// source times a controller's power-off. One that reports later than this
+// ignored the command, as a Joy-Con 2 clone might, and its next loss is
+// recovered like any other (hifihedgehog/SDL#50).
+#define BLE_SHUTDOWN_GRACE_MS 2000
+
 // BLE_Controller::recovery. While it is RUNNING, the recovery thread owns the
 // controller's WinRT objects and the joystick thread touches none of them.
 #define BLE_RECOVERY_IDLE      0 // no recovery runs
@@ -242,6 +249,13 @@ typedef struct BLE_Controller
     Uint64 restored_ms;    // when the recovery thread had the link back
     bool unified_answered; // a command on 649d4ac9 got its reply, connect thread only
 
+    // A shutdown the app sent through SendEffect (hifihedgehog/SDL#50), under
+    // the joystick lock. The controller powers off without a reply, so
+    // Detect removes the joystick at the loss that follows, with no
+    // recovery (BLE_LossAfterShutdown).
+    bool shutdown_sent;
+    Uint64 shutdown_counter; // SDL_GetPerformanceCounter once the frame was delivered
+
     // The run whose connect thread built the controller, whose cancel flag
     // its connect and recovery threads watch. quiet is set when the
     // controller is freed, after which its threads log nothing.
@@ -281,6 +295,7 @@ typedef struct BLE_Controller
     Uint8 report[64];
     int report_size;
     bool report_pending;
+    Uint64 report_counter; // SDL_GetPerformanceCounter at the last input notification, under report_lock
     Uint8 last_state[64];
     bool have_last_state;
     bool logged_first_report; // one-shot debug dump of the first input notification
@@ -681,6 +696,11 @@ static void BLE_OnInputValue(void *userdata, int characteristic, const Uint8 *da
         return;
     }
     SDL_LockMutex(ctrl->report_lock);
+    // When the controller last reported on either input, for a loss after a
+    // shutdown the app sent (BLE_LossAfterShutdown). The performance counter
+    // keeps no state of SDL's, so a callback that runs after SDL_Quit starts
+    // nothing of SDL's again.
+    ctrl->report_counter = SDL_GetPerformanceCounter();
     if ((characteristic == BLE_INPUT_NATIVE) == ctrl->console) {
         SDL_memcpy(ctrl->report, data, size);
         ctrl->report_size = size;
@@ -2444,6 +2464,32 @@ static void BLE_FinishRestore(BLE_Controller *ctrl)
     }
 }
 
+// True when a lost link follows a shutdown the app sent and the controller
+// obeyed it: no input arrived later than BLE_SHUTDOWN_GRACE_MS after the
+// write. *elapsed_ms gets the time since the write. A controller that
+// ignored the command has reported since, so its loss is recovered like any
+// other. FlexInput draws the same line: SessionEnd::Shutdown returns without
+// a reconnect, and only SessionEnd::LinkLost waits for Windows
+// (crates/joycon2/src/hub.rs:565-571 and :626-647 at 0905b2fe). Under the
+// joystick lock.
+static bool BLE_LossAfterShutdown(BLE_Controller *ctrl, Uint64 *elapsed_ms)
+{
+    const Uint64 frequency = SDL_GetPerformanceFrequency();
+    Uint64 last_report;
+
+    if (!ctrl->shutdown_sent) {
+        return false;
+    }
+    SDL_LockMutex(ctrl->report_lock);
+    last_report = ctrl->report_counter;
+    SDL_UnlockMutex(ctrl->report_lock);
+    if (last_report > ctrl->shutdown_counter + (Uint64)BLE_SHUTDOWN_GRACE_MS * frequency / 1000) {
+        return false;
+    }
+    *elapsed_ms = (SDL_GetPerformanceCounter() - ctrl->shutdown_counter) * 1000 / frequency;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // SDL_JoystickDriver entry points.
 // ---------------------------------------------------------------------------
@@ -2494,7 +2540,8 @@ static void BLE_JoystickDetectDevices(void)
     // RunJoystickUpdates' per-joystick update walk), the same lock the connect
     // append and Quit hold, so the array walk is safe. A lost link starts a
     // recovery in place (BLE_StartRecovery), and the joystick stays. Only a
-    // link that did not come back removes the controller, which posts the
+    // link that did not come back, or one lost after a shutdown the app sent
+    // (BLE_LossAfterShutdown), removes the controller, which posts the
     // removal to the app and makes BLE_GetControllerByAddress return NULL for
     // the address, so BLE_TryReserveConnect accepts the pad's next
     // advertisement and it can reconnect (SDL#9 follow-up). BLE_FreeController
@@ -2515,6 +2562,7 @@ static void BLE_JoystickDetectDevices(void)
         BLE_Controller *ctrl = ble.controllers[i];
         const int recovery = SDL_GetAtomicInt(&ctrl->recovery);
         const char *path = ctrl->console ? "console" : "unified";
+        Uint64 since_shutdown = 0;
         bool remove = false;
 
         // The first vendor frame the response callback kept, logged here,
@@ -2540,6 +2588,14 @@ static void BLE_JoystickDetectDevices(void)
         } else if (recovery == BLE_RECOVERY_FAILED) {
             SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link not restored after %d s (%s path): removing the joystick",
                          BLE_RECOVERY_WAIT_MS / 1000, path);
+            remove = true;
+        } else if (recovery == BLE_RECOVERY_IDLE && SDL_GetAtomicInt(&ctrl->link_lost) && BLE_LossAfterShutdown(ctrl, &since_shutdown)) {
+            // The app turned the controller off, so the link is not coming
+            // back. The joystick goes now, and the session closes with it,
+            // so Windows stops connecting a controller that is off
+            // (hifihedgehog/SDL#50).
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link lost %" SDL_PRIu64 " ms after a shutdown the app sent: removing the joystick",
+                         since_shutdown);
             remove = true;
         } else if (recovery == BLE_RECOVERY_IDLE && SDL_GetAtomicInt(&ctrl->link_lost)) {
             // How long the link held. A Joy-Con 2 clone such as the Mobapad
@@ -2712,7 +2768,12 @@ static bool BLE_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green, U
    a failure. Success here means the write was delivered. A reply to an effect
    can count only for a later sender of the same command and subcommand,
    since a reply must echo both (BLE_FindReply). No effect goes out while a
-   recovery runs, since the link is down. */
+   recovery runs, since the link is down.
+
+   A shutdown that was delivered is remembered (hifihedgehog/SDL#50). The
+   controller powers off without a reply, and Detect then removes its
+   joystick at the loss that follows instead of waiting for the link to come
+   back (BLE_LossAfterShutdown). */
 static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
@@ -2737,6 +2798,10 @@ static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int
     // characteristic (BLE_WriteCommandFrame)
     if (!BLE_WriteCommandFrame(ctrl, frame, length, true)) {
         return SDL_SetError("Switch 2 command write failed");
+    }
+    if (bytes[0] == 0x06 && bytes[1] == 0x02) {
+        ctrl->shutdown_sent = true;
+        ctrl->shutdown_counter = SDL_GetPerformanceCounter();
     }
     return true;
 }

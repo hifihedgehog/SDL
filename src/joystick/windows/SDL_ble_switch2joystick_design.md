@@ -149,6 +149,8 @@ The driver holds a `GattSession` with `MaintainConnection` set for the controlle
 
 While the recovery runs, the joystick thread touches none of the controller's WinRT objects. `Update` decodes nothing and pumps no rumble, `Rumble`, `SetPlayerIndex` and `SetSensorsEnabled` keep their state for the end of the recovery, and `SendEffect` fails. A link that comes back logs `link restored after N ms`. One that stays down logs `link not restored after 12 s`, and the joystick goes with the session closed and `MaintainConnection` off, so Windows stops connecting the controller. A drop during the restart leaves the link down, so the thread reads the status once more after a restart and keeps waiting when it reads Disconnected.
 
+A controller the app turns off is the exception (hifihedgehog/SDL#50). `SendEffect` remembers a shutdown it delivered, command 0x06 subcommand 0x02, for which switch2_controller_research `commands.md` documents no response ("Subcommand 0x02 - Shutdown Controller?"). When the link of such a controller drops, `Detect` logs `link lost N ms after a shutdown the app sent`, removes the joystick and closes the session at once, with no recovery. FlexInput draws the same line: `SessionEnd::Shutdown` returns without a reconnect, and only `SessionEnd::LinkLost` waits for Windows (`hub.rs:565-571`, `:626-647`). A controller that ignored the command keeps reporting, so the loss counts as expected only when no input arrived later than 2 s after the write, and any other loss is recovered as above. The value callback stamps each input notification with the performance counter, which keeps no state of SDL's.
+
 Left out, as in the ticket: re-advertising with 0x03/0x01 between connects, Nintendo's 0x15 pairing, and declining Windows' pairing.
 
 ## 7. Milestones
@@ -167,5 +169,6 @@ Left out, as in the ticket: re-advertising with 0x03/0x01 between connects, Nint
 5. OS-version gates: ThroughputOptimized/`IBluetoothLEDevice6` need build 17763 or newer, `AllowExtendedAdvertisements` needs 1903 or newer. Degrade gracefully.
 6. The console path (section 6a) follows joycon2android, whose console reports were captured from a Hyperion 3, and the captures of PadForge discussion #491. No clone has run this driver.
 7. The recovery in place (section 6b) follows FlexInput's Windows code. No source measures how long Windows takes to connect an M12-S again under a held session, and no clone has run the recovery.
+8. The shutdown rule (section 6b) rests on `commands.md` and on PadForge's power-off of a Switch 2 Pro Controller through `SendEffect` on the driver of 2026-07-02. No source times a controller's power-off, so one that reports for more than 2 s after the command gets the 12 s wait. No source says whether a Joy-Con 2 clone acts on 0x06/0x02.
 
 The compile is the only verification available in the SDL-fork environment. Everything in section 5 and section 6 is wire-format reasoning from the reference reimplementations until PadForge deploy-tests against hardware.

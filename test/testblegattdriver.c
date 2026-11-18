@@ -1702,7 +1702,7 @@ static void DT_CheckMapping(int line, SDL_Gamepad *gamepad, const char *const *e
    for scenario (v). SDL_Quit's report of a thread still joinable is
    counted, and so are the lines of an ended session and of a device SDL's
    lists ignore. The Switch 2 driver's lines are kept for its scenarios,
-   (E) to (Z) and (1). */
+   (E) to (Z) and (1) to (3). */
 
 static SDL_Mutex *dt_log_lock;
 static char dt_log_watch[256];
@@ -7942,6 +7942,217 @@ done:
     DT_End();
 }
 
+/* The app's shutdown as PadForge sends it through SDL_SendGamepadEffect:
+   command 0x06, subcommand 0x02 and 12 zero bytes (commands.md "Subcommand
+   0x02 - Shutdown Controller?"), and the frame the driver makes of it */
+static const Uint8 dt_sw2_shutdown[] = { 0x06, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+#define DT_SW2_SHUTDOWN_FRAME "06 91 01 02 00 0C 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+/* BLE_SHUTDOWN_GRACE_MS: input later than this after the shutdown marks a
+   controller that ignored it */
+#define DT_SW2_SHUTDOWN_GRACE_MS 2000
+
+/* Scenario (2): a Pro Controller the app shuts down (hifihedgehog/SDL#50).
+   The shutdown goes out as one command frame and gets no reply. The
+   controller sends one more report inside the grace and powers off. When
+   its link drops, the joystick goes at once: one log line, no recovery, no
+   status read, the session closed. Turned on again, the controller connects
+   as a new joystick. */
+static void ScenarioSwitch2Shutdown(void)
+{
+    SW2Script script;
+    Uint8 factory1[9], factory2[9], user2[11], report[63], outer[63];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id, again = 0;
+    Uint64 dropped;
+    long since;
+
+    DT_Begin("2", "a Pro Controller the app shuts down leaves as its link drops");
+    (void)DT_Hex(dt_sw2_oem_factory, factory1, sizeof(factory1));
+    (void)DT_Hex(dt_sw2_factory2, factory2, sizeof(factory2));
+    (void)DT_Hex(dt_sw2_user_no_magic, user2, sizeof(user2));
+    (void)DT_Hex(dt_sw2_oem_report1, report, sizeof(report));
+    DT_SW2SetStick(report, 10, 2100, 2000);
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x28);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_PRO;
+    script.kind = SW2_GENUINE;
+    script.factory1 = factory1;
+    script.factory2 = factory2;
+    script.user2 = user2;
+    script.auto_report = report;
+    script.auto_report_length = (int)sizeof(report);
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Switch 2 Pro Controller")) {
+        goto done;
+    }
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    SDL_memcpy(outer, report, sizeof(outer));
+    DT_SW2SetStick(outer, 10, 3500, 600);
+    if (DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, outer, (int)sizeof(outer))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, SDL_MAX_SINT16);
+    }
+
+    DT_SW2SendEffect(__LINE__, gamepad, dt_sw2_shutdown, (int)sizeof(dt_sw2_shutdown));
+    (void)DT_SW2Events();
+    DT_CHECK(DT_SW2FindWrite(DT_SW2_SHUTDOWN_FRAME) >= 0, "the shutdown frame did not go out");
+    /* A report the controller still sends as it powers off, inside the
+       grace, then silence */
+    DT_PumpFor(100);
+    (void)DT_SW2Push(__LINE__, SW2_UNIFIED_INPUT, outer, (int)sizeof(outer));
+    DT_PumpFor(200);
+    dropped = SDL_GetTicks();
+    if (!DT_CHECK(SW2_DropLink(-1), "the driver added no status handler")) {
+        goto done;
+    }
+    DT_CHECK(DT_WaitNoJoystick(DT_WAIT_MS), "the joystick stayed %" SDL_PRIu64 " ms after the link of a controller the app shut down was lost",
+             SDL_GetTicks() - dropped);
+    DT_CHECK(DT_SW2LogCount("after a shutdown the app sent: removing the joystick") == 1, "%d log lines for the loss after the shutdown",
+             DT_SW2LogCount("after a shutdown the app sent: removing the joystick"));
+    since = DT_SW2LogNumber("BLE Switch2 link lost ", 0);
+    DT_CHECK(since + DT_TICK_SLACK_MS >= 300 && since < 300 + DT_WAIT_MS, "the log puts the loss %ld ms after the shutdown", since);
+    DT_CHECK(DT_SW2LogCount("waiting up to 12 s") == 0, "a recovery started for a controller the app shut down");
+    DT_CHECK(SW2_StatusReads(NULL, 0) == 0, "the driver read the status %d times after the shutdown", SW2_StatusReads(NULL, 0));
+    DT_CHECK(SW2_References() == 0, "the driver held %d references after the removal", SW2_References());
+    (void)DT_SW2Events();
+    DT_CHECK(DT_SW2CountKind(SW2_EVENT_SESSION_CLOSE) == 1, "the session was closed %d times", DT_SW2CountKind(SW2_EVENT_SESSION_CLOSE));
+    SDL_CloseGamepad(gamepad);
+    gamepad = NULL;
+
+    /* Turned on again */
+    SW2_Arm(&script);
+    if (DT_CHECK(DT_SW2Advertise(script.address, script.product), "the Switch 2 driver's listener is gone") &&
+        DT_CHECK(DT_SW2WaitConnects(2, DT_SW2_WAIT_MS), "the controller turned on again did not connect within %d ms", DT_SW2_WAIT_MS)) {
+        DT_CHECK(DT_Joysticks(&again) == 1 && again != 0 && again != id, "the controller turned on again is joystick %u, the one before was %u",
+                 (unsigned)again, (unsigned)id);
+    }
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
+/* Scenario (3): what keeps its recovery beside hifihedgehog/SDL#50, on a
+   Joy-Con 2 (R) clone. A shutdown whose write fails as the link drops was
+   not delivered. An effect that is no shutdown leaves no record. A shutdown
+   the clone ignores is followed by input later than the grace. Each of
+   those losses is recovered in place. Then a second shutdown, which the
+   clone obeys: no input follows it, and the joystick goes as the link
+   drops. */
+static void ScenarioSwitch2ShutdownIgnored(void)
+{
+    static const Uint8 led[] = { 0x09, 0x07, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    SW2Script script;
+    Uint8 resting[16], held[16];
+    SDL_Gamepad *gamepad = NULL;
+    SDL_Joystick *joystick;
+    SDL_JoystickID id;
+    Uint64 dropped;
+    bool sent;
+    int restores = 0;
+
+    DT_Begin("3", "a clone that ignores the app's shutdown keeps its recovery");
+    (void)DT_Hex(dt_sw2_resting_right, resting, sizeof(resting));
+    SDL_memcpy(held, resting, sizeof(held));
+    DT_SW2SetStick(held, 5, 3500, 600);
+    SDL_zero(script);
+    script.address = DT_SW2_ADDRESS(0x29);
+    script.product = USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT;
+    script.kind = SW2_CLONE;
+    script.extended_replies = true;
+    if (!DT_SW2Start(&script)) {
+        goto done;
+    }
+    id = DT_SW2Connect(&script);
+    if (!DT_CHECK(id != 0, "no joystick for a Joy-Con 2 (R) clone")) {
+        goto done;
+    }
+    gamepad = DT_SW2Open(__LINE__, id);
+    if (!gamepad) {
+        goto done;
+    }
+    joystick = SDL_GetGamepadJoystick(gamepad);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, held, (int)sizeof(held))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -23168);
+    }
+
+    /* A shutdown whose write fails, since the link drops as it goes out */
+    SW2_DropAt(SW2_EVENT_WRITE, 1, DT_SW2_RESTORE_MS);
+    sent = SDL_SendGamepadEffect(gamepad, dt_sw2_shutdown, (int)sizeof(dt_sw2_shutdown));
+    DT_CHECK(!sent, "a shutdown whose write failed counted as sent");
+    if (!DT_CHECK(DT_SW2WaitLogCount("link restored after ", ++restores, DT_SW2_RESTORE_MS + DT_WAIT_MS),
+                  "the link lost under a shutdown's write did not come back")) {
+        goto done;
+    }
+    DT_PumpFor(100);
+
+    /* An effect that is no shutdown, then silence and a drop */
+    DT_SW2SendEffect(__LINE__, gamepad, led, (int)sizeof(led));
+    DT_PumpFor(200);
+    if (!DT_CHECK(SW2_DropLink(DT_SW2_RESTORE_MS), "the driver added no status handler")) {
+        goto done;
+    }
+    if (!DT_CHECK(DT_SW2WaitLogCount("link restored after ", ++restores, DT_SW2_RESTORE_MS + DT_WAIT_MS),
+                  "the link lost after an effect that is no shutdown did not come back")) {
+        goto done;
+    }
+    DT_PumpFor(100);
+
+    /* A shutdown the clone ignores: it still reports later than the grace */
+    DT_SW2SendEffect(__LINE__, gamepad, dt_sw2_shutdown, (int)sizeof(dt_sw2_shutdown));
+    (void)DT_SW2Events();
+    DT_CHECK(DT_SW2FindWrite(DT_SW2_SHUTDOWN_FRAME) >= 0, "the shutdown frame did not go out on the console channel");
+    DT_PumpFor(DT_SW2_SHUTDOWN_GRACE_MS + 300);
+    if (DT_SW2Push(__LINE__, SW2_NATIVE_INPUT, resting, (int)sizeof(resting))) {
+        DT_SW2CheckAxis(__LINE__, joystick, SDL_GAMEPAD_AXIS_LEFTX, -16);
+    }
+    if (!DT_CHECK(SW2_DropLink(DT_SW2_RESTORE_MS), "the driver added no status handler")) {
+        goto done;
+    }
+    if (!DT_CHECK(DT_SW2WaitLogCount("link restored after ", ++restores, DT_SW2_RESTORE_MS + DT_WAIT_MS),
+                  "the link of a clone that ignored the shutdown did not come back")) {
+        goto done;
+    }
+    DT_CHECK(DT_SW2LogCount("waiting up to 12 s") == restores, "%d recoveries started for %d losses", DT_SW2LogCount("waiting up to 12 s"),
+             restores);
+    DT_CHECK(DT_SW2LogCount("after a shutdown the app sent") == 0, "a loss counted as following a shutdown");
+    DT_CHECK(SDL_JoystickConnected(joystick) && DT_Joysticks(NULL) == 1 && DT_RemovedTime(id) == 0, "the joystick did not stay");
+    DT_PumpFor(100);
+
+    /* A second shutdown, which the clone obeys */
+    DT_SW2SendEffect(__LINE__, gamepad, dt_sw2_shutdown, (int)sizeof(dt_sw2_shutdown));
+    DT_PumpFor(200);
+    dropped = SDL_GetTicks();
+    if (!DT_CHECK(SW2_DropLink(-1), "the driver added no status handler")) {
+        goto done;
+    }
+    DT_CHECK(DT_WaitNoJoystick(DT_WAIT_MS), "the joystick stayed %" SDL_PRIu64 " ms after the link of a clone the app shut down was lost",
+             SDL_GetTicks() - dropped);
+    DT_CHECK(DT_SW2LogCount("after a shutdown the app sent: removing the joystick") == 1, "%d log lines for the loss after the shutdown",
+             DT_SW2LogCount("after a shutdown the app sent: removing the joystick"));
+    DT_CHECK(DT_SW2LogCount("waiting up to 12 s") == restores, "a recovery started for a clone the app shut down");
+    DT_CHECK(SW2_References() == 0, "the driver held %d references after the removal", SW2_References());
+    (void)DT_SW2Events();
+    DT_CHECK(DT_SW2CountKind(SW2_EVENT_SESSION_CLOSE) == 1, "the session was closed %d times", DT_SW2CountKind(SW2_EVENT_SESSION_CLOSE));
+
+done:
+    if (gamepad) {
+        SDL_CloseGamepad(gamepad);
+    }
+    DT_SW2Stop();
+    DT_End();
+}
+
 static const struct
 {
     char id;
@@ -7999,7 +8210,9 @@ static const struct
     { 'X', ScenarioSwitch2NoInputNotifications },
     { 'Y', ScenarioSwitch2RestartWithoutInput },
     { 'Z', ScenarioSwitch2QuitDuringReply },
-    { '1', ScenarioSwitch2QuitDuringAdvertisement }
+    { '1', ScenarioSwitch2QuitDuringAdvertisement },
+    { '2', ScenarioSwitch2Shutdown },
+    { '3', ScenarioSwitch2ShutdownIgnored }
 };
 
 int main(int argc, char *argv[])

@@ -593,6 +593,12 @@ static void SW2_Command(int generation, int channel, const Uint8 *frame, int len
     if (cmd == 0x0C && sub == 0x04) {
         sw2.features_enabled = true;
     }
+    if (cmd == 0x06 && sub == 0x02) {
+        /* The shutdown has no response (switch2_controller_research
+           commands.md "Subcommand 0x02 - Shutdown Controller?"). Whether the
+           controller powers off is the scenario's to play. */
+        return;
+    }
 
     target = (channel == SW2_CONSOLE_COMMAND && sw2.script.extended_replies) ? SW2_EXTENDED_RESPONSE : SW2_RESPONSE;
     prefix = (target == SW2_EXTENDED_RESPONSE) ? 15 : 0;
