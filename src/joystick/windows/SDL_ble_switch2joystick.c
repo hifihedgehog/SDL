@@ -148,6 +148,60 @@ DEFINE_GUID(GUID_Switch2ReportRate,         0x679d5510, 0x5a24, 0x4dee, 0x95, 0x
 // driver's cadence (BLEGATT_WATCHER_CHECK_MS in SDL_blegattjoystick.c)
 #define BLE_WATCHER_CHECK_MS 2000
 
+// The spacing of the console session's commands whose replies the driver
+// does not use: FlexInput's INIT_CMD_GAP, the longest its write_quick waits
+// after each (crates/joycon2/src/hub.rs:30-40 and :1432-1443 at 0905b2fe).
+// Its earlier init waited up to 2 s on every reply, near 40 s in all, and the
+// controller powered itself off partway through.
+#define BLE_CONSOLE_COMMAND_GAP_MS 25
+
+// How long a lost link may take to come back, and how often the status is
+// read meanwhile: FlexInput's RECONNECT_WAIT and RECONNECT_POLL (hub.rs:709-714),
+// for a link that Windows connects again by itself while a GattSession holds
+// MaintainConnection (hifihedgehog/SDL#49)
+#define BLE_RECOVERY_WAIT_MS 12000
+#define BLE_RECOVERY_POLL_MS 250
+
+// Discovery tries once the status reads Connected again. Windows fails
+// discovery for a moment while it still holds the dropped link's GATT state,
+// and FlexInput retries it three times (hub.rs:790-831).
+#define BLE_RECOVERY_DISCOVERY_ATTEMPTS 3
+
+// BLE_Controller::recovery. While it is RUNNING, the recovery thread owns the
+// controller's WinRT objects and the joystick thread touches none of them.
+#define BLE_RECOVERY_IDLE      0 // no recovery runs
+#define BLE_RECOVERY_RUNNING   1 // the recovery thread runs
+#define BLE_RECOVERY_RESTORED  2 // it brought the link back
+#define BLE_RECOVERY_FAILED    3 // the link did not come back, or Quit stopped it
+#define BLE_RECOVERY_ABANDONED 4 // Quit let go of the controller while it ran
+
+// How long SDL_Quit waits for the connect and recovery threads, the BLE GATT
+// driver's BLEGATT_QUIT_WAIT_MS: under the 5 s after which Windows considers
+// an application that reads no window messages not responding. Once Quit
+// has told them to stop, every transport await of theirs ends within one
+// 50 ms slice (SDL_BLEGATT_WaitCancelable), and the driver's own waits check
+// the flag every 50 ms, so the threads end well inside the wait. One still
+// running after it is blocked in a WinRT call that takes no flag.
+#define BLE_QUIT_WAIT_MS 3000
+
+// One Init-to-Quit run of the driver, for its connect and recovery threads.
+// Quit sets cancel and waits for threads to reach 0, and none of those
+// threads waits on the joystick lock, which Quit holds meanwhile
+// (BLE_LockForThread). A thread still running after BLE_QUIT_WAIT_MS is left
+// to end on its own with quiet set, so it logs nothing after SDL_Quit has
+// shut the log down, as the BLE GATT driver leaves its connections
+// (BLEGATT_AbandonConnection). Once cancel is set, a thread reads no clock,
+// sleeps on no SDL timer and waits on no semaphore, since after SDL_Quit
+// SDL_GetTicks would start SDL's tick base and timer resolution again, as
+// the BLE GATT driver's ended sessions read none (BLEGATT_TakeEnds). Such a
+// run is never freed.
+typedef struct BLE_Run
+{
+    SDL_AtomicInt cancel;  // every await of the run's threads ends
+    SDL_AtomicInt threads; // connect and recovery threads not yet ended
+    SDL_AtomicInt quiet;   // Quit left threads running
+} BLE_Run;
+
 // Per-axis stick calibration (reimplemented; the wired versions are file-static).
 typedef struct
 {
@@ -166,6 +220,7 @@ typedef struct BLE_Controller
     SDL_GUID guid;
 
     BleDevice *device;
+    SDL_BLEGATTSession *session; // MaintainConnection, held for the controller's life
     GattChar *input_char;
     GattChar *command_char;
     GattChar *response_char;
@@ -177,7 +232,28 @@ typedef struct BLE_Controller
     EventRegistrationToken status_token;
     void *status_handler;   // ConnectionStatusChanged delegate, leaked like the others
     SDL_AtomicInt link_lost; // set by the status callback (MTA), drained by Detect
-    Uint64 connected_ms;    // when the joystick was added, for the link-loss log
+    Uint64 connected_ms;    // when the link came up: the joystick's addition, or the last recovery
+
+    // The recovery in place of a lost link (hifihedgehog/SDL#49), BLE_RECOVERY_*.
+    // Detect starts it under the joystick lock, the recovery thread ends it,
+    // and BLE_FreeController hands a running one its teardown.
+    SDL_AtomicInt recovery;
+    Uint64 lost_ms;        // when Detect saw the loss
+    Uint64 restored_ms;    // when the recovery thread had the link back
+    bool unified_answered; // a command on 649d4ac9 got its reply, connect thread only
+
+    // The run whose connect thread built the controller, whose cancel flag
+    // its connect and recovery threads watch. quiet is set when the
+    // controller is freed, after which its threads log nothing.
+    BLE_Run *run;
+    SDL_AtomicInt quiet;
+
+    // A Hyperion 3 Ultra's first vendor frame, kept by the response callback
+    // and logged by Detect on the joystick thread, since a callback can still
+    // run after SDL_Quit has shut the log down. Under response_lock.
+    Uint8 vendor_frame[64];  // its first 64 bytes
+    int vendor_frame_length; // its own length
+    bool vendor_frame_pending;
 
     // The console channel of a Joy-Con 2 clone that never notifies on the
     // unified input (hifihedgehog/SDL#38). console is written under
@@ -194,9 +270,10 @@ typedef struct BLE_Controller
     SDL_AtomicInt unified_reports;   // notifications on the unified input
     SDL_Semaphore *first_report_sem; // signaled by the first of them
     bool logged_unified_in_console;  // one-shot debug line, joystick thread
-    SDL_AtomicInt logged_vendor_frame; // one-shot debug line, MTA thread
+    SDL_AtomicInt logged_vendor_frame; // the first vendor frame was kept, MTA thread
 
     SDL_Joystick *joystick; // set in Open, NULL otherwise
+    bool rumble_capable;    // a characteristic carries rumble: set by the connect, and by the joystick thread after a recovery
 
     // Latest input report, filled by the ValueChanged callback (MTA thread),
     // drained by Update (joystick thread).
@@ -225,7 +302,7 @@ typedef struct BLE_Controller
 
     // Stick calibration (reimplemented from the wired driver; static there).
     Switch2_AxisCal left_x, left_y, right_x, right_y;
-    bool calibrated;
+    bool calibrated; // the unified path read every stick's calibration, so a restart reads none again
     bool sensors_enabled; // IMU streams only after the enable command is sent
     bool mouse_enabled;   // Joy-Con 2 optical mouse counters stream (hint opt-in)
     bool magnetometer_enabled; // Switch 2 magnetometer sample stream (hint opt-in)
@@ -287,6 +364,7 @@ static struct
     bool transport; // holds a reference from SDL_BLEGATT_Init
     bool scanning;  // BLE_OnAdvertisement is added to the shared watcher
     Uint64 watcher_checked; // when Detect last had the transport check the watcher
+    BLE_Run *run;   // between Init and Quit, under the joystick lock
 
     BLE_Controller **controllers;
     int controller_count;
@@ -310,11 +388,65 @@ static struct
     int cooldown_count;
 } ble;
 
+// The advertisement callback's way in and out. The shared watcher can still
+// call a listener once after it was removed, with an advertisement it copied
+// before (SDL_ble_gatt.h), and SDL_Quit destroys the joystick lock the
+// callback reserves an address under. So each call counts itself before it
+// reads ble_listening, and Quit clears ble_listening before it reads the
+// count: Quit either finds the call and waits for it, or the call finds the
+// listening ended and touches nothing of the driver's or of SDL's. The BLE
+// GATT driver keeps a value callback out of a freed connection the same way
+// (BLEGATT_ValueReceived and BLEGATT_DetachInbox in SDL_blegattjoystick.c).
+static SDL_AtomicInt ble_listening;      // between Init and Quit
+static SDL_AtomicInt ble_listener_calls; // calls of BLE_OnAdvertisement not yet returned
+
 // Forward declarations.
-static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name);
+static void BLE_ConnectAndSubscribe(BLE_Run *run, Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name);
 static void BLE_FreeController(BLE_Controller *ctrl);
+static void BLE_ReleaseTransport(BLE_Controller *ctrl);
 static BLE_Controller *BLE_GetControllerByAddress(Uint64 address);
-static void BLE_ReleaseConnect(Uint64 address);
+static void BLE_ReleaseConnect(BLE_Run *run, Uint64 address);
+
+// A log line from the connect or recovery threads, which can still run
+// after SDL_Quit has given up waiting for them (BLE_Run). The joystick
+// thread never runs after Quit, and a WinRT callback logs nothing.
+#define BLE_RUN_LOG(run, ...)                                                   \
+    do {                                                                        \
+        if (!SDL_GetAtomicInt(&(run)->quiet)) {                                 \
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, __VA_ARGS__);                  \
+        }                                                                       \
+    } while (0)
+#define BLE_LOG(ctrl, ...)                                                       \
+    do {                                                                        \
+        if (!SDL_GetAtomicInt(&(ctrl)->quiet) && !SDL_GetAtomicInt(&(ctrl)->run->quiet)) { \
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, __VA_ARGS__);                  \
+        }                                                                       \
+    } while (0)
+
+// True once Quit has told the run's threads to stop
+static bool BLE_Canceled(const BLE_Controller *ctrl)
+{
+    return SDL_GetAtomicInt(&ctrl->run->cancel) != 0;
+}
+
+// The joystick lock for a connect thread. Quit holds that lock while it
+// waits for the run's threads, so a thread that cannot take it gives up once
+// the run is told to stop, and one that took it gives it back then too.
+// False when the run is canceled.
+static bool BLE_LockForThread(BLE_Run *run)
+{
+    while (!SDL_GetAtomicInt(&run->cancel)) {
+        if (SDL_TryLockJoysticks()) {
+            if (!SDL_GetAtomicInt(&run->cancel)) {
+                return true;
+            }
+            SDL_UnlockJoysticks();
+            break;
+        }
+        SDL_Delay(1);
+    }
+    return false;
+}
 
 // The advertisement Received callback hands the connect to this worker thread so
 // the WinRT thread-pool callback returns immediately. The connect blocks on
@@ -324,6 +456,7 @@ static void BLE_ReleaseConnect(Uint64 address);
 // (testapp.cpp:1467 and :835) and bleak dispatches to a task (discoverer.py).
 typedef struct
 {
+    BLE_Run *run;
     Uint64 address;
     Uint16 vendor;
     Uint16 product;
@@ -332,6 +465,7 @@ typedef struct
 static int SDLCALL BLE_ConnectThread(void *data)
 {
     BLE_ConnectRequest *req = (BLE_ConnectRequest *)data;
+    BLE_Run *run = req->run;
     bool ro_inited = false;
 
     // Join the MTA explicitly. This is a fresh SDL thread, not a system thread-pool
@@ -341,27 +475,48 @@ static int SDLCALL BLE_ConnectThread(void *data)
     // (not WIN_RoInitialize, which is STA-first and would risk a marshal-back
     // deadlock against the agile completion handlers this thread blocks on).
     ro_inited = SDL_BLEGATT_InitThread();
-    BLE_ConnectAndSubscribe(req->address, req->vendor, req->product, NULL);
-    BLE_ReleaseConnect(req->address); // address reserved by the caller before spawn
+    BLE_ConnectAndSubscribe(run, req->address, req->vendor, req->product, NULL);
+    BLE_ReleaseConnect(run, req->address); // address reserved by the caller before spawn
     if (ro_inited) {
         SDL_BLEGATT_QuitThread();
     }
     SDL_free(req);
+    // Last, since Quit may go on once the run's threads reach 0
+    SDL_AddAtomicInt(&run->threads, -1);
     return 0;
 }
 
-// Reserve an address for connecting. Returns false if it is already connected or
-// a connect is already in progress. Caller must BLE_ReleaseConnect on completion.
-// Also false once the driver has quit: the shared watcher can still deliver an
-// advertisement that it copied before BLE_JoystickQuit removed the listener
-// (SDL_ble_gatt.h), and ble.initialized is written under this same lock.
-static bool BLE_TryReserveConnect(Uint64 address)
+// The joystick lock for the advertisement callback. Quit holds that lock
+// while it waits for the callbacks inside the driver (ble_listener_calls),
+// so a callback that cannot take it gives up once Quit has ended the
+// listening. False then. The wait is the Win32 Sleep, which needs nothing of
+// SDL's on a WinRT thread.
+static bool BLE_LockForListener(void)
+{
+    while (SDL_GetAtomicInt(&ble_listening)) {
+        if (SDL_TryLockJoysticks()) {
+            return true;
+        }
+        Sleep(1);
+    }
+    return false;
+}
+
+// Reserve an address for connecting, on the advertisement callback. Returns
+// the run the connect thread belongs to, or NULL if the address is already
+// connected, a connect is already in progress, or Quit has ended the
+// listening. The reservation counts the thread in the run's threads, so Quit
+// waits for a thread not yet created. Caller must BLE_ReleaseConnect on
+// completion, and on a failed spawn give the count back.
+static BLE_Run *BLE_TryReserveConnect(Uint64 address)
 {
     int i;
-    bool reserved = false;
+    BLE_Run *run = NULL;
 
-    SDL_LockJoysticks();
-    if (ble.initialized && !BLE_GetControllerByAddress(address)) {
+    if (!BLE_LockForListener()) {
+        return NULL;
+    }
+    if (ble.initialized && ble.run && !BLE_GetControllerByAddress(address)) {
         bool pending = false;
         Uint64 now = SDL_GetTicks();
         for (i = 0; i < ble.connecting_count; ++i) {
@@ -379,22 +534,29 @@ static bool BLE_TryReserveConnect(Uint64 address)
         }
         if (!pending && ble.connecting_count < (int)SDL_arraysize(ble.connecting)) {
             ble.connecting[ble.connecting_count++] = address;
-            reserved = true;
+            run = ble.run;
+            SDL_AddAtomicInt(&run->threads, 1);
         }
     }
     SDL_UnlockJoysticks();
-    return reserved;
+    return run;
 }
 
 // Record a full GATT-discovery failure for an address and arm an escalating
 // backoff (15 s, 30 s, 60 s, ... capped at 5 min), so the watcher stops hammering
-// a controller that is busy on USB. Cleared on a successful connect.
-static void BLE_NoteConnectFailure(Uint64 address)
+// a controller that is busy on USB. Cleared on a successful connect. Nothing
+// is recorded once Quit has told the run to stop.
+static void BLE_NoteConnectFailure(BLE_Run *run, Uint64 address)
 {
     int i;
-    Uint64 now = SDL_GetTicks();
+    Uint64 now;
 
-    SDL_LockJoysticks();
+    // The lock first, which fails once the run is told to stop, then the
+    // clock (BLE_Run)
+    if (!BLE_LockForThread(run)) {
+        return;
+    }
+    now = SDL_GetTicks();
     for (i = 0; i < ble.cooldown_count; ++i) {
         if (ble.cooldowns[i].address == address) {
             break;
@@ -421,11 +583,15 @@ static void BLE_NoteConnectFailure(Uint64 address)
     SDL_UnlockJoysticks();
 }
 
-static void BLE_ReleaseConnect(Uint64 address)
+// Gives the address back. Once Quit has told the run to stop, Quit clears
+// every reservation itself.
+static void BLE_ReleaseConnect(BLE_Run *run, Uint64 address)
 {
     int i;
 
-    SDL_LockJoysticks();
+    if (!BLE_LockForThread(run)) {
+        return;
+    }
     for (i = 0; i < ble.connecting_count; ++i) {
         if (ble.connecting[i] == address) {
             ble.connecting[i] = ble.connecting[--ble.connecting_count];
@@ -438,7 +604,7 @@ static void BLE_ReleaseConnect(Uint64 address)
 // Debug hex dump (visible at SDL_LOG_PRIORITY_DEBUG). Used to capture the real
 // on-wire layout so the transport-specific unknowns (input report offsets, flash
 // reply offset) can be confirmed against the reference on first hardware contact.
-static void BLE_LogBytes(const char *label, const Uint8 *data, int len)
+static void BLE_LogBytes(BLE_Controller *ctrl, const char *label, const Uint8 *data, int len)
 {
     char hex[3 * 64 + 1];
     int i, n = SDL_min(len, 64);
@@ -446,7 +612,7 @@ static void BLE_LogBytes(const char *label, const Uint8 *data, int len)
         (void)SDL_snprintf(&hex[i * 3], 4, "%02x ", data[i]);
     }
     hex[n > 0 ? n * 3 : 0] = '\0';
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 %s (%d bytes): %s", label, len, hex);
+    BLE_LOG(ctrl, "BLE Switch2 %s (%d bytes): %s", label, len, hex);
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +735,8 @@ static bool BLE_IsVendorFrame(const Uint8 *data, size_t length)
 // from its header on, and signal. A notification that holds no such reply,
 // such as a reply that came after its sender stopped waiting or a vendor
 // frame, is not a reply (hifihedgehog/SDL#38). Called by the shared value
-// delegate, like BLE_OnInputValue. The reply keeps its first 128 bytes.
+// delegate, like BLE_OnInputValue. The reply keeps its first 128 bytes. The
+// first vendor frame is kept for Detect to log (BLE_Controller::vendor_frame).
 // ---------------------------------------------------------------------------
 static void BLE_OnResponseValue(void *userdata, int characteristic, const Uint8 *data, size_t length)
 {
@@ -591,11 +758,15 @@ static void BLE_OnResponseValue(void *userdata, int characteristic, const Uint8 
             matched = true;
         }
     }
+    if (!matched && BLE_IsVendorFrame(data, length) && SDL_CompareAndSwapAtomicInt(&ctrl->logged_vendor_frame, 0, 1)) {
+        // BLE_LogBytes dumps the first 64 bytes, all that is kept
+        SDL_memcpy(ctrl->vendor_frame, data, SDL_min(size, (int)sizeof(ctrl->vendor_frame)));
+        ctrl->vendor_frame_length = size;
+        ctrl->vendor_frame_pending = true;
+    }
     SDL_UnlockMutex(ctrl->response_lock);
     if (matched) {
         SDL_SignalSemaphore(ctrl->response_sem);
-    } else if (BLE_IsVendorFrame(data, length) && SDL_CompareAndSwapAtomicInt(&ctrl->logged_vendor_frame, 0, 1)) {
-        BLE_LogBytes("first vendor frame", data, size);
     }
 }
 
@@ -641,12 +812,13 @@ static bool BLE_WriteCommandFrame(BLE_Controller *ctrl, const Uint8 *frame, int 
         }
         SDL_memset(prefixed, 0, BLE_CONSOLE_PREFIX_LENGTH);
         SDL_memcpy(&prefixed[BLE_CONSOLE_PREFIX_LENGTH], frame, length);
-        return SDL_BLEGATT_WriteCharacteristic(ctrl->console_command_char, prefixed, BLE_CONSOLE_PREFIX_LENGTH + length, prefer_response);
+        return SDL_BLEGATT_WriteCharacteristic(ctrl->console_command_char, prefixed, BLE_CONSOLE_PREFIX_LENGTH + length, prefer_response,
+                                               &ctrl->run->cancel);
     }
     if (!ctrl->command_char) {
         return false;
     }
-    return SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, length, prefer_response);
+    return SDL_BLEGATT_WriteCharacteristic(ctrl->command_char, frame, length, prefer_response, &ctrl->run->cancel);
 }
 
 static bool BLE_HasCommandChannel(const BLE_Controller *ctrl)
@@ -654,10 +826,32 @@ static bool BLE_HasCommandChannel(const BLE_Controller *ctrl)
     return ctrl->console ? (ctrl->console_command_char != NULL) : (ctrl->command_char != NULL);
 }
 
+// Waits up to timeout_ms for a reply's signal, in 50 ms slices, so Quit's
+// stop ends the wait. The slices are counted, so the wait reads no clock
+// (BLE_Run).
+static bool BLE_WaitReply(BLE_Controller *ctrl, Sint32 timeout_ms)
+{
+    Sint32 waited = 0;
+
+    while (waited < timeout_ms) {
+        const Sint32 slice = SDL_min(50, timeout_ms - waited);
+
+        if (BLE_Canceled(ctrl)) {
+            return false;
+        }
+        if (SDL_WaitSemaphoreTimeout(ctrl->response_sem, slice)) {
+            return true;
+        }
+        waited += slice;
+    }
+    return false;
+}
+
 // Send a command and wait (briefly) for its reply. The reply is the
 // notification that echoes the command (BLE_FindReply), copied from its
 // header on. read asks the reply to echo a memory read of read_length bytes
-// at read_address. Returns the number of reply bytes copied, or 0 on timeout.
+// at read_address. Returns the number of reply bytes copied, or 0 on timeout
+// or once Quit has told the run to stop.
 static int BLE_SendCommandFor(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len, Uint8 *reply, int reply_len,
                               bool read, Uint8 read_length, Uint32 read_address)
 {
@@ -665,7 +859,7 @@ static int BLE_SendCommandFor(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, con
     const int length = BLE_BuildCommand(frame, cmd, subcmd, data, data_len);
     int got = 0;
 
-    if (length == 0 || !BLE_HasCommandChannel(ctrl) || !ctrl->response_sem) {
+    if (length == 0 || !BLE_HasCommandChannel(ctrl) || !ctrl->response_sem || BLE_Canceled(ctrl)) {
         return 0;
     }
     // A signal left by a reply that matched after an earlier sender gave up.
@@ -682,8 +876,7 @@ static int BLE_SendCommandFor(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, con
     ctrl->expecting = true;
     ctrl->response_size = 0;
     SDL_UnlockMutex(ctrl->response_lock);
-    if (BLE_WriteCommandFrame(ctrl, frame, length, true) &&
-        SDL_WaitSemaphoreTimeout(ctrl->response_sem, ctrl->console ? BLE_CONSOLE_REPLY_MS : 500)) {
+    if (BLE_WriteCommandFrame(ctrl, frame, length, true) && BLE_WaitReply(ctrl, ctrl->console ? BLE_CONSOLE_REPLY_MS : 500)) {
         SDL_LockMutex(ctrl->response_lock);
         got = ctrl->response_size;
         if (reply && reply_len > 0) {
@@ -716,9 +909,9 @@ static int BLE_ReadMemory(BLE_Controller *ctrl, Uint8 length, Uint32 addr, Uint8
     int got = BLE_SendCommandFor(ctrl, 0x02, 0x04, req, (int)sizeof(req), reply, (int)sizeof(reply), true, length, addr);
     int n;
 
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 memory read addr 0x%06x len %d: %d reply bytes", (unsigned)addr, length, got);
+    BLE_LOG(ctrl, "BLE Switch2 memory read addr 0x%06x len %d: %d reply bytes", (unsigned)addr, length, got);
     if (got > 0) {
-        BLE_LogBytes("memory reply", reply, got); // confirms the 0x10 payload offset + MTU
+        BLE_LogBytes(ctrl, "memory reply", reply, got); // confirms the 0x10 payload offset + MTU
     }
     if (got < 0x10) {
         return 0;
@@ -748,27 +941,40 @@ static bool BLE_ParseUserCalibration(Switch2_AxisCal *x, Switch2_AxisCal *y, con
 // three bytes of a user block (hifihedgehog/SDL#38). A Joy-Con stores its
 // single-stick calibration in the first slot. The decoders use left_x/left_y
 // for the single Joy-Con stick, so both L and R store there. Best-effort: on
-// failure BLE_MapStickAxis falls back to a linear map.
+// failure BLE_MapStickAxis falls back to a linear map. A reply to either read
+// marks a controller that answers 649d4ac9 (BLE_ConnectAndSubscribe).
 static bool BLE_ReadCalibSlot(BLE_Controller *ctrl, Uint32 user_addr, Uint32 factory_addr, Switch2_AxisCal *x, Switch2_AxisCal *y)
 {
     Uint8 cal[16];
     int got = BLE_ReadMemory(ctrl, 0x0b, user_addr, cal, sizeof(cal));
 
+    if (got > 0) {
+        ctrl->unified_answered = true;
+    }
     if (BLE_ParseUserCalibration(x, y, cal, got)) {
         return true;
     }
-    return BLE_ReadMemory(ctrl, 0x0b, factory_addr, cal, sizeof(cal)) >= 9 && BLE_ParseStickCalibration(x, y, cal);
+    got = BLE_ReadMemory(ctrl, 0x0b, factory_addr, cal, sizeof(cal));
+    if (got > 0) {
+        ctrl->unified_answered = true;
+    }
+    return got >= 9 && BLE_ParseStickCalibration(x, y, cal);
 }
 
+// Every stick's calibration, and whether each was read. A slot that gives
+// none keeps the calibration it had (BLE_ReadCalibSlot).
 static void BLE_ReadCalibration(BLE_Controller *ctrl)
 {
-    (void)BLE_ReadCalibSlot(ctrl, 0x1FC040, 0x0130A8, &ctrl->left_x, &ctrl->left_y);
+    bool complete = BLE_ReadCalibSlot(ctrl, 0x1FC040, 0x0130A8, &ctrl->left_x, &ctrl->left_y);
+
     // Pro/GameCube have a second stick; a Joy-Con uses only the first slot.
     if (ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT &&
         ctrl->product_id != USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT) {
-        (void)BLE_ReadCalibSlot(ctrl, 0x1FC080, 0x0130E8, &ctrl->right_x, &ctrl->right_y);
+        if (!BLE_ReadCalibSlot(ctrl, 0x1FC080, 0x0130E8, &ctrl->right_x, &ctrl->right_y)) {
+            complete = false;
+        }
     }
-    ctrl->calibrated = true;
+    ctrl->calibrated = complete;
 }
 
 // Player LED (command 0x09 / subcmd 0x07). The wired UpdateSlotLED
@@ -781,6 +987,26 @@ static void BLE_SetPlayerLED(BLE_Controller *ctrl, int player_index)
         data[0] = pattern[player_index % 8];
     }
     BLE_SendCommand(ctrl, 0x09, 0x07, data, sizeof(data), NULL, 0);
+}
+
+// The unified path's feature flags, through the BLE reference's
+// enableFeatures (controller.py:370-373): command 0x0c/0x02 (init) then
+// 0x0c/0x04 (enable), both carrying the mask. FEATURE_MOTION = 0x04
+// (controller.py:59). The wired driver's 0x27 is a USB-path value and sets
+// unrelated bits here. The mask is the union of every feature this driver
+// keeps active: the proven pattern for multiple features is one combined
+// init+enable (windows10-gyro controller.py:802 sends MOTION | MOUSE |
+// MAGNETOMETER in a single call), so a motion-only toggle must not drop the
+// mouse or magnetometer bits.
+static void BLE_SendFeatures(BLE_Controller *ctrl)
+{
+    const Uint8 flags[4] = { (Uint8)((ctrl->sensors_enabled ? 0x04 : 0x00) |
+                                     (ctrl->mouse_enabled ? 0x10 : 0x00) |
+                                     (ctrl->magnetometer_enabled ? 0x80 : 0x00)),
+                             0x00, 0x00, 0x00 };
+
+    BLE_SendCommand(ctrl, 0x0c, 0x02, flags, sizeof(flags), NULL, 0);
+    BLE_SendCommand(ctrl, 0x0c, 0x04, flags, sizeof(flags), NULL, 0);
 }
 
 // VibrationData 5-byte LE bit-pack, transcribed from controller.py
@@ -798,7 +1024,29 @@ static bool BLE_WriteCommandNoReply(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcm
     Uint8 frame[BLE_COMMAND_FRAME_MAX];
     const int length = BLE_BuildCommand(frame, cmd, subcmd, data, data_len);
 
-    return length != 0 && BLE_WriteCommandFrame(ctrl, frame, length, false);
+    return length != 0 && !BLE_Canceled(ctrl) && BLE_WriteCommandFrame(ctrl, frame, length, false);
+}
+
+// A console-session command whose reply the driver does not use, written
+// without waiting for it and followed by BLE_CONSOLE_COMMAND_GAP_MS, the
+// longest FlexInput's write_quick waits after each (hub.rs:1432-1443). A
+// reply that comes later matches no sender, since a reply must echo the
+// command and, for a read, its length and address (BLE_FindReply). Nothing
+// is written once Quit has told the run to stop.
+static void BLE_SendConsoleCommand(BLE_Controller *ctrl, Uint8 cmd, Uint8 subcmd, const Uint8 *data, int data_len)
+{
+    if (BLE_WriteCommandNoReply(ctrl, cmd, subcmd, data, data_len)) {
+        SDL_Delay(BLE_CONSOLE_COMMAND_GAP_MS);
+    }
+}
+
+// A console-session memory read whose data the driver does not use, as
+// BLE_ReadMemory frames it
+static void BLE_RequestConsoleRead(BLE_Controller *ctrl, Uint8 length, Uint32 addr)
+{
+    const Uint8 req[8] = { length, 0x7e, 0x00, 0x00, (Uint8)addr, (Uint8)(addr >> 8), (Uint8)(addr >> 16), (Uint8)(addr >> 24) };
+
+    BLE_SendConsoleCommand(ctrl, 0x02, 0x04, req, (int)sizeof(req));
 }
 
 // GameCube motor on/off, via command 0x0A subcommand 0x02. Motor on = data byte
@@ -891,7 +1139,7 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
         SDL_memcpy(&packet[17], group, 16);
         len = 33;
     }
-    return SDL_BLEGATT_WriteCharacteristic(ctrl->vibration_char, packet, len, false);
+    return SDL_BLEGATT_WriteCharacteristic(ctrl->vibration_char, packet, len, false, &ctrl->run->cancel);
 }
 
 // ---------------------------------------------------------------------------
@@ -903,10 +1151,9 @@ static bool BLE_WriteRumble(BLE_Controller *ctrl, Uint16 low, Uint16 high)
 // one 0x0553 section beside its Flags (switch2-bt RESEARCH.md:285-286, and
 // btstack_build/sw2d_btstack.c:152-166 finds the controller by that section).
 // ---------------------------------------------------------------------------
-static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void *userdata)
+static void BLE_TakeAdvertisement(const SDL_BLEAdvertisement *advertisement)
 {
     int i;
-    (void)userdata;
 
     for (i = 0; i < advertisement->nmanufacturer; ++i) {
         const SDL_BLEManufacturerData *mfg = &advertisement->manufacturer[i];
@@ -926,12 +1173,16 @@ static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void 
                 // multi-second connect don't start duplicate connects, then
                 // hand the connect to a worker thread so this WinRT callback
                 // returns immediately and the thread pool stays free to
-                // deliver the open/discovery completions.
-                if (supported && BLE_TryReserveConnect(advertisement->address)) {
+                // deliver the open/discovery completions. The reservation
+                // counts the thread in its run, which Quit waits for, so the
+                // line below cannot come after Quit, which keeps waiting.
+                BLE_Run *run = supported ? BLE_TryReserveConnect(advertisement->address) : NULL;
+                if (run) {
                     BLE_ConnectRequest *req = (BLE_ConnectRequest *)SDL_malloc(sizeof(*req));
-                    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx", vendor, product, (unsigned long long)advertisement->address);
+                    BLE_RUN_LOG(run, "BLE Switch2 advertisement matched: VID %04x PID %04x addr %012llx", vendor, product, (unsigned long long)advertisement->address);
                     if (req) {
                         SDL_Thread *thread;
+                        req->run = run;
                         req->address = advertisement->address;
                         req->vendor = vendor;
                         req->product = product;
@@ -940,10 +1191,12 @@ static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void 
                             SDL_DetachThread(thread);
                         } else {
                             SDL_free(req);
-                            BLE_ReleaseConnect(advertisement->address);
+                            BLE_ReleaseConnect(run, advertisement->address);
+                            SDL_AddAtomicInt(&run->threads, -1);
                         }
                     } else {
-                        BLE_ReleaseConnect(advertisement->address);
+                        BLE_ReleaseConnect(run, advertisement->address);
+                        SDL_AddAtomicInt(&run->threads, -1);
                     }
                 }
             }
@@ -951,20 +1204,47 @@ static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void 
     }
 }
 
-// True once the unified input has reported, waiting up to
-// BLE_CONSOLE_FALLBACK_MS. The choice is made once: a genuine pad that missed
-// the wait keeps the console path until it reconnects.
-static bool BLE_AwaitUnifiedReport(BLE_Controller *ctrl)
+// The listener. Counted before the flag is read (ble_listener_calls).
+static void BLE_OnAdvertisement(const SDL_BLEAdvertisement *advertisement, void *userdata)
 {
+    (void)userdata;
+
+    SDL_AddAtomicInt(&ble_listener_calls, 1);
+    if (SDL_GetAtomicInt(&ble_listening)) {
+        BLE_TakeAdvertisement(advertisement);
+    }
+    SDL_AddAtomicInt(&ble_listener_calls, -1);
+}
+
+// True once the unified input has reported, waiting up to timeout_ms. The
+// choice is made once: a genuine pad that missed the wait keeps the console
+// path until it connects anew, and a recovery in place keeps it too.
+static bool BLE_AwaitUnifiedReport(BLE_Controller *ctrl, Sint32 timeout_ms)
+{
+    Sint32 waited = 0;
+
     if (!ctrl->input_handler || !ctrl->first_report_sem) {
         return false;
     }
-    return SDL_GetAtomicInt(&ctrl->unified_reports) > 0 ||
-           SDL_WaitSemaphoreTimeout(ctrl->first_report_sem, BLE_CONSOLE_FALLBACK_MS);
+    // In 50 ms slices, so Quit's stop ends the wait (BLE_QUIT_WAIT_MS). The
+    // slices are counted, so the wait reads no clock (BLE_Run).
+    while (SDL_GetAtomicInt(&ctrl->unified_reports) == 0) {
+        Sint32 slice;
+
+        if (BLE_Canceled(ctrl) || waited >= timeout_ms) {
+            return false;
+        }
+        slice = SDL_min(50, timeout_ms - waited);
+        (void)SDL_WaitSemaphoreTimeout(ctrl->first_report_sem, slice);
+        waited += slice;
+    }
+    return true;
 }
 
 // The unified path of a Joy-Con 2, once its first report has arrived.
-static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl)
+// The connect reads the sensor hints, and a recovery sends what the connect
+// chose (read_hints false), since Open has already sized the joystick by it.
+static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl, bool read_hints)
 {
     // Joy-Con 2 input-mode write (Format 3 / 0x30). windows10-gyro sends this
     // raw 11-byte buffer to the command characteristic for the Joy-Cons
@@ -978,6 +1258,9 @@ static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl)
     // buttons at [2:5] and triggers at [12] and [13] (src/controller.py
     // :1317-1370), which this driver's GameCube decoder does not parse.
     static const Uint8 set_input_mode[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30 };
+    if (BLE_Canceled(ctrl)) {
+        return;
+    }
     (void)BLE_WriteCommandFrame(ctrl, set_input_mode, (int)sizeof(set_input_mode), false);
 
     /* Opt-in side-channel sensors (Joy-Con only, both L and R). Feature
@@ -988,10 +1271,10 @@ static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl)
        controller.py:713's FEATSEL 0x94 = motion | mouse | magnetometer).
        Both ride one combined init+enable, the reference's own multi-feature
        pattern, fire-and-forget like the Format-3 write above. */
-    if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE, false)) {
+    if (read_hints && SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MOUSE, false)) {
         ctrl->mouse_enabled = true;
     }
-    if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER, false)) {
+    if (read_hints && SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2_MAGNETOMETER, false)) {
         ctrl->magnetometer_enabled = true;
     }
     if (ctrl->mouse_enabled || ctrl->magnetometer_enabled) {
@@ -999,6 +1282,77 @@ static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl)
         (void)BLE_WriteCommandNoReply(ctrl, 0x0C, 0x02, feature_mask, (int)sizeof(feature_mask));
         (void)BLE_WriteCommandNoReply(ctrl, 0x0C, 0x04, feature_mask, (int)sizeof(feature_mask));
     }
+}
+
+// A value delegate on the characteristic, then its notifications. The
+// controller's own delegate is registered again after a recovery, on the
+// characteristic found anew, so a recovery allocates none
+// (SDL_BLEGATT_ReAddValueHandler). False when no delegate is registered or
+// the characteristic is missing.
+static bool BLE_Subscribe(BLE_Controller *ctrl, GattChar *characteristic, void **handler, EventRegistrationToken *token,
+                          SDL_BLEGATT_ValueCallback callback, int index)
+{
+    if (!characteristic || BLE_Canceled(ctrl)) {
+        return false;
+    }
+    if (*handler) {
+        if (!SDL_BLEGATT_ReAddValueHandler(characteristic, *handler, token)) {
+            return false;
+        }
+    } else {
+        *handler = SDL_BLEGATT_AddValueHandler(characteristic, callback, ctrl, index, token);
+        if (!*handler) {
+            return false;
+        }
+    }
+    return SDL_BLEGATT_EnableNotifications(characteristic, &ctrl->run->cancel);
+}
+
+// The Switch 2 service's characteristics of the unified path, the
+// vibration output the type's own
+static void BLE_FindUnifiedCharacteristics(Uint16 product_id, GattService3 *service3, SDL_AtomicInt *cancel, GattChar **input,
+                                           GattChar **command, GattChar **response, GattChar **vibration)
+{
+    const GUID *vibration_uuid;
+
+    switch (product_id) {
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
+        vibration_uuid = &GUID_Switch2VibeJCL;
+        break;
+    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
+        vibration_uuid = &GUID_Switch2VibeJCR;
+        break;
+    case USB_PRODUCT_NINTENDO_SWITCH2_PRO:
+        vibration_uuid = &GUID_Switch2VibePro;
+        break;
+    default:
+        vibration_uuid = &GUID_Switch2VibeGC;
+        break;
+    }
+    *input = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Input, cancel);
+    *command = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Command, cancel);
+    *response = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2CmdResponse, cancel);
+    *vibration = SDL_BLEGATT_FindCharacteristic(service3, vibration_uuid, cancel);
+}
+
+// Rumble goes over the vibration output, or the command channel for the
+// GameCube (BLE_PumpGameCubeRumble)
+static bool BLE_CanRumble(const BLE_Controller *ctrl)
+{
+    return (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER) ? (ctrl->command_char != NULL)
+                                                                                 : (ctrl->vibration_char != NULL);
+}
+
+// The side's console channel of a Joy-Con 2 (hifihedgehog/SDL#38)
+static void BLE_FindConsoleCharacteristics(Uint16 product_id, GattService3 *service3, SDL_AtomicInt *cancel, GattChar **command,
+                                           GattChar **input, GattChar **extended_response)
+{
+    const bool left = (product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT);
+
+    *command = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2ConsoleCommandJCL : &GUID_Switch2ConsoleCommandJCR, cancel);
+    *input = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2NativeInputJCL : &GUID_Switch2NativeInputJCR, cancel);
+    *extended_response = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2ExtendedResponseJCL : &GUID_Switch2ExtendedResponseJCR,
+                                                        cancel);
 }
 
 // The console path of a Joy-Con 2 (hifihedgehog/SDL#38). Third-party
@@ -1015,8 +1369,13 @@ static void BLE_StartUnifiedJoyCon(BLE_Controller *ctrl)
 // owner's console. The stick calibration comes from the console's reads:
 // the factory block at +0x28 in the 0x13080 read, where the wired driver
 // parses it (SDL_hidapi_switch2.c:581-586), and the user block at 0x1FC040.
-// True once the side's input is subscribed.
-static bool BLE_StartConsoleSession(BLE_Controller *ctrl, BleDevice3 *device3, GattService3 *service3)
+// Those two reads wait for their replies. Every other command goes out
+// without waiting, BLE_CONSOLE_COMMAND_GAP_MS apart, in the same order
+// (hifihedgehog/SDL#49). The side's characteristics are found by the
+// caller. A recovery runs the session again on the characteristics it found
+// anew, and keeps the calibration it had when neither read gives one. True
+// once the side's input is subscribed.
+static bool BLE_StartConsoleSession(BLE_Controller *ctrl, BleDevice3 *device3)
 {
     static const Uint8 session_start[] = { 0x01, 0x00 };
     static const Uint8 report_rate[] = { 0x85, 0x00 };
@@ -1030,30 +1389,20 @@ static bool BLE_StartConsoleSession(BLE_Controller *ctrl, BleDevice3 *device3, G
     // starts its session (JoyconConnection.kt LED_ALL_ON). Open sets the slot.
     static const Uint8 led[8] = { 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
     const bool left = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT);
+    const bool replay = ctrl->console;
     GattService3 *session_service;
-    bool session_started = false;
+    bool session_started = false, extended = false, parsed = false;
+    Switch2_AxisCal x, y;
     Uint8 block[0x40];
     int got;
 
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 no report on the unified input within %d ms: starting the console session",
-                 BLE_CONSOLE_FALLBACK_MS);
-
-    ctrl->console_command_char = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2ConsoleCommandJCL : &GUID_Switch2ConsoleCommandJCR, NULL);
-    ctrl->native_input_char = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2NativeInputJCL : &GUID_Switch2NativeInputJCR, NULL);
-    ctrl->extended_response_char = SDL_BLEGATT_FindCharacteristic(service3, left ? &GUID_Switch2ExtendedResponseJCL : &GUID_Switch2ExtendedResponseJCR, NULL);
-    if (!ctrl->console_command_char || !ctrl->native_input_char) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console channel missing: command=%d input=%d",
-                     ctrl->console_command_char != NULL, ctrl->native_input_char != NULL);
-        return false;
-    }
-
     // Open the session: 01 00 to 00c5af5d-...-bd282 (handle 0x0005), with
     // response as tarabdaar writes it (JoyConBLE.swift beginNYXISession)
-    session_service = SDL_BLEGATT_FindService(device3, &GUID_Switch2SessionService, 1, 1, "Switch2 session", NULL);
+    session_service = SDL_BLEGATT_FindService(device3, &GUID_Switch2SessionService, 1, 1, "Switch2 session", &ctrl->run->cancel);
     if (session_service) {
-        GattChar *start = SDL_BLEGATT_FindCharacteristic(session_service, &GUID_Switch2SessionStart, NULL);
+        GattChar *start = SDL_BLEGATT_FindCharacteristic(session_service, &GUID_Switch2SessionStart, &ctrl->run->cancel);
         if (start) {
-            session_started = SDL_BLEGATT_WriteCharacteristic(start, session_start, (int)sizeof(session_start), true);
+            session_started = SDL_BLEGATT_WriteCharacteristic(start, session_start, (int)sizeof(session_start), true, &ctrl->run->cancel);
             __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(start);
         }
         __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_Release(session_service);
@@ -1061,97 +1410,112 @@ static bool BLE_StartConsoleSession(BLE_Controller *ctrl, BleDevice3 *device3, G
 
     // The replies arrive on the side's extended response, or on c765a961,
     // which is already subscribed
-    if (ctrl->extended_response_char) {
-        ctrl->extended_response_handler = SDL_BLEGATT_AddValueHandler(ctrl->extended_response_char, BLE_OnResponseValue, ctrl, 1,
-                                                                      &ctrl->extended_response_token);
-        if (ctrl->extended_response_handler) {
-            SDL_BLEGATT_EnableNotifications(ctrl->extended_response_char);
-        }
-    }
+    extended = BLE_Subscribe(ctrl, ctrl->extended_response_char, &ctrl->extended_response_handler, &ctrl->extended_response_token,
+                             BLE_OnResponseValue, 1);
 
     // From here every command frame goes to the side's command
-    // characteristic, and only the side's input reaches the report slot
-    SDL_LockMutex(ctrl->report_lock);
-    ctrl->console = true;
-    ctrl->report_pending = false;
-    SDL_UnlockMutex(ctrl->report_lock);
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: start %s, extended response %s",
-                 session_started ? "written" : "not written", ctrl->extended_response_handler ? "subscribed" : "absent");
+    // characteristic, and only the side's input reaches the report slot. A
+    // restart finds the path set, and Open reads it on the joystick thread.
+    if (!replay) {
+        SDL_LockMutex(ctrl->report_lock);
+        ctrl->console = true;
+        ctrl->report_pending = false;
+        SDL_UnlockMutex(ctrl->report_lock);
+    }
+    BLE_LOG(ctrl, "BLE Switch2 console session: start %s, extended response %s", session_started ? "written" : "not written",
+            extended ? "subscribed" : "absent");
 
-    BLE_SendCommand(ctrl, 0x07, 0x01, NULL, 0, NULL, 0);
-    (void)BLE_ReadMemory(ctrl, 0x40, 0x13000, block, (int)sizeof(block));
-    BLE_SendCommand(ctrl, 0x10, 0x01, NULL, 0, NULL, 0);
-    BLE_SendCommand(ctrl, 0x16, 0x01, NULL, 0, NULL, 0);
-    BLE_SendCommand(ctrl, 0x0A, 0x02, vibration_sample, (int)sizeof(vibration_sample), NULL, 0);
-    BLE_SendCommand(ctrl, 0x09, 0x07, led, (int)sizeof(led), NULL, 0);
-    BLE_SendCommand(ctrl, 0x0C, 0x02, features, (int)sizeof(features), NULL, 0);
-    SDL_zero(ctrl->left_x);
-    SDL_zero(ctrl->left_y);
+    BLE_SendConsoleCommand(ctrl, 0x07, 0x01, NULL, 0);
+    BLE_RequestConsoleRead(ctrl, 0x40, 0x13000);
+    BLE_SendConsoleCommand(ctrl, 0x10, 0x01, NULL, 0);
+    BLE_SendConsoleCommand(ctrl, 0x16, 0x01, NULL, 0);
+    BLE_SendConsoleCommand(ctrl, 0x0A, 0x02, vibration_sample, (int)sizeof(vibration_sample));
+    BLE_SendConsoleCommand(ctrl, 0x09, 0x07, led, (int)sizeof(led));
+    BLE_SendConsoleCommand(ctrl, 0x0C, 0x02, features, (int)sizeof(features));
+    SDL_zero(x);
+    SDL_zero(y);
     got = BLE_ReadMemory(ctrl, 0x40, 0x13080, block, (int)sizeof(block));
     if (got >= 0x28 + 9) {
-        (void)BLE_ParseStickCalibration(&ctrl->left_x, &ctrl->left_y, &block[0x28]);
+        parsed = BLE_ParseStickCalibration(&x, &y, &block[0x28]);
     }
     got = BLE_ReadMemory(ctrl, 0x40, 0x1FC040, block, (int)sizeof(block));
-    (void)BLE_ParseUserCalibration(&ctrl->left_x, &ctrl->left_y, block, got);
-    (void)BLE_ReadMemory(ctrl, 0x10, 0x13040, block, (int)sizeof(block));
-    (void)BLE_ReadMemory(ctrl, 0x18, 0x13100, block, (int)sizeof(block));
-    BLE_SendCommand(ctrl, 0x11, 0x03, NULL, 0, NULL, 0);
-    (void)BLE_ReadMemory(ctrl, 0x20, 0x13060, block, (int)sizeof(block));
-    BLE_SendCommand(ctrl, 0x0A, 0x08, vibration_data, (int)sizeof(vibration_data), NULL, 0);
-    BLE_SendCommand(ctrl, 0x11, 0x01, NULL, 0, NULL, 0);
-    BLE_SendCommand(ctrl, 0x0C, 0x04, features, (int)sizeof(features), NULL, 0);
-    ctrl->calibrated = true;
+    if (BLE_ParseUserCalibration(&x, &y, block, got)) {
+        parsed = true;
+    }
+    if (parsed || !replay) {
+        ctrl->left_x = x;
+        ctrl->left_y = y;
+    }
+    BLE_RequestConsoleRead(ctrl, 0x10, 0x13040);
+    BLE_RequestConsoleRead(ctrl, 0x18, 0x13100);
+    BLE_SendConsoleCommand(ctrl, 0x11, 0x03, NULL, 0);
+    BLE_RequestConsoleRead(ctrl, 0x20, 0x13060);
+    BLE_SendConsoleCommand(ctrl, 0x0A, 0x08, vibration_data, (int)sizeof(vibration_data));
+    BLE_SendConsoleCommand(ctrl, 0x11, 0x01, NULL, 0);
+    BLE_SendConsoleCommand(ctrl, 0x0C, 0x04, features, (int)sizeof(features));
 
     // The report rate, then the side's input (handles 0x0010 and 0x000F),
     // the console's last two writes
-    if (!SDL_BLEGATT_WriteDescriptorValue(ctrl->native_input_char, &GUID_Switch2ReportRate, report_rate, (int)sizeof(report_rate))) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: report-rate descriptor not written");
+    if (!SDL_BLEGATT_WriteDescriptorValue(ctrl->native_input_char, &GUID_Switch2ReportRate, report_rate, (int)sizeof(report_rate),
+                                          &ctrl->run->cancel)) {
+        BLE_LOG(ctrl, "BLE Switch2 console session: report-rate descriptor not written");
     }
-    ctrl->native_input_handler = SDL_BLEGATT_AddValueHandler(ctrl->native_input_char, BLE_OnInputValue, ctrl, BLE_INPUT_NATIVE,
-                                                             &ctrl->native_input_token);
-    if (!ctrl->native_input_handler || !SDL_BLEGATT_EnableNotifications(ctrl->native_input_char)) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: the %s input could not be subscribed", left ? "left" : "right");
+    if (!BLE_Subscribe(ctrl, ctrl->native_input_char, &ctrl->native_input_handler, &ctrl->native_input_token, BLE_OnInputValue,
+                       BLE_INPUT_NATIVE)) {
+        BLE_LOG(ctrl, "BLE Switch2 console session: the %s input could not be subscribed", left ? "left" : "right");
         return false;
     }
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 console session: %s input subscribed", left ? "left" : "right");
+    BLE_LOG(ctrl, "BLE Switch2 console session: %s input subscribed", left ? "left" : "right");
     return true;
 }
 
 // ---------------------------------------------------------------------------
 // Connect + GATT discovery + subscribe (called from the connect thread). The
 // open, the uncached discovery and the lookups are the shared transport's
-// (SDL_ble_gatt.c).
+// (SDL_ble_gatt.c). Every await takes the run's cancel flag, so Quit's stop
+// ends the connect within BLE_QUIT_WAIT_MS.
 // ---------------------------------------------------------------------------
-static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name)
+static void BLE_ConnectAndSubscribe(BLE_Run *run, Uint64 bluetooth_address, Uint16 vendor_id, Uint16 product_id, char *name)
 {
     BleDevice *device = NULL;
     BleDevice3 *device3 = NULL;
     GattService3 *service3 = NULL;
+    SDL_BLEGATTSession *session = NULL;
     BLE_Controller *ctrl = NULL;
+    bool input = false, paired;
 
     // Open by raw address with the 20 s ceiling (SDL_BLEGATT_OpenDevice). This
     // runs on the connect thread, so the wait does not starve the WinRT thread
     // pool that has to deliver the completion.
-    device = SDL_BLEGATT_OpenDevice(bluetooth_address, NULL);
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 open addr %012llx: device=%p",
-                 (unsigned long long)bluetooth_address, (void *)device);
+    device = SDL_BLEGATT_OpenDevice(bluetooth_address, &run->cancel);
+    BLE_RUN_LOG(run, "BLE Switch2 open addr %012llx: device=%p", (unsigned long long)bluetooth_address, (void *)device);
     if (!device) {
         return;
     }
 
+    // A GattSession with MaintainConnection, held for the controller's life,
+    // so Windows connects the link again by itself after it drops, as it does
+    // for FlexInput (commit d963276d6, CHANGELOG 0.13.5). It does not stop a
+    // Joy-Con 2 clone's drop (hifihedgehog/SDL#49). The pairing state tells a
+    // pairing started in Windows settings, which the controller ends by
+    // hanging up (FlexInput crates/joycon2/src/win_pair.rs:5-13), from the
+    // timeout of the pairing a clone asks for.
+    session = SDL_BLEGATT_OpenSession(device, &run->cancel);
+    // Read before the log line checks whether Quit has left this thread
+    // running, since the read takes no cancel flag
+    paired = SDL_BLEGATT_IsPaired(device);
+    BLE_RUN_LOG(run, "BLE Switch2 Windows pairing: %s", paired ? "paired" : "not paired");
+
     // Discover the Switch 2 service uncached, up to 10 tries 500 ms apart while
     // the bond-free link comes up (SDL_BLEGATT_FindService).
     if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(device, &IID_BleDevice3, (void **)&device3)) || !device3) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
-        return;
+        goto cleanup;
     }
-    service3 = SDL_BLEGATT_FindService(device3, &GUID_Switch2Service, 1, 10, "Switch2", NULL);
+    service3 = SDL_BLEGATT_FindService(device3, &GUID_Switch2Service, 1, 10, "Switch2", &run->cancel);
     if (!service3) {
-        SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 GATT service discovery failed after 10 attempts");
-        BLE_NoteConnectFailure(bluetooth_address); // back off; likely busy on USB
-        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_Release(device3);
-        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
-        return;
+        BLE_RUN_LOG(run, "BLE Switch2 GATT service discovery failed after 10 attempts");
+        BLE_NoteConnectFailure(run, bluetooth_address); // back off; likely busy on USB
+        goto cleanup;
     }
 
     // Best-effort throughput bump, now that the link is up
@@ -1163,6 +1527,7 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     if (!ctrl) {
         goto cleanup;
     }
+    ctrl->run = run;
     ctrl->report_lock = SDL_CreateMutex();
     ctrl->bluetooth_address = bluetooth_address;
     ctrl->vendor_id = vendor_id;
@@ -1187,8 +1552,12 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
         }
         ctrl->name = SDL_strdup(type_name);
     }
+    // Ownership of the device and the session goes to ctrl, and the cleanup
+    // releases both through it
     ctrl->device = device;
-    device = NULL; // ownership transferred to ctrl; cleanup releases via ctrl
+    device = NULL;
+    ctrl->session = session;
+    session = NULL;
     ctrl->instance_id = SDL_GetNextObjectID();
     ctrl->guid = SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_BLUETOOTH, vendor_id, product_id, 0, NULL, ctrl->name, 'h', 0);
 
@@ -1197,80 +1566,100 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
     ctrl->first_report_sem = SDL_CreateSemaphore(0);
     ctrl->player_index = -1;
 
-    ctrl->input_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Input, NULL);
-    ctrl->command_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2Command, NULL);
-    ctrl->response_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2CmdResponse, NULL);
-    switch (product_id) {
-    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT:
-        ctrl->vibration_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2VibeJCL, NULL);
-        break;
-    case USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT:
-        ctrl->vibration_char = SDL_BLEGATT_FindCharacteristic(service3, &GUID_Switch2VibeJCR, NULL);
-        break;
-    default:
-        ctrl->vibration_char = SDL_BLEGATT_FindCharacteristic(service3,
-            (product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO) ? &GUID_Switch2VibePro : &GUID_Switch2VibeGC, NULL);
-        break;
-    }
-
-    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 connected: chars input=%d command=%d response=%d vibration=%d",
-                 ctrl->input_char != NULL, ctrl->command_char != NULL, ctrl->response_char != NULL, ctrl->vibration_char != NULL);
-
-    // Connect sequence per controller.py connect() (switch2-controllers/
-    // controller.py:253-265): enable the command-response notification first, then
-    // read calibration over the command channel, and only THEN enable the input
-    // report notification.
-    if (ctrl->response_char) {
-        ctrl->response_handler = SDL_BLEGATT_AddValueHandler(ctrl->response_char, BLE_OnResponseValue, ctrl, 0, &ctrl->response_token);
-        if (ctrl->response_handler) {
-            SDL_BLEGATT_EnableNotifications(ctrl->response_char);
-        }
-    }
-
-    // Read stick calibration over the command channel (best-effort).
-    BLE_ReadCalibration(ctrl);
-
-    if (ctrl->input_char) {
-        // Register the handler before enabling notifications (controller.py order).
-        ctrl->input_handler = SDL_BLEGATT_AddValueHandler(ctrl->input_char, BLE_OnInputValue, ctrl, BLE_INPUT_UNIFIED, &ctrl->input_token);
-        if (ctrl->input_handler) {
-            SDL_BLEGATT_EnableNotifications(ctrl->input_char);
-        }
-    }
-
-    // A Joy-Con 2 that reports on the unified input takes the unified path.
-    // One that stays silent, as the Joy-Con 2 clones do, takes the console
-    // path, and one that has neither is not added (hifihedgehog/SDL#38).
-    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
-        ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT) {
-        if (BLE_AwaitUnifiedReport(ctrl)) {
-            BLE_StartUnifiedJoyCon(ctrl);
-        } else if (!BLE_StartConsoleSession(ctrl, device3, service3)) {
-            BLE_NoteConnectFailure(bluetooth_address);
-            goto cleanup;
-        }
-    }
-
     // Link-loss detection (SDL#9 follow-up): without it a pad that powers off
     // (the SendEffect shutdown, a dead battery, out of range) stays registered
     // forever, and its address stays claimed in ble.controllers so every
     // reconnection advertisement is dropped by BLE_TryReserveConnect. The
     // callback only sets link_lost, and BLE_JoystickDetectDevices runs the
-    // teardown. If the append below is skipped (duplicate/teardown race), BLE_FreeController
-    // removes this subscription on the cleanup path like the others.
-    // SDL_BLEGATT_AddStatusHandler polls the status once after registering.
+    // recovery. It is registered as soon as the discovery has the link up, so
+    // a drop during the rest of the setup is recorded too: while the session
+    // holds MaintainConnection, Windows can connect the link again before the
+    // setup ends, with every characteristic found before the drop closed, and
+    // the recovery after the publish finds them anew (hifihedgehog/SDL#49).
+    // If the append below is skipped (duplicate/teardown race),
+    // BLE_FreeController removes this subscription on the cleanup path like
+    // the others. SDL_BLEGATT_AddStatusHandler polls the status once after
+    // registering.
     ctrl->status_handler = SDL_BLEGATT_AddStatusHandler(ctrl->device, &ctrl->link_lost, &ctrl->status_token);
 
-    SDL_LockJoysticks();
-    {
+    BLE_FindUnifiedCharacteristics(product_id, service3, &run->cancel, &ctrl->input_char, &ctrl->command_char, &ctrl->response_char,
+                                   &ctrl->vibration_char);
+    // Open reads this while a recovery runs, and only the joystick thread
+    // changes it, once a recovery has found a rumble characteristic the
+    // connect could not (BLE_FinishRestore)
+    ctrl->rumble_capable = BLE_CanRumble(ctrl);
+
+    BLE_LOG(ctrl, "BLE Switch2 connected: chars input=%d command=%d response=%d vibration=%d", ctrl->input_char != NULL,
+            ctrl->command_char != NULL, ctrl->response_char != NULL, ctrl->vibration_char != NULL);
+
+    // Connect sequence per controller.py connect() (switch2-controllers/
+    // controller.py:253-265): enable the command-response notification first, then
+    // read calibration over the command channel, and only THEN enable the input
+    // report notification. Handler before notifications (controller.py order).
+    (void)BLE_Subscribe(ctrl, ctrl->response_char, &ctrl->response_handler, &ctrl->response_token, BLE_OnResponseValue, 0);
+
+    // Read stick calibration over the command channel (best-effort).
+    BLE_ReadCalibration(ctrl);
+
+    input = BLE_Subscribe(ctrl, ctrl->input_char, &ctrl->input_handler, &ctrl->input_token, BLE_OnInputValue, BLE_INPUT_UNIFIED);
+
+    // A Joy-Con 2 that reports on the unified input takes the unified path.
+    // One that stays silent, as the Joy-Con 2 clones do, takes the console
+    // path, and one that has neither is not added (hifihedgehog/SDL#38). A
+    // genuine Joy-Con 2 answers the calibration reads on 649d4ac9 (handle
+    // 0x0014). The Mobapad M12-S answers no command there (FlexInput
+    // docs/BLUETOOTH_TRANSPORTS.md:132-138), and the NYXI Hyperion 3 ignores
+    // that characteristic (joycon2android docs/protocol.md "Console-protocol
+    // controllers"), so a Joy-Con 2 that answered neither read starts the
+    // console session without the wait for the unified input
+    // (hifihedgehog/SDL#49). A clone that answers them, such as the
+    // Hyperion 3 Ultra, still waits.
+    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
+        ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT) {
+        if (BLE_AwaitUnifiedReport(ctrl, ctrl->unified_answered ? BLE_CONSOLE_FALLBACK_MS : 0)) {
+            BLE_StartUnifiedJoyCon(ctrl, true);
+        } else {
+            if (BLE_Canceled(ctrl)) {
+                goto cleanup;
+            }
+            if (ctrl->unified_answered) {
+                BLE_LOG(ctrl, "BLE Switch2 no report on the unified input within %d ms: starting the console session", BLE_CONSOLE_FALLBACK_MS);
+            } else {
+                BLE_LOG(ctrl, "BLE Switch2 no reply to the calibration reads on 649d4ac9: starting the console session");
+            }
+            BLE_FindConsoleCharacteristics(ctrl->product_id, service3, &run->cancel, &ctrl->console_command_char, &ctrl->native_input_char,
+                                           &ctrl->extended_response_char);
+            if (!ctrl->console_command_char || !ctrl->native_input_char) {
+                BLE_LOG(ctrl, "BLE Switch2 console channel missing: command=%d input=%d", ctrl->console_command_char != NULL,
+                        ctrl->native_input_char != NULL);
+                BLE_NoteConnectFailure(run, bluetooth_address);
+                goto cleanup;
+            }
+            if (!BLE_StartConsoleSession(ctrl, device3)) {
+                BLE_NoteConnectFailure(run, bluetooth_address);
+                goto cleanup;
+            }
+        }
+    } else if (!input && !SDL_GetAtomicInt(&ctrl->link_lost)) {
+        // A Pro or GameCube controller whose input cannot be subscribed on a
+        // link that held would stay silent. One whose link dropped during
+        // the setup is published, and its recovery subscribes the input anew.
+        BLE_LOG(ctrl, "BLE Switch2 input could not be subscribed");
+        BLE_NoteConnectFailure(run, bluetooth_address);
+        goto cleanup;
+    }
+
+    // The joystick lock, unless Quit has told the run to stop meanwhile
+    // (BLE_LockForThread). ctrl then stays non-NULL and is torn down via the
+    // cleanup path below.
+    if (BLE_LockForThread(run)) {
         // Bail if a teardown ran while this connect was in WinRT discovery.
         // SDL_QuitJoysticks holds SDL_LockJoysticks from setting
         // SDL_joysticks_quitting through every driver->Quit(), and
         // BLE_JoystickQuit clears ble.initialized last under that same lock.
-        // A connect callback that was blocked here during shutdown must not
-        // re-grow the freed ble.controllers array or publish a joystick after
-        // the quit. ctrl stays non-NULL and is torn down via the cleanup path
-        // below.
+        // A connect thread that took the lock after the quit must not
+        // re-grow the freed ble.controllers array or publish a joystick.
+        // ctrl stays non-NULL and is torn down via the cleanup path below.
         BLE_Controller **grown = ble.initialized
             ? (BLE_Controller **)SDL_realloc(ble.controllers, sizeof(ble.controllers[0]) * (ble.controller_count + 1))
             : NULL;
@@ -1298,8 +1687,8 @@ static void BLE_ConnectAndSubscribe(Uint64 bluetooth_address, Uint16 vendor_id, 
                 }
             }
         }
+        SDL_UnlockJoysticks();
     }
-    SDL_UnlockJoysticks();
 
 cleanup:
     if (service3) {
@@ -1309,13 +1698,19 @@ cleanup:
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_Release(device3);
     }
     if (ctrl) {
-        // Failed to publish (calloc failure or a concurrent duplicate connect).
-        // Full teardown: unregister the ValueChanged handlers, release the
-        // characteristics and device, free the handlers/locks. ctrl->device == device
-        // at this point, so this also releases device.
+        // Failed to publish (a failed console start or a concurrent duplicate
+        // connect). Full teardown: unregister the ValueChanged handlers,
+        // release the characteristics, close the session and release the
+        // device, which ctrl holds by now.
         BLE_FreeController(ctrl);
-    } else if (device) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
+    } else {
+        // Failed before ctrl took the session and the device
+        if (session) {
+            SDL_BLEGATT_CloseSession(session);
+        }
+        if (device) {
+            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(device);
+        }
     }
 }
 
@@ -1795,27 +2190,293 @@ static void BLE_DecodeReport(BLE_Controller *ctrl, SDL_Joystick *joystick, Uint8
 }
 
 // ---------------------------------------------------------------------------
+// The recovery in place of a lost link (hifihedgehog/SDL#49). A Joy-Con 2
+// clone such as the Mobapad M12-S sends an SMP Security Request about 30 ms
+// after each connect. Windows answers with a pairing it never completes and
+// drops the link at the SMP timeout, 30 s later (FlexInput commit
+// f395e3511). While the controller's GattSession holds MaintainConnection,
+// Windows connects the link again by itself, and every characteristic of
+// the old link is closed (RO_E_CLOSED, crates/joycon2/src/hub.rs:578-582
+// and :649-652 at 0905b2fe). So the driver keeps the device and the session,
+// as FlexInput keeps them while it waits, since its first version let them
+// go and every reconnect then failed with Device not found (hub.rs:631-638).
+// It reads the status every BLE_RECOVERY_POLL_MS for up to
+// BLE_RECOVERY_WAIT_MS, as FlexInput waits for Windows (hub.rs:709-742),
+// then finds the service, uncached, and the characteristics again and starts
+// the controller once more. FlexInput disconnects and connects anew at that
+// point, since its btleplug clears the services it holds only on a
+// disconnect (hub.rs:649-657). The driver keeps the device and the session
+// through the restart too, so MaintainConnection holds throughout
+// (hifihedgehog/SDL#49). The joystick stays published, and its controls rest
+// for the gap.
+// The recovery thread never takes the joystick lock. While it runs, the
+// joystick thread touches none of the controller's WinRT objects
+// (BLE_LinkReady), and the thread hands the joystick thread the end through
+// recovery, which Detect reads.
+// ---------------------------------------------------------------------------
+
+// The joystick thread may use the controller's WinRT objects
+static bool BLE_LinkReady(BLE_Controller *ctrl)
+{
+    return SDL_GetAtomicInt(&ctrl->recovery) == BLE_RECOVERY_IDLE;
+}
+
+// Sleeps ms in slices of at most 50 ms. False once Quit has told the run to
+// stop.
+static bool BLE_RecoveryDelay(BLE_Controller *ctrl, Uint32 ms)
+{
+    Uint32 slept = 0;
+
+    while (slept < ms) {
+        const Uint32 slice = SDL_min(50u, ms - slept);
+
+        if (BLE_Canceled(ctrl)) {
+            return false;
+        }
+        SDL_Delay(slice);
+        slept += slice;
+    }
+    return !BLE_Canceled(ctrl);
+}
+
+// The connect's steps in its order, then the controller's start: the
+// console session on the console path, the unified start of a Joy-Con 2 on
+// the unified path. The path stays the one the connect chose. Each delegate
+// is the controller's own, registered again on the characteristic found
+// anew, and one the connect could not register, as when the link dropped
+// during the setup, is added now (BLE_Subscribe). The unified path reads the
+// stick calibration again only when the connect read not all of it. The
+// player LED and the features an app turned on are the joystick thread's to
+// set again (BLE_FinishRestore). True once the start ran, which on the
+// unified path needs the input subscribed.
+static bool BLE_StartAgain(BLE_Controller *ctrl, BleDevice3 *device3)
+{
+    bool input;
+
+    (void)BLE_Subscribe(ctrl, ctrl->response_char, &ctrl->response_handler, &ctrl->response_token, BLE_OnResponseValue, 0);
+    if (!ctrl->console && !ctrl->calibrated) {
+        BLE_ReadCalibration(ctrl);
+    }
+    input = BLE_Subscribe(ctrl, ctrl->input_char, &ctrl->input_handler, &ctrl->input_token, BLE_OnInputValue, BLE_INPUT_UNIFIED);
+    if (BLE_Canceled(ctrl)) {
+        return false;
+    }
+    if (ctrl->console) {
+        return BLE_StartConsoleSession(ctrl, device3);
+    }
+    if (!input) {
+        return false;
+    }
+    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_LEFT ||
+        ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_JOYCON_RIGHT) {
+        BLE_StartUnifiedJoyCon(ctrl, false);
+    }
+    return true;
+}
+
+// Finds the Switch 2 service and each characteristic of the controller's
+// path, uncached, and needs every one the controller had. Each one found
+// moves into the controller: one the controller had replaces the old link's,
+// whose delegate is removed and which is released, and one the connect could
+// not find, as when the link dropped during its lookups, is filled in. Then
+// the controller starts again. False when the service or a characteristic
+// the controller had is missing, as while Windows still holds the dropped
+// link's GATT state (FlexInput hub.rs:790-805), or when the start fails, so
+// the next poll tries again.
+static bool BLE_RestoreLink(BLE_Controller *ctrl)
+{
+    GattChar **const fields[] = {
+        &ctrl->input_char, &ctrl->command_char, &ctrl->response_char, &ctrl->vibration_char,
+        &ctrl->console_command_char, &ctrl->native_input_char, &ctrl->extended_response_char
+    };
+    // The delegate registered on each, and its registration
+    void *const handlers[SDL_arraysize(fields)] = {
+        ctrl->input_handler, NULL, ctrl->response_handler, NULL,
+        NULL, ctrl->native_input_handler, ctrl->extended_response_handler
+    };
+    const EventRegistrationToken tokens[SDL_arraysize(fields)] = {
+        ctrl->input_token, { 0 }, ctrl->response_token, { 0 },
+        { 0 }, ctrl->native_input_token, ctrl->extended_response_token
+    };
+    GattChar *found[SDL_arraysize(fields)];
+    BleDevice3 *device3 = NULL;
+    GattService3 *service3;
+    bool complete = false, started = false;
+    int i;
+
+    SDL_zeroa(found);
+    if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_QueryInterface(ctrl->device, &IID_BleDevice3, (void **)&device3)) || !device3) {
+        return false;
+    }
+    service3 = SDL_BLEGATT_FindService(device3, &GUID_Switch2Service, 1, BLE_RECOVERY_DISCOVERY_ATTEMPTS, "Switch2", &ctrl->run->cancel);
+    if (service3) {
+        BLE_FindUnifiedCharacteristics(ctrl->product_id, service3, &ctrl->run->cancel, &found[0], &found[1], &found[2], &found[3]);
+        if (ctrl->console) {
+            BLE_FindConsoleCharacteristics(ctrl->product_id, service3, &ctrl->run->cancel, &found[4], &found[5], &found[6]);
+        }
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3_Release(service3);
+        complete = true;
+        for (i = 0; i < (int)SDL_arraysize(fields); ++i) {
+            if (*fields[i] && !found[i]) {
+                complete = false;
+            }
+        }
+    }
+    if (complete) {
+        // The joystick thread takes what this adds of rumble once the
+        // recovery has ended (BLE_FinishRestore)
+        for (i = 0; i < (int)SDL_arraysize(fields); ++i) {
+            GattChar *old = *fields[i];
+
+            if (!found[i]) {
+                continue; // complete, so the controller had none here either
+            }
+            *fields[i] = found[i];
+            found[i] = NULL;
+            if (old) {
+                if (handlers[i]) {
+                    __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(old, tokens[i]);
+                }
+                __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(old);
+            }
+        }
+        started = BLE_StartAgain(ctrl, device3);
+    }
+    for (i = 0; i < (int)SDL_arraysize(fields); ++i) {
+        if (found[i]) {
+            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(found[i]);
+        }
+    }
+    __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3_Release(device3);
+    return started;
+}
+
+// Reads the status every BLE_RECOVERY_POLL_MS until BLE_RECOVERY_WAIT_MS has
+// passed since the loss, as FlexInput's await_windows_reconnect does
+// (hub.rs:721-742), and restores the link each time it reads Connected. A
+// loss during the start leaves the link down, so the status is read once
+// more after link_lost is cleared, and a loss after that read starts the
+// next recovery.
+static int SDLCALL BLE_RecoveryThread(void *data)
+{
+    BLE_Controller *ctrl = (BLE_Controller *)data;
+    BLE_Run *run = ctrl->run;
+    const bool ro_inited = SDL_BLEGATT_InitThread();
+    bool restored = false;
+
+    // The stop before the clock, so a thread Quit left to end on its own
+    // reads none (BLE_Run)
+    while (!restored && !BLE_Canceled(ctrl) && SDL_GetTicks() - ctrl->lost_ms < BLE_RECOVERY_WAIT_MS &&
+           BLE_RecoveryDelay(ctrl, BLE_RECOVERY_POLL_MS)) {
+        if (SDL_BLEGATT_IsConnected(ctrl->device) && BLE_RestoreLink(ctrl)) {
+            SDL_SetAtomicInt(&ctrl->link_lost, 0);
+            restored = SDL_BLEGATT_IsConnected(ctrl->device);
+        }
+    }
+    if (restored && !BLE_Canceled(ctrl)) {
+        ctrl->restored_ms = SDL_GetTicks();
+    }
+    if (!SDL_CompareAndSwapAtomicInt(&ctrl->recovery, BLE_RECOVERY_RUNNING, restored ? BLE_RECOVERY_RESTORED : BLE_RECOVERY_FAILED)) {
+        // Quit let go of the controller while this ran (BLE_FreeController)
+        BLE_ReleaseTransport(ctrl);
+    }
+    if (ro_inited) {
+        SDL_BLEGATT_QuitThread();
+    }
+    // Last, since Quit may go on once the run's threads reach 0
+    SDL_AddAtomicInt(&run->threads, -1);
+    return 0;
+}
+
+// Starts the recovery of a lost link on its own thread, under the joystick
+// lock. The joystick rests for the gap, as SDL recenters a joystick it
+// removes (SDL_PrivateJoystickRemoved), and the first report after the gap
+// posts every control again. False when the thread cannot start.
+static bool BLE_StartRecovery(BLE_Controller *ctrl)
+{
+    SDL_Thread *thread;
+
+    if (ctrl->joystick) {
+        SDL_PrivateJoystickForceRecentering(ctrl->joystick);
+    }
+    SDL_LockMutex(ctrl->report_lock);
+    ctrl->report_pending = false;
+    SDL_UnlockMutex(ctrl->report_lock);
+    ctrl->have_last_state = false;
+    ctrl->lost_ms = SDL_GetTicks();
+    SDL_SetAtomicInt(&ctrl->link_lost, 0);
+    SDL_SetAtomicInt(&ctrl->recovery, BLE_RECOVERY_RUNNING);
+    SDL_AddAtomicInt(&ctrl->run->threads, 1);
+    thread = SDL_CreateThread(BLE_RecoveryThread, "BLESwitch2Recover", ctrl);
+    if (!thread) {
+        SDL_AddAtomicInt(&ctrl->run->threads, -1);
+        SDL_SetAtomicInt(&ctrl->recovery, BLE_RECOVERY_IDLE);
+        return false;
+    }
+    SDL_DetachThread(thread);
+    return true;
+}
+
+// The joystick thread's end of a recovery that brought the link back, under
+// the joystick lock: the player LED of an open joystick, and the features an
+// app turned on, both of which the controller lost with the link, and the
+// GameCube motor, which the rumble pump writes again
+static void BLE_FinishRestore(BLE_Controller *ctrl)
+{
+    SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link restored after %" SDL_PRIu64 " ms (%s path)",
+                 ctrl->restored_ms - ctrl->lost_ms, ctrl->console ? "console" : "unified");
+    ctrl->connected_ms = ctrl->restored_ms;
+    SDL_SetAtomicInt(&ctrl->recovery, BLE_RECOVERY_IDLE);
+    ctrl->gc_motor_known = false;
+    // A restart can find the rumble characteristic the connect could not
+    // (BLE_RestoreLink)
+    if (!ctrl->rumble_capable && BLE_CanRumble(ctrl)) {
+        ctrl->rumble_capable = true;
+        if (ctrl->joystick) {
+            SDL_SetBooleanProperty(SDL_GetJoystickProperties(ctrl->joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+        }
+    }
+    if (ctrl->joystick) {
+        BLE_SetPlayerLED(ctrl, ctrl->player_index);
+        if (!ctrl->console && ctrl->sensors_enabled) {
+            BLE_SendFeatures(ctrl);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SDL_JoystickDriver entry points.
 // ---------------------------------------------------------------------------
 static bool BLE_JoystickInit(void)
 {
+    BLE_Run *run;
+
     if (!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_BLE_SWITCH2, false)) {
         return true; // disabled, but the driver still loads cleanly
     }
     if (ble.initialized) {
         return true;
     }
+    // A new run, since a thread that the last Quit left running still
+    // holds the last one (BLE_Run)
+    run = (BLE_Run *)SDL_calloc(1, sizeof(*run));
+    if (!run) {
+        return false;
+    }
 
     // RoInitialize, the combase entry points and the MTA pin are the shared
     // transport's, counted across both BLE drivers.
     if (!SDL_BLEGATT_Init()) {
+        SDL_free(run);
         return false;
     }
     ble.transport = true;
+    ble.run = run;
 
     // Start the advertisement watcher, or join it when the generic BLE GATT
     // driver started it first. A watcher whose start failed still counts,
     // and Detect has it started again.
+    SDL_SetAtomicInt(&ble_listening, 1);
     if (SDL_BLEGATT_AddListener(BLE_OnAdvertisement, NULL)) {
         ble.scanning = true;
         ble.watcher_checked = SDL_GetTicks();
@@ -1828,16 +2489,17 @@ static bool BLE_JoystickInit(void)
 static void BLE_JoystickDetectDevices(void)
 {
     // Drain link-loss flags set by ConnectionStatusChanged (MTA callback) and
-    // tear the dead controllers down on the joystick thread. DetectDevices runs
+    // the ends of the recoveries, on the joystick thread. DetectDevices runs
     // under SDL_LockJoysticks (SDL_UpdateJoystickDevices, after
     // RunJoystickUpdates' per-joystick update walk), the same lock the connect
-    // append and Quit hold, so the array walk is safe. Removing the
-    // controller posts the removal to the app (fixes the stale registration) and
-    // makes BLE_GetControllerByAddress return NULL for the address, so
-    // BLE_TryReserveConnect accepts the pad's next advertisement and it can
-    // reconnect (SDL#9 follow-up). BLE_FreeController deliberately leaks the
-    // callback-touched state, so an in-flight callback on the dead controller
-    // stays safe.
+    // append and Quit hold, so the array walk is safe. A lost link starts a
+    // recovery in place (BLE_StartRecovery), and the joystick stays. Only a
+    // link that did not come back removes the controller, which posts the
+    // removal to the app and makes BLE_GetControllerByAddress return NULL for
+    // the address, so BLE_TryReserveConnect accepts the pad's next
+    // advertisement and it can reconnect (SDL#9 follow-up). BLE_FreeController
+    // deliberately leaks the callback-touched state, so an in-flight callback
+    // on the dead controller stays safe.
     int i;
 
     // A watcher whose start failed, as with the radio off at Init, or one
@@ -1851,14 +2513,51 @@ static void BLE_JoystickDetectDevices(void)
     }
     for (i = 0; i < ble.controller_count; ) {
         BLE_Controller *ctrl = ble.controllers[i];
-        if (SDL_GetAtomicInt(&ctrl->link_lost)) {
-            // How long the link held. Windows reclaims an unpaired Joy-Con 2
-            // link about 31 s after it opens (an HCI capture in FlexInput
-            // crates/joycon2/src/dongle.rs), and a Joy-Con 2 clone drops its
-            // link after 60 s without the console handshake (tarabdaar
-            // JoyConBLE.swift maybeBeginInit, hifihedgehog/SDL#38).
-            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link lost %" SDL_PRIu64 " ms after the joystick was added (%s path)",
-                         SDL_GetTicks() - ctrl->connected_ms, ctrl->console ? "console" : "unified");
+        const int recovery = SDL_GetAtomicInt(&ctrl->recovery);
+        const char *path = ctrl->console ? "console" : "unified";
+        bool remove = false;
+
+        // The first vendor frame the response callback kept, logged here,
+        // since a callback can still run after SDL_Quit has shut the log down
+        {
+            Uint8 frame[sizeof(ctrl->vendor_frame)];
+            int length = 0;
+
+            SDL_LockMutex(ctrl->response_lock);
+            if (ctrl->vendor_frame_pending) {
+                ctrl->vendor_frame_pending = false;
+                length = ctrl->vendor_frame_length;
+                SDL_memcpy(frame, ctrl->vendor_frame, sizeof(frame));
+            }
+            SDL_UnlockMutex(ctrl->response_lock);
+            if (length > 0) {
+                BLE_LogBytes(ctrl, "first vendor frame", frame, length);
+            }
+        }
+
+        if (recovery == BLE_RECOVERY_RESTORED) {
+            BLE_FinishRestore(ctrl);
+        } else if (recovery == BLE_RECOVERY_FAILED) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link not restored after %d s (%s path): removing the joystick",
+                         BLE_RECOVERY_WAIT_MS / 1000, path);
+            remove = true;
+        } else if (recovery == BLE_RECOVERY_IDLE && SDL_GetAtomicInt(&ctrl->link_lost)) {
+            // How long the link held. A Joy-Con 2 clone such as the Mobapad
+            // M12-S sends an SMP Security Request about 30 ms after each
+            // connect. Windows answers with a pairing it never completes and
+            // drops the link at the SMP timeout, 30 s later (FlexInput
+            // commit f395e3511 and crates/joycon2/src/win_pair.rs:5-13,
+            // Bluetooth Core 5.4 Vol 3 Part H 3.4). A genuine Joy-Con 2 sends
+            // no Security Request (joycon2android docs/protocol.md:440-441 at
+            // 8a1ed94).
+            // A clone also drops its link after 60 s without the console
+            // handshake (tarabdaar JoyConBLE.swift maybeBeginInit,
+            // hifihedgehog/SDL#38).
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 link lost %" SDL_PRIu64 " ms after it came up (%s path): waiting up to %d s for it",
+                         SDL_GetTicks() - ctrl->connected_ms, path, BLE_RECOVERY_WAIT_MS / 1000);
+            remove = !BLE_StartRecovery(ctrl);
+        }
+        if (remove) {
             SDL_RemoveJoystickDevice(ctrl->instance_id);
             ble.controllers[i] = ble.controllers[--ble.controller_count];
             BLE_FreeController(ctrl);
@@ -1873,7 +2572,10 @@ static void BLE_JoystickSetPlayerIndex(SDL_Joystick *joystick, int player_index)
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
     if (ctrl) {
         ctrl->player_index = player_index;
-        BLE_SetPlayerLED(ctrl, player_index);
+        // A recovery lights it once the link is back (BLE_FinishRestore)
+        if (BLE_LinkReady(ctrl)) {
+            BLE_SetPlayerLED(ctrl, player_index);
+        }
     }
 }
 
@@ -1933,23 +2635,20 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *device)
     // passthrough reads SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN into HasRumble) will
     // drive it, mirroring SDL_hidapijoystick.c:860. The cap must track actual
     // delivery: the GameCube rumbles over the command channel (BLE_PumpGameCubeRumble),
-    // every other type over the vibration characteristic.
-    {
-        bool can_rumble = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER)
-            ? (ctrl->command_char != NULL)
-            : (ctrl->vibration_char != NULL);
-        if (can_rumble) {
-            SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick),
-                                   SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
-        }
+    // every other type over the vibration characteristic. The connect decided
+    // it, and only the joystick thread changes it, when a recovery found the
+    // characteristic the connect could not (BLE_FinishRestore).
+    if (ctrl->rumble_capable) {
+        SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
     }
 
     // SDL_OpenJoystick calls SetPlayerIndex right after Open for a joystick
     // with a player index, and that call lights the slot's LED. Open turns
     // the LEDs off only for a joystick without one, so the LED command, which
-    // waits for its response, goes out once.
+    // waits for its response, goes out once. During a recovery the LED waits
+    // for the link (BLE_FinishRestore).
     ctrl->player_index = SDL_GetJoystickPlayerIndex(joystick);
-    if (ctrl->player_index < 0) {
+    if (ctrl->player_index < 0 && BLE_LinkReady(ctrl)) {
         BLE_SetPlayerLED(ctrl, ctrl->player_index);
     }
     return true;
@@ -1958,12 +2657,7 @@ static bool BLE_JoystickOpen(SDL_Joystick *joystick, SDL_JoystickDevice *device)
 static bool BLE_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
-    bool is_gc;
-    if (!ctrl) {
-        return SDL_Unsupported();
-    }
-    is_gc = (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER);
-    if (is_gc ? !ctrl->command_char : !ctrl->vibration_char) {
+    if (!ctrl || !ctrl->rumble_capable) {
         return SDL_Unsupported();
     }
     // Store the commanded amplitudes for the keep-alive pump (BLE_JoystickUpdate),
@@ -1977,7 +2671,8 @@ static bool BLE_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumb
     SDL_UnlockMutex(ctrl->report_lock);
     // The GameCube PWM state is owned by the update thread, so do not write inline
     // here (a different thread); the pump picks up the stored amplitudes next tick.
-    if (is_gc) {
+    // During a recovery the pump writes once the link is back.
+    if (ctrl->product_id == USB_PRODUCT_NINTENDO_SWITCH2_GAMECUBE_CONTROLLER || !BLE_LinkReady(ctrl)) {
         return true;
     }
     return BLE_WriteRumble(ctrl, low_frequency_rumble, high_frequency_rumble);
@@ -2016,7 +2711,8 @@ static bool BLE_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green, U
    response), so the helper would stall and then read a successful shutdown as
    a failure. Success here means the write was delivered. A reply to an effect
    can count only for a later sender of the same command and subcommand,
-   since a reply must echo both (BLE_FindReply). */
+   since a reply must echo both (BLE_FindReply). No effect goes out while a
+   recovery runs, since the link is down. */
 static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
@@ -2024,6 +2720,9 @@ static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int
     Uint8 frame[BLE_COMMAND_FRAME_MAX];
     int length;
 
+    if (ctrl && !BLE_LinkReady(ctrl)) {
+        return SDL_SetError("The Switch 2 controller's link is down");
+    }
     if (!ctrl || !BLE_HasCommandChannel(ctrl)) {
         return SDL_SetError("No BLE command channel for joystick");
     }
@@ -2045,33 +2744,21 @@ static bool BLE_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int
 static bool BLE_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
 {
     BLE_Controller *ctrl = BLE_GetControllerByInstance(joystick->instance_id);
-    // Enable/disable the IMU via the BLE reference's enableFeatures
-    // (controller.py:370-373): command 0x0c/0x02 (init) then 0x0c/0x04 (enable),
-    // both carrying the feature mask. FEATURE_MOTION = 0x04 (controller.py:59).
-    // The wired driver's 0x27 is a USB-path value and sets unrelated bits here.
-    // The mask is the union of every feature this driver keeps active: the
-    // proven pattern for multiple features is one combined init+enable
-    // (windows10-gyro controller.py:802 sends MOTION | MOUSE | MAGNETOMETER in
-    // a single call), so a motion-only toggle must not drop the mouse or
-    // magnetometer bits.
-    Uint8 flags[4] = { 0x00, 0x00, 0x00, 0x00 };
     if (!ctrl) {
         return SDL_SetError("No BLE controller for joystick");
     }
+    ctrl->sensors_enabled = enabled;
     if (ctrl->console) {
         // The console session's feature mask 0x37 already runs motion, and
         // no feature-select reply changes the report on this hardware
         // (joycon2android protocol.md "Motion block"), so only the posting
         // follows the request (hifihedgehog/SDL#38).
-        ctrl->sensors_enabled = enabled;
         return true;
     }
-    flags[0] = (Uint8)((enabled ? 0x04 : 0x00) |
-                       (ctrl->mouse_enabled ? 0x10 : 0x00) |
-                       (ctrl->magnetometer_enabled ? 0x80 : 0x00));
-    ctrl->sensors_enabled = enabled;
-    BLE_SendCommand(ctrl, 0x0c, 0x02, flags, sizeof(flags), NULL, 0);
-    BLE_SendCommand(ctrl, 0x0c, 0x04, flags, sizeof(flags), NULL, 0);
+    // A recovery sends them once the link is back (BLE_FinishRestore)
+    if (BLE_LinkReady(ctrl)) {
+        BLE_SendFeatures(ctrl);
+    }
     return true;
 }
 
@@ -2081,7 +2768,9 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
     Uint8 data[64];
     int size = 0;
 
-    if (!ctrl) {
+    // While a recovery runs, the joystick holds the rest BLE_StartRecovery
+    // sent, and no rumble goes out
+    if (!ctrl || !BLE_LinkReady(ctrl)) {
         return;
     }
     SDL_LockMutex(ctrl->report_lock);
@@ -2097,7 +2786,7 @@ static void BLE_JoystickUpdate(SDL_Joystick *joystick)
         // decoders use absolute BLE offsets. Dispatch by controller type.
         if (!ctrl->logged_first_report) {
             ctrl->logged_first_report = true;
-            BLE_LogBytes(ctrl->console ? "first console report" : "first input report", data, size); // confirms the byte offsets
+            BLE_LogBytes(ctrl, ctrl->console ? "first console report" : "first input report", data, size); // confirms the byte offsets
         }
         if (ctrl->console) {
             BLE_DecodeConsoleReport(ctrl, joystick, data, size);
@@ -2144,47 +2833,68 @@ static void BLE_JoystickClose(SDL_Joystick *joystick)
     }
 }
 
-static void BLE_FreeController(BLE_Controller *ctrl)
+// Removes the characteristic's value delegate when one is registered (a
+// handler and its token), then releases the characteristic
+static void BLE_ReleaseCharacteristic(GattChar *characteristic, const void *handler, const EventRegistrationToken *token)
 {
-    // Stop new notifications and release the WinRT COM objects. An in-flight
-    // ValueChanged callback uses only its event args and the controller's own
-    // buffers, not these objects, so releasing them here is safe. (WinRT holds
-    // its own reference to the characteristic for the duration of a callback.)
-    if (ctrl->input_char) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->input_char, ctrl->input_token);
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->input_char);
+    if (!characteristic) {
+        return;
     }
-    if (ctrl->command_char) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->command_char);
+    if (handler && token) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(characteristic, *token);
     }
-    if (ctrl->response_char) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->response_char, ctrl->response_token);
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->response_char);
+    __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(characteristic);
+}
+
+// Stop new notifications and release the WinRT COM objects. An in-flight
+// ValueChanged callback uses only its event args and the controller's own
+// buffers, not these objects, so releasing them here is safe. (WinRT holds
+// its own reference to the characteristic for the duration of a callback.)
+// The session goes before the device, as bleak closes them
+// (backends/winrt/client.py:486-503), with MaintainConnection cleared, so
+// Windows stops connecting a controller the driver has let go of
+// (hifihedgehog/SDL#49).
+static void BLE_ReleaseTransport(BLE_Controller *ctrl)
+{
+    BLE_ReleaseCharacteristic(ctrl->input_char, ctrl->input_handler, &ctrl->input_token);
+    BLE_ReleaseCharacteristic(ctrl->command_char, NULL, NULL);
+    BLE_ReleaseCharacteristic(ctrl->response_char, ctrl->response_handler, &ctrl->response_token);
+    BLE_ReleaseCharacteristic(ctrl->vibration_char, NULL, NULL);
+    BLE_ReleaseCharacteristic(ctrl->console_command_char, NULL, NULL);
+    BLE_ReleaseCharacteristic(ctrl->native_input_char, ctrl->native_input_handler, &ctrl->native_input_token);
+    BLE_ReleaseCharacteristic(ctrl->extended_response_char, ctrl->extended_response_handler, &ctrl->extended_response_token);
+    ctrl->input_char = NULL;
+    ctrl->command_char = NULL;
+    ctrl->response_char = NULL;
+    ctrl->vibration_char = NULL;
+    ctrl->console_command_char = NULL;
+    ctrl->native_input_char = NULL;
+    ctrl->extended_response_char = NULL;
+    if (ctrl->device && ctrl->status_handler) {
+        __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_remove_ConnectionStatusChanged(ctrl->device, ctrl->status_token);
     }
-    if (ctrl->vibration_char) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->vibration_char);
-    }
-    if (ctrl->console_command_char) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->console_command_char);
-    }
-    if (ctrl->native_input_char) {
-        if (ctrl->native_input_handler) {
-            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->native_input_char, ctrl->native_input_token);
-        }
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->native_input_char);
-    }
-    if (ctrl->extended_response_char) {
-        if (ctrl->extended_response_handler) {
-            __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_remove_ValueChanged(ctrl->extended_response_char, ctrl->extended_response_token);
-        }
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_Release(ctrl->extended_response_char);
+    if (ctrl->session) {
+        SDL_BLEGATT_CloseSession(ctrl->session);
+        ctrl->session = NULL;
     }
     if (ctrl->device) {
-        if (ctrl->status_handler) {
-            __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_remove_ConnectionStatusChanged(ctrl->device, ctrl->status_token);
-        }
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_Release(ctrl->device);
+        ctrl->device = NULL;
     }
+}
+
+static void BLE_FreeController(BLE_Controller *ctrl)
+{
+    // The controller's threads log nothing more
+    SDL_SetAtomicInt(&ctrl->quiet, 1);
+
+    // A recovery still running owns the WinRT objects, and its thread
+    // releases them when it ends (BLE_RecoveryThread). That happens only when
+    // Quit gave up waiting for it (BLE_QUIT_WAIT_MS).
+    if (SDL_CompareAndSwapAtomicInt(&ctrl->recovery, BLE_RECOVERY_RUNNING, BLE_RECOVERY_ABANDONED)) {
+        return;
+    }
+    BLE_ReleaseTransport(ctrl);
 
     // Deliberately leak the controller struct, its locks/semaphore, buffers, and
     // the delegates. A GATT ValueChanged callback may still be in-flight on a
@@ -2193,16 +2903,51 @@ static void BLE_FreeController(BLE_Controller *ctrl)
     // mutex or freeing the struct here would be a use-after-free. The leak is
     // bounded (one controller per connection attempt, reclaimed at process exit);
     // a future refcounted-controller design could free it deterministically.
-    (void)ctrl;
 }
 
 static void BLE_JoystickQuit(void)
 {
+    BLE_Run *run = ble.run;
+    const Uint64 start = SDL_GetTicks();
     int i;
 
     // The watcher stops when the last listener goes
     if (ble.scanning) {
         SDL_BLEGATT_RemoveListener(BLE_OnAdvertisement, NULL);
+    }
+
+    // The stop. Every connect and recovery thread ends at its next step, and
+    // an advertisement callback takes nothing more. None of them waits on
+    // the joystick lock, which Quit holds (BLE_LockForThread,
+    // BLE_LockForListener).
+    if (run) {
+        SDL_SetAtomicInt(&run->cancel, 1);
+    }
+    SDL_SetAtomicInt(&ble_listening, 0);
+
+    // A callback the watcher began before the listener was removed leaves
+    // within a few ms of the stop: it gives up its wait for the joystick
+    // lock, and one that had reserved an address starts its connect thread,
+    // which the wait below counts
+    while (SDL_GetAtomicInt(&ble_listener_calls) > 0) {
+        SDL_Delay(1);
+    }
+
+    // Quit waits for the threads, as the BLE GATT driver waits for its
+    // connections (BLEGATT_JoystickQuit). One still running after
+    // BLE_QUIT_WAIT_MS is left to end on its own and logs nothing more.
+    if (run) {
+        int left;
+
+        while (SDL_GetAtomicInt(&run->threads) > 0 && SDL_GetTicks() - start < BLE_QUIT_WAIT_MS) {
+            SDL_Delay(1);
+        }
+        left = SDL_GetAtomicInt(&run->threads);
+        if (left > 0) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_INPUT, "BLE Switch2 quit: %d threads still running after %d ms, left to end on their own", left,
+                         BLE_QUIT_WAIT_MS);
+            SDL_SetAtomicInt(&run->quiet, 1);
+        }
     }
     for (i = 0; i < ble.controller_count; ++i) {
         BLE_FreeController(ble.controllers[i]);
@@ -2210,11 +2955,20 @@ static void BLE_JoystickQuit(void)
     SDL_free(ble.controllers);
     ble.controllers = NULL;
     ble.controller_count = 0;
+    // A connect thread that ended gave its address back, and one left
+    // running gives nothing back after the stop (BLE_ReleaseConnect)
+    ble.connecting_count = 0;
 
     if (ble.transport) {
         SDL_BLEGATT_Quit();
         ble.transport = false;
     }
+    // A run whose threads have all ended is freed. One with a thread left
+    // running is kept, since that thread still reads it.
+    if (run && SDL_GetAtomicInt(&run->threads) == 0) {
+        SDL_free(run);
+    }
+    ble.run = NULL;
     ble.scanning = false;
     ble.initialized = false;
 }

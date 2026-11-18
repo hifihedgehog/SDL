@@ -205,6 +205,8 @@ normal and AddressSanitizer builds. `test/ble-driver` runs
 in both builds, with the Switch 2 driver against the same fake for its
 watcher check. The Switch 2 driver also runs against a scripted Switch 2
 in `testblegattswitch2.c`: genuine Joy-Con 2s and a Pro Controller on the
-unified input, Joy-Con 2 clones on the console channel, and lost links.
+unified input, Joy-Con 2 clones on the console channel, links that drop and
+come back with new objects, links that stay down, and `SDL_Quit` while a
+link is awaited or an advertisement callback runs.
 It and `testblegearvr` read the Gear VR packets from the gearvr-controller
 clone.

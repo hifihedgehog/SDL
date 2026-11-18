@@ -40,6 +40,10 @@
 
 /* The lower-level helpers of the Switch 2 driver */
 #define SDL_BLEGATT_OpenDevice          Fake_BLEGATT_OpenDevice
+#define SDL_BLEGATT_OpenSession         Fake_BLEGATT_OpenSession
+#define SDL_BLEGATT_CloseSession        Fake_BLEGATT_CloseSession
+#define SDL_BLEGATT_IsPaired            Fake_BLEGATT_IsPaired
+#define SDL_BLEGATT_IsConnected         Fake_BLEGATT_IsConnected
 #define SDL_BLEGATT_FindService         Fake_BLEGATT_FindService
 #define SDL_BLEGATT_RequestThroughput   Fake_BLEGATT_RequestThroughput
 #define SDL_BLEGATT_FindCharacteristic  Fake_BLEGATT_FindCharacteristic
@@ -47,6 +51,7 @@
 #define SDL_BLEGATT_EnableNotifications Fake_BLEGATT_EnableNotifications
 #define SDL_BLEGATT_WriteDescriptorValue Fake_BLEGATT_WriteDescriptorValue
 #define SDL_BLEGATT_AddValueHandler     Fake_BLEGATT_AddValueHandler
+#define SDL_BLEGATT_ReAddValueHandler   Fake_BLEGATT_ReAddValueHandler
 #define SDL_BLEGATT_AddStatusHandler    Fake_BLEGATT_AddStatusHandler
 
 #endif /* testblegattfake_h_ */

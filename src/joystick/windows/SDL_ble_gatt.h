@@ -132,12 +132,14 @@ extern void SDL_BLEGATT_Close(SDL_BLEGATTLink *link);
    which keeps its own connect sequence on its own connect thread. The WinRT
    interfaces are declared by their struct tags, so this header needs no WinRT
    header. Every helper that awaits blocks its thread. A NULL cancel waits for
-   the whole ceiling, as the Switch 2 driver always has. */
+   the whole ceiling. The Switch 2 driver passes its run's flag to each, so
+   SDL_Quit's stop ends its awaits within one 50 ms slice. */
 
 struct __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice;
 struct __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3;
 struct __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3;
 struct __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic;
+struct __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattSession;
 struct _GUID;
 struct EventRegistrationToken;
 
@@ -145,6 +147,7 @@ typedef struct __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice SDL_BLEG
 typedef struct __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice3 SDL_BLEGATTDevice3;
 typedef struct __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDeviceService3 SDL_BLEGATTService;
 typedef struct __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic SDL_BLEGATTCharacteristic;
+typedef struct __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattSession SDL_BLEGATTSession;
 
 /* Joins the calling worker thread to the MTA with RoInitialize. True when
    SDL_BLEGATT_QuitThread is owed. */
@@ -154,6 +157,22 @@ extern void SDL_BLEGATT_QuitThread(void);
 /* BluetoothLEDevice.FromBluetoothAddressAsync with the 20 s ceiling. NULL on
    failure. */
 extern SDL_BLEGATTDevice *SDL_BLEGATT_OpenDevice(Uint64 address, SDL_AtomicInt *cancel);
+
+/* A GattSession for the device with MaintainConnection set, best effort, the
+   session SDL_BLEGATT_Open holds. While it is held, Windows connects the
+   device again by itself after the link drops. NULL when Windows gives
+   none. */
+extern SDL_BLEGATTSession *SDL_BLEGATT_OpenSession(SDL_BLEGATTDevice *device, SDL_AtomicInt *cancel);
+
+/* Clears MaintainConnection, then closes and releases the session, as
+   SDL_BLEGATT_Close does, so Windows stops connecting the device again */
+extern void SDL_BLEGATT_CloseSession(SDL_BLEGATTSession *session);
+
+/* True when Windows holds a pairing with the device */
+extern bool SDL_BLEGATT_IsPaired(SDL_BLEGATTDevice *device);
+
+/* True when the device's ConnectionStatus reads Connected */
+extern bool SDL_BLEGATT_IsConnected(SDL_BLEGATTDevice *device);
 
 /* The uncached service lookup: up to attempts tries 500 ms apart, each try
    asking for uuids in order, until one returns Success with the service.
@@ -170,25 +189,33 @@ extern SDL_BLEGATTCharacteristic *SDL_BLEGATT_FindCharacteristic(SDL_BLEGATTServ
 
 /* Writes with response only when prefer_response is set and the
    characteristic has Write. True when the write completed within 3 s,
-   whatever its status. */
+   whatever its status. Once *cancel is set, the call writes nothing, and a
+   write in flight is canceled within one 50 ms slice. */
 extern bool SDL_BLEGATT_WriteCharacteristic(SDL_BLEGATTCharacteristic *characteristic, const Uint8 *bytes, int length,
-                                            bool prefer_response);
+                                            bool prefer_response, SDL_AtomicInt *cancel);
 
 /* Writes the descriptor to Notify. True when the write completed within
-   3 s, whatever its status. */
-extern bool SDL_BLEGATT_EnableNotifications(SDL_BLEGATTCharacteristic *characteristic);
+   3 s with Success. cancel as for SDL_BLEGATT_WriteCharacteristic. */
+extern bool SDL_BLEGATT_EnableNotifications(SDL_BLEGATTCharacteristic *characteristic, SDL_AtomicInt *cancel);
 
 /* Writes bytes to the characteristic's first descriptor with the UUID,
    looked up uncached. True when the write completed within 3 s with
-   Success. */
+   Success. cancel as for SDL_BLEGATT_WriteCharacteristic. */
 extern bool SDL_BLEGATT_WriteDescriptorValue(SDL_BLEGATTCharacteristic *characteristic, const struct _GUID *descriptor_uuid,
-                                             const Uint8 *bytes, int length);
+                                             const Uint8 *bytes, int length, SDL_AtomicInt *cancel);
 
 /* Registers a ValueChanged delegate that calls callback with userdata and
    index. Returns the delegate, which is never freed, or NULL when it cannot
-   be allocated. A delegate whose registration fails is returned too. */
+   be allocated or its registration fails, as on a characteristic of a link
+   that dropped. */
 extern void *SDL_BLEGATT_AddValueHandler(SDL_BLEGATTCharacteristic *characteristic, SDL_BLEGATT_ValueCallback callback,
                                          void *userdata, int index, struct EventRegistrationToken *token);
+
+/* Registers a delegate that SDL_BLEGATT_AddValueHandler returned on another
+   characteristic, such as one found again after the link came back, so no
+   new delegate is allocated. True when the registration succeeded. */
+extern bool SDL_BLEGATT_ReAddValueHandler(SDL_BLEGATTCharacteristic *characteristic, void *handler,
+                                          struct EventRegistrationToken *token);
 
 /* Registers a ConnectionStatusChanged delegate on a link that is already
    up, then polls the status once. *lost gets 1 whenever the status reads

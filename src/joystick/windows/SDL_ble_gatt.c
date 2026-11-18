@@ -340,7 +340,8 @@ static void SDL_BLEGATT_CancelOperation(void *async_op)
 }
 
 // Sleep for ms, in short slices when there is a flag. False when the flag was
-// set first.
+// set first. The flag comes before the clock, as in
+// SDL_BLEGATT_WaitCancelable.
 static bool SDL_BLEGATT_Delay(Uint32 ms, SDL_AtomicInt *cancel)
 {
     Uint64 start;
@@ -348,6 +349,9 @@ static bool SDL_BLEGATT_Delay(Uint32 ms, SDL_AtomicInt *cancel)
     if (!cancel) {
         SDL_Delay(ms);
         return true;
+    }
+    if (SDL_GetAtomicInt(cancel)) {
+        return false;
     }
     start = SDL_GetTicks();
     for (;;) {
@@ -445,8 +449,17 @@ static const struct
 // waits without a ceiling.
 static bool SDL_BLEGATT_WaitCancelable(SDL_Semaphore *sem, Sint32 timeout_ms, void *async_op, SDL_AtomicInt *cancel)
 {
-    const Uint64 start = SDL_GetTicks();
+    Uint64 start;
 
+    // The flag before the clock, so a wait that begins after the stop reads
+    // none: a thread that SDL_Quit has left to end on its own would start
+    // SDL's tick base and timer resolution again with SDL_GetTicks
+    // (SDL_timer.c), as SDL_blegattjoystick.c's BLEGATT_TakeEnds notes
+    if (SDL_GetAtomicInt(cancel)) {
+        SDL_BLEGATT_CancelOperation(async_op);
+        return false;
+    }
+    start = SDL_GetTicks();
     for (;;) {
         Sint32 slice = SDL_BLEGATT_CANCEL_SLICE_MS;
 
@@ -476,8 +489,7 @@ static bool SDL_BLEGATT_WaitCancelable(SDL_Semaphore *sem, Sint32 timeout_ms, vo
 // false on arm failure or timeout. With a cancel flag the wait runs in short
 // slices, and once the flag is set or the ceiling passes the operation is
 // canceled through IAsyncInfo::Cancel and the await fails. A NULL flag waits in
-// one piece and leaves the operation running at its ceiling, as the Switch 2
-// driver always has.
+// one piece and leaves the operation running at its ceiling.
 static bool SDL_BLEGATT_AwaitTimeout(void *async_op, Sint32 timeout_ms, const GUID *handler_iid, SDL_AtomicInt *cancel)
 {
     typedef HRESULT(STDMETHODCALLTYPE * put_Completed_t)(void *This, void *handler);
@@ -676,19 +688,34 @@ static bool SDL_BLEGATT_WriteValue(GattChar *characteristic, const Uint8 *bytes,
     return result;
 }
 
-bool SDL_BLEGATT_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length, bool prefer_response)
+// The Switch 2 driver's writes. Once cancel is set, nothing more goes out.
+bool SDL_BLEGATT_WriteCharacteristic(GattChar *characteristic, const Uint8 *bytes, int length, bool prefer_response, SDL_AtomicInt *cancel)
 {
-    return SDL_BLEGATT_WriteValue(characteristic, bytes, length, prefer_response, NULL, false);
+    if (cancel && SDL_GetAtomicInt(cancel)) {
+        return false;
+    }
+    return SDL_BLEGATT_WriteValue(characteristic, bytes, length, prefer_response, cancel, false);
 }
 
-// Subscribe a characteristic to notifications (register handler then write CCCD).
-bool SDL_BLEGATT_EnableNotifications(GattChar *characteristic)
+// Subscribe a characteristic to notifications (register handler then write
+// CCCD). True only when the CCCD write completed with Success, as bleak's
+// start_notify requires (bleak/backends/winrt/client.py:1040-1047 and
+// _ensure_success, :110-133, at 09e00f6). Once cancel is set, nothing more
+// goes out.
+bool SDL_BLEGATT_EnableNotifications(GattChar *characteristic, SDL_AtomicInt *cancel)
 {
     void *op = NULL;
+    GattCommStatus status = GattCommunicationStatus_Unreachable;
     bool result = false;
 
+    if (!characteristic || (cancel && SDL_GetAtomicInt(cancel))) {
+        return false;
+    }
     if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_WriteClientCharacteristicConfigurationDescriptorAsync(characteristic, GattClientCharacteristicConfigurationDescriptorValue_Notify, (void *)&op)) && op) {
-        result = SDL_BLEGATT_Await(op, &IID_AsyncStatusHandler, NULL);
+        if (SDL_BLEGATT_Await(op, &IID_AsyncStatusHandler, cancel) &&
+            SUCCEEDED(__FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCommunicationStatus_GetResults((StatusOp *)op, &status))) {
+            result = (status == GattCommunicationStatus_Success);
+        }
         ((Buffer *)op)->lpVtbl->Release((Buffer *)op);
     }
     return result;
@@ -700,8 +727,10 @@ bool SDL_BLEGATT_EnableNotifications(GattChar *characteristic)
 // IGattCharacteristic3::GetDescriptorsForUuidWithCacheModeAsync (SDK
 // windows.devices.bluetooth.genericattributeprofile.h:4257), and the first one
 // found is written with IGattDescriptor::WriteValueAsync (same header, :14874),
-// awaited as SDL_BLEGATT_EnableNotifications awaits its write.
-bool SDL_BLEGATT_WriteDescriptorValue(GattChar *characteristic, const GUID *descriptor_uuid, const Uint8 *bytes, int length)
+// awaited as SDL_BLEGATT_EnableNotifications awaits its write. Once cancel is
+// set, nothing more goes out.
+bool SDL_BLEGATT_WriteDescriptorValue(GattChar *characteristic, const GUID *descriptor_uuid, const Uint8 *bytes, int length,
+                                      SDL_AtomicInt *cancel)
 {
     GattChar3 *characteristic3 = NULL;
     __FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptorsResult *op = NULL;
@@ -709,14 +738,14 @@ bool SDL_BLEGATT_WriteDescriptorValue(GattChar *characteristic, const GUID *desc
     GattCommStatus status = GattCommunicationStatus_Unreachable;
     bool result = false;
 
-    if (!characteristic || !descriptor_uuid || !bytes || length <= 0) {
+    if (!characteristic || !descriptor_uuid || !bytes || length <= 0 || (cancel && SDL_GetAtomicInt(cancel))) {
         return false;
     }
     if (FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_QueryInterface(characteristic, &IID_GattChar3, (void **)&characteristic3)) || !characteristic3) {
         return false;
     }
     if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic3_GetDescriptorsForUuidWithCacheModeAsync(characteristic3, *descriptor_uuid, BluetoothCacheMode_Uncached, &op)) && op) {
-        if (SDL_BLEGATT_Await(op, &IID_AsyncDescriptorsHandler, NULL)) {
+        if (SDL_BLEGATT_Await(op, &IID_AsyncDescriptorsHandler, cancel)) {
             GattDescriptorsResult *found = NULL;
             if (SUCCEEDED(__FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptorsResult_GetResults(op, &found)) && found) {
                 __FIVectorView_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattDescriptor *descriptors = NULL;
@@ -742,13 +771,13 @@ bool SDL_BLEGATT_WriteDescriptorValue(GattChar *characteristic, const GUID *desc
     }
 
     {
-        Buffer *buffer = SDL_BLEGATT_BufferFromBytes(bytes, (UINT32)length);
+        Buffer *buffer = (cancel && SDL_GetAtomicInt(cancel)) ? NULL : SDL_BLEGATT_BufferFromBytes(bytes, (UINT32)length);
         StatusOp *write = NULL;
 
         status = GattCommunicationStatus_Unreachable;
         if (buffer) {
             if (SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattDescriptor_WriteValueAsync(descriptor, buffer, &write)) && write) {
-                if (SDL_BLEGATT_Await(write, &IID_AsyncStatusHandler, NULL) &&
+                if (SDL_BLEGATT_Await(write, &IID_AsyncStatusHandler, cancel) &&
                     SUCCEEDED(__FIAsyncOperation_1_Windows__CDevices__CBluetooth__CGenericAttributeProfile__CGattCommunicationStatus_GetResults(write, &status))) {
                     result = (status == GattCommunicationStatus_Success);
                 }
@@ -834,14 +863,29 @@ static SDL_BLEGATTValueHandler *SDL_BLEGATT_NewValueHandler(SDL_BLEGATT_ValueCal
     return handler;
 }
 
+// NULL when the registration fails, as on a characteristic of a link that
+// dropped (RO_E_CLOSED). A delegate that was not registered is kept, as every
+// delegate is never freed.
 void *SDL_BLEGATT_AddValueHandler(GattChar *characteristic, SDL_BLEGATT_ValueCallback callback, void *userdata, int index,
                                   EventRegistrationToken *token)
 {
     SDL_BLEGATTValueHandler *handler = SDL_BLEGATT_NewValueHandler(callback, userdata, index);
-    if (handler) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(characteristic, (void *)handler, token);
+    if (handler &&
+        FAILED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(characteristic, (void *)handler, token))) {
+        return NULL;
     }
     return handler;
+}
+
+// The same delegate on a new characteristic. A delegate is never freed and
+// counts no references (SDL_BLEGATT_ValueHandler_AddRef), so one that is
+// registered again keeps its callback and its context.
+bool SDL_BLEGATT_ReAddValueHandler(GattChar *characteristic, void *handler, EventRegistrationToken *token)
+{
+    if (!characteristic || !handler || !token) {
+        return false;
+    }
+    return SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattCharacteristic_add_ValueChanged(characteristic, (void *)handler, token));
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +980,16 @@ void *SDL_BLEGATT_AddStatusHandler(BleDevice *device, SDL_AtomicInt *lost, Event
         }
     }
     return status_handler;
+}
+
+// A read of ConnectionStatus, the poll FlexInput runs while Windows brings a
+// dropped link back (crates/joycon2/src/hub.rs:721-742 at 0905b2fe)
+bool SDL_BLEGATT_IsConnected(BleDevice *device)
+{
+    enum __x_ABI_CWindows_CDevices_CBluetooth_CBluetoothConnectionStatus status = BluetoothConnectionStatus_Disconnected;
+
+    return device && SUCCEEDED(__x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_get_ConnectionStatus(device, &status)) &&
+           status == BluetoothConnectionStatus_Connected;
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,7 +1185,7 @@ static HRESULT STDMETHODCALLTYPE SDL_BLEGATT_Received_Invoke(void *This, void *s
     // Outside every lock. A listener removed after the copy can still be
     // called once, and checks its own driver's state (SDL_ble_gatt.h).
     // The listeners run one after another on this thread. The Switch 2
-    // listener takes SDL_LockJoysticks to reserve the address of a Switch 2
+    // listener waits for the joystick lock to reserve the address of a Switch 2
     // advertisement (BLE_TryReserveConnect in SDL_ble_switch2joystick.c), so
     // while another thread holds the joystick lock, the listeners after it
     // wait as well. This known limit is left as it is: the wait only delays
@@ -1662,8 +1716,10 @@ void SDL_BLEGATT_RequestThroughput(BleDevice *device)
 // src/infrastructure/bluetooth/connection/pairing.rs:17-26: BluetoothDeviceId,
 // GattSession::FromDeviceIdAsync, SetMaintainConnection(true)). SDK
 // windows.devices.bluetooth.genericattributeprofile.h:7068 FromDeviceIdAsync,
-// :7007 put_MaintainConnection. NULL when Windows gives none.
-static GattSession *SDL_BLEGATT_OpenSession(BleDevice *device, SDL_AtomicInt *cancel)
+// :7007 put_MaintainConnection. The Switch 2 driver holds one too, since
+// Windows then connects a dropped Joy-Con 2 clone again by itself (FlexInput
+// commit d963276d6 and CHANGELOG 0.13.5). NULL when Windows gives none.
+GattSession *SDL_BLEGATT_OpenSession(BleDevice *device, SDL_AtomicInt *cancel)
 {
     BleDevice4 *device4 = NULL;
     BleDeviceId *device_id = NULL;
@@ -1733,7 +1789,7 @@ static DevicePairing2 *SDL_BLEGATT_GetPairing2(BleDevice *device)
     return pairing2;
 }
 
-static bool SDL_BLEGATT_IsPaired(BleDevice *device)
+bool SDL_BLEGATT_IsPaired(BleDevice *device)
 {
     DevicePairing *pairing = SDL_BLEGATT_GetPairing(device);
     boolean paired = FALSE;
@@ -1786,6 +1842,29 @@ static HRESULT SDL_BLEGATT_CloseObject(void *object)
         __x_ABI_CWindows_CFoundation_CIClosable_Release(closable);
     }
     return hr;
+}
+
+// MaintainConnection off, then IClosable.Close and the last Release. Returns
+// what Close returned.
+static HRESULT SDL_BLEGATT_ReleaseSession(GattSession *session)
+{
+    HRESULT hr;
+
+    __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattSession_put_MaintainConnection(session, FALSE);
+    hr = SDL_BLEGATT_CloseObject(session);
+    __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattSession_Release(session);
+    return hr;
+}
+
+void SDL_BLEGATT_CloseSession(GattSession *session)
+{
+    HRESULT hr;
+
+    if (!session) {
+        return;
+    }
+    hr = SDL_BLEGATT_ReleaseSession(session);
+    SDL_BLEGATT_LOG("BLE GATT session: MaintainConnection off, Close hr=0x%08lX", (unsigned long)hr);
 }
 
 // Removes the value delegates and releases the characteristics, then closes
@@ -2214,16 +2293,14 @@ void SDL_BLEGATT_Close(SDL_BLEGATTLink *link)
     // handlers (backends/winrt/client.py:467-481) before it closes the
     // services, the session and the device (:486-503). This path is the
     // generic driver's. The Switch 2 driver releases its objects in
-    // BLE_FreeController, which closes nothing.
+    // BLE_FreeController, which closes only its session.
     if (link->status_registered) {
         __x_ABI_CWindows_CDevices_CBluetooth_CIBluetoothLEDevice_remove_ConnectionStatusChanged(link->device, link->status_token);
         link->status_registered = false;
     }
     SDL_BLEGATT_ReleaseDiscovery(link);
     if (link->session) {
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattSession_put_MaintainConnection(link->session, FALSE);
-        session_hr = SDL_BLEGATT_CloseObject(link->session);
-        __x_ABI_CWindows_CDevices_CBluetooth_CGenericAttributeProfile_CIGattSession_Release(link->session);
+        session_hr = SDL_BLEGATT_ReleaseSession(link->session);
     }
     if (link->device) {
         device_hr = SDL_BLEGATT_CloseObject(link->device);
